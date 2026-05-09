@@ -1,40 +1,76 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, GitBranch, Hash, PauseCircle, PlayCircle, RotateCw } from "lucide-react";
+import {
+  Activity,
+  GitBranch,
+  Hash,
+  Loader2,
+  Lock,
+  PauseCircle,
+  PlayCircle,
+  RotateCw,
+  Sparkles,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Terminal } from "@/components/synthesis/terminal";
 import { TurnFeed } from "@/components/synthesis/turn-feed";
 import { SpecViewer } from "@/components/synthesis/spec-viewer";
-import { SYNTHESIS_WORKSPACE, type SynthesisTurn, type TerminalLine } from "@/lib/synthesis-data";
+import type { SynthesisTurn, TerminalLine } from "@/lib/synthesis-data";
 import type { OrchestratorTickResponse } from "@/app/api/orchestrator/tick/route";
 import { cn, formatRelative } from "@/lib/utils";
 
 const POLL_MS = 320;
 
-export function SynthesisLive({ spec }: { spec: string }) {
+type Meta = {
+  state: OrchestratorTickResponse["state"];
+  phase: string;
+  turnCount: number;
+  done: boolean;
+  driver: OrchestratorTickResponse["driver"];
+  startedAt: string | null;
+  workspace: string;
+};
+
+const INITIAL_META: Meta = {
+  state: "RUNNING",
+  phase: "Init",
+  turnCount: 0,
+  done: false,
+  driver: null,
+  startedAt: null,
+  workspace: "rental-orchestrator-hub",
+};
+
+export function SynthesisLive({
+  spec,
+  initialRunId,
+  liveAvailable,
+}: {
+  spec: string;
+  initialRunId: string | null;
+  liveAvailable: boolean;
+}) {
+  const [runId, setRunId] = useState<string | null>(initialRunId);
   const [lines, setLines] = useState<TerminalLine[]>([]);
   const [turns, setTurns] = useState<SynthesisTurn[]>([]);
   const [lineCursor, setLineCursor] = useState(0);
   const [turnCursor, setTurnCursor] = useState(0);
-  const [meta, setMeta] = useState<{
-    state: OrchestratorTickResponse["state"];
-    phase: OrchestratorTickResponse["phase"];
-    turnCount: number;
-    done: boolean;
-  }>({ state: "RUNNING", phase: "Init", turnCount: 0, done: false });
+  const [meta, setMeta] = useState<Meta>(INITIAL_META);
   const [bumpKey, setBumpKey] = useState(0);
+  const [starting, setStarting] = useState<"scripted" | "live" | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
+  // Polling effect — runs whenever runId or cursors change, until done.
   useEffect(() => {
+    if (!runId) return;
     if (meta.done) return;
     let cancelled = false;
     const t = window.setTimeout(async () => {
       try {
-        const res = await fetch(
-          `/api/orchestrator/tick?lineCursor=${lineCursor}&turnCursor=${turnCursor}`,
-          { cache: "no-store" },
-        );
+        const url = `/api/orchestrator/tick?runId=${encodeURIComponent(runId)}&lineCursor=${lineCursor}&turnCursor=${turnCursor}`;
+        const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) return;
         const body: OrchestratorTickResponse = await res.json();
         if (cancelled) return;
@@ -47,6 +83,9 @@ export function SynthesisLive({ spec }: { spec: string }) {
           phase: body.phase,
           turnCount: body.turnCount,
           done: body.done,
+          driver: body.driver,
+          startedAt: body.startedAt,
+          workspace: body.workspace,
         });
       } catch {
         // network blip — next tick will retry
@@ -56,25 +95,48 @@ export function SynthesisLive({ spec }: { spec: string }) {
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [lineCursor, turnCursor, meta.done, bumpKey]);
+  }, [runId, lineCursor, turnCursor, meta.done, bumpKey]);
 
-  const replay = () => {
-    setLines([]);
-    setTurns([]);
-    setLineCursor(0);
-    setTurnCursor(0);
-    setMeta({ state: "RUNNING", phase: "Init", turnCount: 0, done: false });
-    setBumpKey((k) => k + 1);
-  };
+  async function startRun(driver: "scripted" | "live") {
+    setStarting(driver);
+    setError(null);
+    try {
+      const res = await fetch("/api/orchestrator/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ driver }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `start failed: ${res.status}`);
+      }
+      const body = (await res.json()) as { run: { id: string } };
+      setLines([]);
+      setTurns([]);
+      setLineCursor(0);
+      setTurnCursor(0);
+      setMeta(INITIAL_META);
+      setRunId(body.run.id);
+      setBumpKey((k) => k + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to start run");
+    } finally {
+      setStarting(null);
+    }
+  }
 
   const stateBadge =
     meta.state === "COACH_APPROVED"
       ? { variant: "success" as const, label: "Coach approved" }
       : meta.state === "BLOCKED"
         ? { variant: "danger" as const, label: "Blocked" }
-        : { variant: "info" as const, label: "Loop running" };
+        : meta.state === "ERROR"
+          ? { variant: "danger" as const, label: "Error" }
+          : meta.state === "IDLE"
+            ? { variant: "muted" as const, label: "Idle" }
+            : { variant: "info" as const, label: "Loop running" };
 
-  const streaming = !meta.done;
+  const streaming = !meta.done && meta.state === "RUNNING";
 
   return (
     <div className="space-y-6">
@@ -118,19 +180,65 @@ export function SynthesisLive({ spec }: { spec: string }) {
               )}
               <span className="text-muted-foreground">{meta.phase}</span>
             </div>
-            <span className="text-[10px] text-muted-foreground">
-              started {formatRelative(SYNTHESIS_WORKSPACE.startedAt)}
-            </span>
-            <button
-              type="button"
-              onClick={replay}
-              className="ml-2 inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-[11px] text-foreground hover:bg-muted/60"
-            >
-              <RotateCw className="h-3 w-3" /> Replay
-            </button>
+            {meta.driver && (
+              <Badge variant={meta.driver === "live" ? "info" : "muted"}>
+                {meta.driver} driver
+              </Badge>
+            )}
+            {meta.startedAt && (
+              <span className="text-[10px] text-muted-foreground">
+                started {formatRelative(meta.startedAt)}
+              </span>
+            )}
           </div>
         </Card>
       </header>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => startRun("scripted")}
+          disabled={starting !== null}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted/60 disabled:opacity-50"
+        >
+          {starting === "scripted" ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <RotateCw className="h-3 w-3" />
+          )}
+          New scripted run
+        </button>
+        <button
+          type="button"
+          onClick={() => startRun("live")}
+          disabled={!liveAvailable || starting !== null}
+          title={
+            liveAvailable
+              ? "Run a real Player↔Coach loop against spec.md"
+              : "ANTHROPIC_API_KEY is not set"
+          }
+          className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+        >
+          {starting === "live" ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : liveAvailable ? (
+            <Sparkles className="h-3 w-3" />
+          ) : (
+            <Lock className="h-3 w-3" />
+          )}
+          New live run {liveAvailable ? "" : "(set ANTHROPIC_API_KEY)"}
+        </button>
+        {runId && (
+          <span className="ml-auto text-[10px] text-muted-foreground font-mono">
+            run · {runId}
+          </span>
+        )}
+      </div>
+      {error && (
+        <Card className="border-danger/40 bg-danger/10 px-4 py-3 text-xs text-[hsl(var(--danger))]">
+          {error}
+        </Card>
+      )}
 
       <div className="grid gap-6 xl:grid-cols-12">
         <Card className="xl:col-span-7 self-start">
@@ -143,7 +251,7 @@ export function SynthesisLive({ spec }: { spec: string }) {
             </div>
             <p className="text-[11px] text-muted-foreground">
               Alternating execution and validation turns for workspace
-              <span className="ml-1 font-mono text-foreground">{SYNTHESIS_WORKSPACE.name}</span>.
+              <span className="ml-1 font-mono text-foreground">{meta.workspace}</span>.
             </p>
           </CardHeader>
           <CardContent className="max-h-[720px] overflow-y-auto pr-2">

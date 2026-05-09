@@ -5,8 +5,14 @@ import { StatTile } from "@/components/stat-tile";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DEPARTMENTS, PORTFOLIO_SUMMARY } from "@/lib/mock-data";
+import { listActivity } from "@/lib/repos/activity";
+import { listPending } from "@/lib/repos/action-center";
+
+export const dynamic = "force-dynamic";
 
 export default function MissionControlPage() {
+  const events = listActivity(50);
+  const pendingApprovals = listPending().length;
   return (
     <div className="space-y-8">
       <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -53,7 +59,7 @@ export default function MissionControlPage() {
         <StatTile
           icon={GitBranch}
           label="Awaiting human"
-          value={PORTFOLIO_SUMMARY.humanApprovalsPending}
+          value={pendingApprovals}
           hint="Items in Action Center"
           accent="text-[hsl(var(--warning))]"
         />
@@ -90,7 +96,7 @@ export default function MissionControlPage() {
             </p>
           </CardHeader>
           <CardContent className="max-h-[640px] overflow-y-auto pr-2">
-            <ActivityFeed />
+            <ActivityFeed events={events} />
           </CardContent>
         </Card>
       </section>

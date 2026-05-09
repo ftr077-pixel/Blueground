@@ -1,90 +1,87 @@
 import { NextResponse } from "next/server";
 import {
-  FINAL_APPROVAL_TURN,
-  SYNTHESIS_TURNS,
-  TERMINAL_LINES,
-  type SynthesisTurn,
-  type TerminalLine,
-} from "@/lib/synthesis-data";
+  countLines,
+  countTurns,
+  getRun,
+  latestRun,
+  linesSince,
+  turnsSince,
+} from "@/lib/repos/orchestrator";
+import type { SynthesisTurn, TerminalLine } from "@/lib/synthesis-data";
 
 export const dynamic = "force-dynamic";
 
-export interface OrchestratorState {
-  state: "RUNNING" | "BLOCKED" | "COACH_APPROVED";
-  phase: "Init" | "Execution Turn" | "Validation Turn" | "Idle";
-  turnCount: number;
-  done: boolean;
-}
-
-export interface OrchestratorTickResponse extends OrchestratorState {
+export interface OrchestratorTickResponse {
+  runId: string | null;
+  driver: "scripted" | "live" | null;
   newLines: TerminalLine[];
   newTurns: SynthesisTurn[];
   lineCursor: number;
   turnCursor: number;
   totalLines: number;
   totalTurns: number;
-}
-
-const TERMINAL_BATCH = 1;
-const TURN_GATES = [4, 9, 16, 22];
-
-function phaseFor(turnCursor: number, lineCursor: number): OrchestratorState["phase"] {
-  if (lineCursor === 0 && turnCursor === 0) return "Init";
-  if (turnCursor >= SYNTHESIS_TURNS.length + 1) return "Idle";
-  const next = SYNTHESIS_TURNS[turnCursor];
-  if (!next) return "Validation Turn";
-  return next.role === "player" ? "Execution Turn" : "Validation Turn";
+  state: "RUNNING" | "BLOCKED" | "COACH_APPROVED" | "ERROR" | "IDLE";
+  phase: string;
+  turnCount: number;
+  done: boolean;
+  workspace: string;
+  startedAt: string | null;
 }
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
+  const requestedRun = url.searchParams.get("runId");
   const lineCursor = Math.max(0, Number(url.searchParams.get("lineCursor") ?? 0));
   const turnCursor = Math.max(0, Number(url.searchParams.get("turnCursor") ?? 0));
 
-  const newLines: TerminalLine[] = [];
-  const newTurns: SynthesisTurn[] = [];
-
-  const allTurns = [...SYNTHESIS_TURNS, FINAL_APPROVAL_TURN];
-
-  let nextLineCursor = lineCursor;
-  let nextTurnCursor = turnCursor;
-
-  const gate = TURN_GATES[turnCursor];
-  if (typeof gate === "number" && lineCursor < gate) {
-    const end = Math.min(gate, lineCursor + TERMINAL_BATCH);
-    newLines.push(...TERMINAL_LINES.slice(lineCursor, end));
-    nextLineCursor = end;
-  } else if (turnCursor < allTurns.length) {
-    newTurns.push(allTurns[turnCursor]);
-    nextTurnCursor = turnCursor + 1;
-  } else if (lineCursor < TERMINAL_LINES.length) {
-    const end = Math.min(TERMINAL_LINES.length, lineCursor + TERMINAL_BATCH);
-    newLines.push(...TERMINAL_LINES.slice(lineCursor, end));
-    nextLineCursor = end;
+  const run = requestedRun ? getRun(requestedRun) : latestRun();
+  if (!run) {
+    const empty: OrchestratorTickResponse = {
+      runId: null,
+      driver: null,
+      newLines: [],
+      newTurns: [],
+      lineCursor: 0,
+      turnCursor: 0,
+      totalLines: 0,
+      totalTurns: 0,
+      state: "IDLE",
+      phase: "Idle",
+      turnCount: 0,
+      done: true,
+      workspace: "rental-orchestrator-hub",
+      startedAt: null,
+    };
+    return NextResponse.json(empty);
   }
 
-  const done =
-    nextTurnCursor >= allTurns.length && nextLineCursor >= TERMINAL_LINES.length;
-  const state: OrchestratorState["state"] = done ? "COACH_APPROVED" : "RUNNING";
-  const phase: OrchestratorState["phase"] = done ? "Idle" : phaseFor(nextTurnCursor, nextLineCursor);
+  const newLines = linesSince(run.id, lineCursor);
+  const newTurns = turnsSince(run.id, turnCursor);
+  const totalLines = countLines(run.id);
+  const totalTurns = countTurns(run.id);
+  const nextLineCursor = lineCursor + newLines.length;
+  const nextTurnCursor = turnCursor + newTurns.length;
 
-  const turnCount = Math.min(
-    allTurns.length / 2,
-    Math.ceil(nextTurnCursor / 2),
-  );
+  const dbDone =
+    run.state === "COACH_APPROVED" || run.state === "BLOCKED" || run.state === "ERROR";
+  const cursorsCaught = nextLineCursor >= totalLines && nextTurnCursor >= totalTurns;
+  const done = dbDone && cursorsCaught;
 
   const body: OrchestratorTickResponse = {
+    runId: run.id,
+    driver: run.driver,
     newLines,
     newTurns,
     lineCursor: nextLineCursor,
     turnCursor: nextTurnCursor,
-    totalLines: TERMINAL_LINES.length,
-    totalTurns: allTurns.length,
-    state,
-    phase,
-    turnCount,
+    totalLines,
+    totalTurns,
+    state: run.state,
+    phase: run.phase,
+    turnCount: run.turnCount,
     done,
+    workspace: run.workspace,
+    startedAt: run.startedAt,
   };
-
   return NextResponse.json(body);
 }

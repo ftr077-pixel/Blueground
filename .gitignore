@@ -7,6 +7,7 @@ build/
 .env*.local
 .vercel
 next-env.d.ts
+data/
 .firebase/
 firebase-debug.log
 firebase-debug.*.log

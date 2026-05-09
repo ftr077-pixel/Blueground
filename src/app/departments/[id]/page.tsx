@@ -3,12 +3,13 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, CircleDot } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { PricingPanel } from "@/components/agents/pricing-panel";
 import {
-  ACTIVITY_FEED,
   DEPARTMENTS,
   type Department,
   type WorkerStatus,
 } from "@/lib/mock-data";
+import { listActivity } from "@/lib/repos/activity";
 import { cn, formatRelative } from "@/lib/utils";
 
 const STATUS_VARIANT: Record<WorkerStatus, "success" | "muted" | "warning"> = {
@@ -23,16 +24,14 @@ const STATUS_LABEL: Record<WorkerStatus, string> = {
   attention: "Needs review",
 };
 
-export function generateStaticParams() {
-  return DEPARTMENTS.map((d) => ({ id: d.id }));
-}
+export const dynamic = "force-dynamic";
 
 export default function DepartmentPage({ params }: { params: { id: string } }) {
   const dept = DEPARTMENTS.find((d) => d.id === params.id) as Department | undefined;
   if (!dept) notFound();
 
   const Icon = dept.icon;
-  const events = ACTIVITY_FEED.filter((e) => e.department === dept.id);
+  const events = listActivity(200).filter((e) => e.department === dept.id);
 
   return (
     <div className="space-y-6">
@@ -85,6 +84,8 @@ export default function DepartmentPage({ params }: { params: { id: string } }) {
           </Card>
         ))}
       </section>
+
+      {dept.id === "revenue" && <PricingPanel />}
 
       <section className="grid gap-6 xl:grid-cols-3">
         <Card className="xl:col-span-2">

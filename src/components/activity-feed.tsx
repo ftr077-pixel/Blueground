@@ -5,7 +5,7 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
-import { ACTIVITY_FEED, DEPARTMENTS, type ActivityEvent } from "@/lib/mock-data";
+import { DEPARTMENTS, type ActivityEvent } from "@/lib/mock-data";
 import { cn, formatRelative } from "@/lib/utils";
 
 const LEVEL_META: Record<
@@ -30,13 +30,18 @@ const LEVEL_META: Record<
   },
 };
 
-export function ActivityFeed() {
+export function ActivityFeed({ events }: { events: ActivityEvent[] }) {
   const deptName = (id: ActivityEvent["department"]) =>
     DEPARTMENTS.find((d) => d.id === id)?.name ?? id;
+  if (events.length === 0) {
+    return (
+      <p className="px-2 py-4 text-xs text-muted-foreground">No activity yet.</p>
+    );
+  }
   return (
     <ol className="relative space-y-3">
       <span className="absolute left-[15px] top-1 bottom-1 w-px bg-border/70" aria-hidden />
-      {ACTIVITY_FEED.map((evt) => {
+      {events.map((evt) => {
         const meta = LEVEL_META[evt.level];
         const Icon = meta.icon;
         return (
