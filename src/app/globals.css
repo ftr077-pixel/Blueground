@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 222 47% 6%;
+  --foreground: 210 40% 96%;
+  --card: 222 40% 9%;
+  --card-foreground: 210 40% 96%;
+  --muted: 217 33% 14%;
+  --muted-foreground: 215 16% 65%;
+  --border: 217 33% 17%;
+  --accent: 217 33% 17%;
+  --accent-foreground: 210 40% 96%;
+  --primary: 199 89% 53%;
+  --primary-foreground: 222 47% 6%;
+  --success: 152 76% 45%;
+  --warning: 38 92% 55%;
+  --danger: 0 84% 60%;
+  --info: 199 89% 53%;
+}
+
+html,
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
