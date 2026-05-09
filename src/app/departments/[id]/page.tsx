@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, CircleDot } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { PricingPanel } from "@/components/agents/pricing-panel";
 import {
   DEPARTMENTS,
   type Department,
@@ -83,6 +84,8 @@ export default function DepartmentPage({ params }: { params: { id: string } }) {
           </Card>
         ))}
       </section>
+
+      {dept.id === "revenue" && <PricingPanel />}
 
       <section className="grid gap-6 xl:grid-cols-3">
         <Card className="xl:col-span-2">
