@@ -24,6 +24,27 @@ export const SYNTHESIS_WORKSPACE = {
   startedAt: new Date(Date.now() - 1000 * 60 * 23).toISOString(),
 };
 
+export const FINAL_APPROVAL_TURN: SynthesisTurn = {
+  id: "t-08",
+  turn: 4,
+  role: "coach",
+  ts: new Date().toISOString(),
+  title: "Surface contract satisfied — approval issued",
+  summary:
+    "All §2 surfaces present, all §3 workers represented, all §5 escalation rules wired into the Action Center. Terminal exited 0 with 5 spec_compliance tests green.",
+  artifacts: [
+    {
+      kind: "checklist",
+      body:
+        "[x] /                 — Mission Control with stat tiles + dept cards + activity feed\n[x] /synthesis        — Player/Coach feed + live terminal + spec.md\n[x] /action-center    — Approval queue with §5 rule attribution + decisions log\n[x] /departments/[id] — Per-department drill-down for all 4 directors\n[x] §3 Workers        — 11 / 11 represented with status + last action + metric\n[x] §5 Escalation     — Pricing > ±15%, maintenance over threshold, LOI",
+    },
+    {
+      kind: "verdict",
+      body: "FINAL STATUS: COACH APPROVED",
+    },
+  ],
+};
+
 export const SYNTHESIS_TURNS: SynthesisTurn[] = [
   {
     id: "t-01",

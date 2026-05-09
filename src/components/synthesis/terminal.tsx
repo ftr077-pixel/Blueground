@@ -1,30 +1,23 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { TerminalLine } from "@/lib/synthesis-data";
 
-const TICK_MS = 320;
-const INITIAL_LINES = 6;
-
-export function Terminal({ lines }: { lines: TerminalLine[] }) {
-  const [visible, setVisible] = useState(() => Math.min(INITIAL_LINES, lines.length));
+export function Terminal({
+  lines,
+  streaming,
+}: {
+  lines: TerminalLine[];
+  streaming: boolean;
+}) {
   const scrollRef = useRef<HTMLPreElement>(null);
-
-  useEffect(() => {
-    if (visible >= lines.length) return;
-    const t = window.setTimeout(() => setVisible((v) => v + 1), TICK_MS);
-    return () => window.clearTimeout(t);
-  }, [visible, lines.length]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [visible]);
-
-  const shown = lines.slice(0, visible);
-  const streaming = visible < lines.length;
+  }, [lines.length]);
 
   return (
     <div className="rounded-xl border border-border bg-[#06090f] overflow-hidden">
@@ -59,26 +52,33 @@ export function Terminal({ lines }: { lines: TerminalLine[] }) {
         ref={scrollRef}
         className="px-3 py-3 text-[11px] leading-relaxed font-mono max-h-[480px] overflow-y-auto"
       >
-        {shown.map((l) => (
-          <div key={l.id} className="grid grid-cols-[60px_1fr] gap-3">
-            <span className="text-muted-foreground/70">{l.ts}</span>
-            <span
-              className={cn(
-                l.stream === "stderr" && "text-[hsl(var(--warning))]",
-                l.stream === "system" && "text-primary",
-                l.stream === "stdout" && "text-foreground/90",
-              )}
-            >
-              {l.text}
+        {lines.length === 0 ? (
+          <div className="text-muted-foreground/70">[orchestrator] booting sandbox…</div>
+        ) : (
+          lines.map((l) => (
+            <div key={l.id} className="grid grid-cols-[60px_1fr] gap-3">
+              <span className="text-muted-foreground/70">{l.ts}</span>
+              <span
+                className={cn(
+                  l.stream === "stderr" && "text-[hsl(var(--warning))]",
+                  l.stream === "system" && "text-primary",
+                  l.stream === "stdout" && "text-foreground/90",
+                )}
+              >
+                {l.text}
+              </span>
+            </div>
+          ))
+        )}
+        {streaming && (
+          <div className="mt-1 grid grid-cols-[60px_1fr] gap-3">
+            <span className="text-muted-foreground/70">--:--.---</span>
+            <span className="text-foreground/80">
+              ${" "}
+              <span className="inline-block h-3 w-1.5 align-baseline bg-foreground/80 animate-pulse-dot" />
             </span>
           </div>
-        ))}
-        <div className="mt-1 grid grid-cols-[60px_1fr] gap-3">
-          <span className="text-muted-foreground/70">--:--.---</span>
-          <span className="text-foreground/80">
-            $ <span className="inline-block h-3 w-1.5 align-baseline bg-foreground/80 animate-pulse-dot" />
-          </span>
-        </div>
+        )}
       </pre>
     </div>
   );
