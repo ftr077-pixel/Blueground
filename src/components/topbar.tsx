@@ -1,4 +1,11 @@
+"use client";
+
 import { Bell, Search } from "lucide-react";
+
+function openPalette() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event("rohub:open-palette"));
+}
 
 export function Topbar() {
   return (
@@ -10,14 +17,15 @@ export function Topbar() {
       </div>
 
       <div className="ml-auto flex items-center gap-3">
-        <div className="hidden md:flex items-center gap-2 rounded-md border border-border bg-card/60 px-2.5 py-1.5 text-xs text-muted-foreground w-72">
+        <button
+          type="button"
+          onClick={openPalette}
+          className="hidden md:flex items-center gap-2 rounded-md border border-border bg-card/60 px-2.5 py-1.5 text-xs text-muted-foreground w-72 hover:bg-muted/40"
+        >
           <Search className="h-3.5 w-3.5" />
-          <input
-            placeholder="Search units, agents, tickets…"
-            className="flex-1 bg-transparent placeholder:text-muted-foreground/70 focus:outline-none"
-          />
+          <span className="flex-1 text-left">Search units, agents, tickets…</span>
           <kbd className="rounded border border-border px-1 text-[10px]">⌘K</kbd>
-        </div>
+        </button>
         <button
           aria-label="Notifications"
           className="relative h-9 w-9 grid place-items-center rounded-md border border-border bg-card/40 hover:bg-muted/40"
