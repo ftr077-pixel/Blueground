@@ -7,7 +7,6 @@ import {
   Banknote,
   Boxes,
   ConciergeBell,
-  GitBranch,
   LayoutDashboard,
   Radar,
   ShieldAlert,
@@ -17,7 +16,6 @@ import { cn } from "@/lib/utils";
 
 const NAV_PRIMARY = [
   { href: "/", label: "Mission Control", icon: LayoutDashboard },
-  { href: "/synthesis", label: "Synthesis View", icon: GitBranch },
   { href: "/visibility", label: "Search Visibility", icon: Radar },
   { href: "/action-center", label: "Action Center", icon: ShieldAlert },
 ];
@@ -67,7 +65,7 @@ export function Sidebar() {
             </span>
           </div>
           <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
-            Dialectical loop · Player + Coach synthesis engaged.
+            Autonomous departments · agents monitoring live.
           </p>
         </div>
       </div>
