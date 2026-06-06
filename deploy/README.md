@@ -8,7 +8,8 @@ login. `setup-box.sh` does all of it.
 
 1. **An Ubuntu box** (Vultr, 22.04/24.04). Cheapest plan is fine.
 2. **A residential proxy** — e.g. IPRoyal / Decodo. Datacenter IPs get blocked by
-   Airbnb, so this is required. You'll get a `http://user:pass@host:port` URL.
+   Airbnb, so it's required for **live scanning**. You can skip it for a
+   dashboard-only first run and add it later. You'll get a `http://user:pass@host:port` URL.
 3. **A GitHub token** to clone this private repo: create a fine-grained PAT
    (Contents: Read-only), then your `REPO_URL` is
    `https://<TOKEN>@github.com/ftr077-pixel/Blueground.git`.
