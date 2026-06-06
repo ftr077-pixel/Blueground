@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Radar, RefreshCw, Settings } from "lucide-react";
+import { Loader2, Play, Radar, RefreshCw, Settings } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatRelative } from "@/lib/utils";
@@ -56,6 +56,8 @@ export function VisibilityPanel() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [scanRunning, setScanRunning] = useState(false);
+  const [scanMsg, setScanMsg] = useState<string | null>(null);
 
   async function refresh() {
     try {
@@ -71,17 +73,77 @@ export function VisibilityPanel() {
     }
   }
 
+  async function loadScanState(): Promise<boolean> {
+    try {
+      const res = await fetch("/api/visibility/scan", { cache: "no-store" });
+      const s = (await res.json()) as { running: boolean; message: string | null };
+      setScanRunning(s.running);
+      setScanMsg(s.message);
+      return s.running;
+    } catch {
+      return false;
+    }
+  }
+
   useEffect(() => {
     refresh();
+    loadScanState();
   }, []);
 
-  const manageLink = (
-    <Link
-      href="/visibility/manage"
-      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card/60 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
-    >
-      <Settings className="h-3.5 w-3.5" /> Manage listings &amp; searches
-    </Link>
+  // While a scan is running, poll until it finishes, then refresh the data.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(async () => {
+      const stillRunning = await loadScanState();
+      if (!stillRunning) {
+        clearInterval(t);
+        refresh();
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [scanRunning]);
+
+  async function runScan() {
+    setScanMsg(null);
+    try {
+      const res = await fetch("/api/visibility/scan", { method: "POST" });
+      if (!res.ok) {
+        const e = (await res.json().catch(() => ({}))) as { error?: string };
+        setScanMsg(e.error || `could not start scan (${res.status})`);
+        return;
+      }
+      setScanRunning(true);
+      setScanMsg("scanning… this takes a few minutes");
+    } catch {
+      setScanMsg("could not start scan");
+    }
+  }
+
+  const topBar = (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={runScan}
+          disabled={scanRunning}
+          className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-60"
+        >
+          {scanRunning ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+          {scanRunning ? "Scanning…" : "Run scan now"}
+        </button>
+        <Link
+          href="/visibility/manage"
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card/60 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
+        >
+          <Settings className="h-3.5 w-3.5" /> Manage listings &amp; searches
+        </Link>
+      </div>
+      {scanMsg && <p className="text-[11px] text-muted-foreground">{scanMsg}</p>}
+    </div>
   );
 
   if (loading) return <p className="text-xs text-muted-foreground">Loading visibility…</p>;
@@ -90,11 +152,12 @@ export function VisibilityPanel() {
   if (listings.length === 0) {
     return (
       <div className="space-y-4">
-        <div className="flex justify-end">{manageLink}</div>
+        {topBar}
         <Card>
           <CardContent className="p-5 text-xs text-muted-foreground">
             No listings tracked yet. Open <span className="text-foreground">Manage</span> to add a
-            search profile and your listings — the scanner box fills in rank history from there.
+            search profile and your listings, then hit <span className="text-foreground">Run scan
+            now</span>.
           </CardContent>
         </Card>
       </div>
@@ -103,7 +166,7 @@ export function VisibilityPanel() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-end">{manageLink}</div>
+      {topBar}
       {profiles.map((p) => {
         const rows = listings.filter((l) => l.profileId === p.id);
         if (rows.length === 0) return null;

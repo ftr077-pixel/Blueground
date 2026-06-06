@@ -335,26 +335,39 @@ export function deleteListing(id: string): void {
   tx();
 }
 
-// Parse pasted Airbnb IDs / room URLs (one per line), optional label after the id.
+// Parse pasted listings — one per line. Handles plain Airbnb IDs, room URLs, and
+// CSV rows (e.g. exported from a sheet): it finds the id/url cell and uses another
+// cell as the label. A header row (no id) is skipped automatically.
 export function parseListingLines(text: string): Array<{ airbnbId: string; label?: string }> {
   const out: Array<{ airbnbId: string; label?: string }> = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
+    const cells = line
+      .split(/[,\t;]/)
+      .map((c) => c.trim().replace(/^"(.*)"$/, "$1").trim());
+
     let id: string | null = null;
-    const roomMatch = line.match(/rooms\/(\d+)/);
-    if (roomMatch) {
-      id = roomMatch[1];
-    } else {
-      const digits = line.match(/\d{6,}/);
-      if (digits) id = digits[0];
+    for (const c of cells) {
+      const m = c.match(/rooms\/(\d+)/);
+      if (m) {
+        id = m[1];
+        break;
+      }
+    }
+    if (!id) {
+      for (const c of cells) {
+        if (/^\d{6,}$/.test(c)) {
+          id = c;
+          break;
+        }
+      }
     }
     if (!id) continue;
-    const label = line
-      .replace(/https?:\/\/\S+/g, "")
-      .replace(id, "")
-      .replace(/^[\s,|–-]+/, "")
-      .trim();
+
+    const label = cells.find(
+      (c) => c && !c.includes("airbnb.") && !c.includes("rooms/") && !/^\d{4,}$/.test(c),
+    );
     out.push({ airbnbId: id, label: label || undefined });
   }
   return out;
@@ -493,4 +506,54 @@ export function getScanConfig() {
           minNightsCheckedAt: l.minNightsCheckedAt,
         })),
     }));
+}
+
+// ---------------------------------------------------------------- settings
+export function getSetting(key: string): string | null {
+  const db = getDb();
+  const r = db.prepare("SELECT value FROM meta WHERE key = ?").get(`setting:${key}`) as
+    | { value: string }
+    | undefined;
+  return r?.value ?? null;
+}
+
+export function setSetting(key: string, value: string): void {
+  const db = getDb();
+  db.prepare(
+    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  ).run(`setting:${key}`, value);
+}
+
+// ---------------------------------------------------------------- scan state
+export interface ScanState {
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  message: string | null;
+}
+
+export function getScanState(): ScanState {
+  const started = getSetting("scan_running");
+  let running = !!started;
+  if (started) {
+    const age = Date.now() - new Date(started).getTime();
+    if (Number.isNaN(age) || age > 30 * 60 * 1000) running = false; // stale-run guard
+  }
+  return {
+    running,
+    startedAt: started || null,
+    finishedAt: getSetting("scan_finished_at"),
+    message: getSetting("scan_message"),
+  };
+}
+
+export function markScanStarted(): void {
+  setSetting("scan_running", new Date().toISOString());
+  setSetting("scan_message", "scanning…");
+}
+
+export function markScanFinished(message: string): void {
+  setSetting("scan_running", "");
+  setSetting("scan_finished_at", new Date().toISOString());
+  setSetting("scan_message", message);
 }
