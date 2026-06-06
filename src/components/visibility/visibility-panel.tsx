@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  BarChart3,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -206,12 +207,20 @@ export function VisibilityPanel() {
             </button>
           )}
         </div>
-        <Link
-          href="/visibility/manage"
-          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
-        >
-          <Settings className="h-3.5 w-3.5" /> Manage
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/visibility/analytics"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
+          >
+            <BarChart3 className="h-3.5 w-3.5" /> Analytics
+          </Link>
+          <Link
+            href="/visibility/manage"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
+          >
+            <Settings className="h-3.5 w-3.5" /> Manage
+          </Link>
+        </div>
       </div>
       {scanMsg && <p className="text-[11px] text-muted-foreground">{scanMsg}</p>}
     </div>
@@ -384,7 +393,13 @@ function ListingRows({
           <input type="checkbox" checked={selected} onChange={onSelect} aria-label={`select ${l.label}`} />
         </td>
         <td className="px-3 py-2">
-          <div className="font-medium">{l.label}</div>
+          <Link
+            href={`/visibility/listing/${l.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="font-medium hover:text-primary"
+          >
+            {l.label}
+          </Link>
           <div className="text-[10px] text-muted-foreground">
             {l.airbnbId}
             {l.guests != null && ` · ${l.guests} guests`}
