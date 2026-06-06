@@ -224,6 +224,7 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
   ensureColumn(db, "listing_snapshots", "available", "INTEGER");
+  ensureColumn(db, "search_profiles", "date_mode", "TEXT");
 }
 
 function seed(db: Database.Database) {

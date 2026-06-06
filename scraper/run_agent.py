@@ -141,6 +141,28 @@ def window_price(cal, check_in):
     return info.get("price") if info else None
 
 
+def first_available_window(cal, nights, horizon_days=180):
+    """Earliest check-in (from tomorrow) with `nights` consecutive bookable nights
+    that also satisfies the min-stay at that date. None if none within the horizon."""
+    today = datetime.date.today()
+    for off in range(1, horizon_days):
+        d0 = today + datetime.timedelta(days=off)
+        ok = True
+        for i in range(nights):
+            info = cal.get((d0 + datetime.timedelta(days=i)).isoformat())
+            if info is None or not info.get("available"):
+                ok = False
+                break
+            if i == 0:
+                mn = info.get("min")
+                if mn is not None and nights < mn:
+                    ok = False
+                    break
+        if ok:
+            return d0.isoformat()
+    return None
+
+
 def result_price(r):
     price = r.get("price", {}) if isinstance(r, dict) else {}
     for block in ("total", "unit"):
@@ -194,6 +216,7 @@ def scan_profile(profile):
     stay_nights = profile.get("stayNights", [])
     profile_guests = profile.get("guests", 2)
     profile_dates = profile.get("startDates", [])
+    date_mode = profile.get("dateMode", "fixed")
 
     print(f"[{profile['id']}] {profile.get('label')} -- {len(listings)} listings")
 
@@ -232,22 +255,40 @@ def scan_profile(profile):
     for l in listings:
         g = eff_guests(l)
         cal = cals.get(l["id"], {})
-        for d in eff_dates(l):
+        if date_mode == "first_available":
+            mins = [v["min"] for v in cal.values() if v.get("min") is not None]
+            repmin = min(mins) if mins else (l.get("minNights") or MIN_NIGHTS_FALLBACK)
             for n in stay_nights:
-                req = min_for(l, d)
-                if n >= req:
+                d = first_available_window(cal, n)
+                if d:
                     searches.setdefault((g, d, n), []).append(l)
                 else:
                     snapshots.append({
                         "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
                         "stayLabel": stay_label(n), "nights": n,
-                        "checkIn": d, "checkOut": add_nights(d, n),
-                        "eligible": False, "minNights": req,
-                        "available": window_available(cal, d, n),
-                        "found": False, "page": None, "position": None,
-                        "rank": None, "total": None,
-                        "price": window_price(cal, d), "currency": currency,
+                        "checkIn": "", "checkOut": "",
+                        "eligible": n >= repmin, "minNights": repmin,
+                        "available": False, "found": False,
+                        "page": None, "position": None, "rank": None, "total": None,
+                        "price": None, "currency": currency,
                     })
+        else:
+            for d in eff_dates(l):
+                for n in stay_nights:
+                    req = min_for(l, d)
+                    if n >= req:
+                        searches.setdefault((g, d, n), []).append(l)
+                    else:
+                        snapshots.append({
+                            "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
+                            "stayLabel": stay_label(n), "nights": n,
+                            "checkIn": d, "checkOut": add_nights(d, n),
+                            "eligible": False, "minNights": req,
+                            "available": window_available(cal, d, n),
+                            "found": False, "page": None, "position": None,
+                            "rank": None, "total": None,
+                            "price": window_price(cal, d), "currency": currency,
+                        })
 
     print(f"  {len(searches)} unique searches (batched by guests + date + stay)")
     found_total = 0

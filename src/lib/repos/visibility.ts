@@ -15,6 +15,7 @@ export interface SearchProfile {
   zoom: number;
   stayNights: number[];
   startDates: string[];
+  dateMode: string;
   active: boolean;
   createdAt: string;
   lastRunAt: string | null;
@@ -71,6 +72,7 @@ interface ProfileSql {
   zoom: number;
   stay_nights: string;
   start_dates: string;
+  date_mode: string | null;
   active: number;
   created_at: string;
   last_run_at: string | null;
@@ -128,6 +130,7 @@ function rowToProfile(r: ProfileSql): SearchProfile {
     zoom: r.zoom,
     stayNights: JSON.parse(r.stay_nights) as number[],
     startDates: JSON.parse(r.start_dates) as string[],
+    dateMode: r.date_mode || "fixed",
     active: !!r.active,
     createdAt: r.created_at,
     lastRunAt: r.last_run_at,
@@ -189,6 +192,7 @@ export interface ProfileInput {
   zoom?: number;
   stayNights?: number[];
   startDates?: string[];
+  dateMode?: string;
   active?: boolean;
 }
 
@@ -210,9 +214,9 @@ export function createProfile(input: ProfileInput): SearchProfile {
   const id = "prof-" + randomUUID().slice(0, 8);
   db.prepare(
     `INSERT INTO search_profiles
-      (id, label, platform, guests, currency, sw_lat, sw_lng, ne_lat, ne_lng, zoom, stay_nights, start_dates, active, created_at, last_run_at)
+      (id, label, platform, guests, currency, sw_lat, sw_lng, ne_lat, ne_lng, zoom, stay_nights, start_dates, date_mode, active, created_at, last_run_at)
      VALUES
-      (@id, @label, @platform, @guests, @currency, @sw_lat, @sw_lng, @ne_lat, @ne_lng, @zoom, @stay_nights, @start_dates, @active, @created_at, NULL)`,
+      (@id, @label, @platform, @guests, @currency, @sw_lat, @sw_lng, @ne_lat, @ne_lng, @zoom, @stay_nights, @start_dates, @date_mode, @active, @created_at, NULL)`,
   ).run({
     id,
     label: input.label,
@@ -226,6 +230,7 @@ export function createProfile(input: ProfileInput): SearchProfile {
     zoom: input.zoom ?? 14,
     stay_nights: JSON.stringify(input.stayNights ?? [7, 14, 30]),
     start_dates: JSON.stringify(input.startDates ?? []),
+    date_mode: input.dateMode ?? "fixed",
     active: input.active === false ? 0 : 1,
     created_at: new Date().toISOString(),
   });
@@ -239,7 +244,7 @@ export function updateProfile(id: string, patch: Partial<ProfileInput>): void {
   db.prepare(
     `UPDATE search_profiles SET label=@label, platform=@platform, guests=@guests, currency=@currency,
        sw_lat=@sw_lat, sw_lng=@sw_lng, ne_lat=@ne_lat, ne_lng=@ne_lng, zoom=@zoom,
-       stay_nights=@stay_nights, start_dates=@start_dates, active=@active WHERE id=@id`,
+       stay_nights=@stay_nights, start_dates=@start_dates, date_mode=@date_mode, active=@active WHERE id=@id`,
   ).run({
     id,
     label: patch.label ?? cur.label,
@@ -253,6 +258,7 @@ export function updateProfile(id: string, patch: Partial<ProfileInput>): void {
     zoom: patch.zoom ?? cur.zoom,
     stay_nights: JSON.stringify(patch.stayNights ?? cur.stayNights),
     start_dates: JSON.stringify(patch.startDates ?? cur.startDates),
+    date_mode: patch.dateMode ?? cur.dateMode,
     active: (patch.active ?? cur.active) ? 1 : 0,
   });
 }
@@ -523,6 +529,7 @@ export function getScanConfig() {
       box: { swLat: p.swLat, swLng: p.swLng, neLat: p.neLat, neLng: p.neLng, zoom: p.zoom },
       stayNights: p.stayNights,
       startDates: p.startDates,
+      dateMode: p.dateMode,
       listings: listListingsByProfile(p.id)
         .filter((l) => l.active)
         .map((l) => ({
