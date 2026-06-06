@@ -223,6 +223,7 @@ function init(db: Database.Database) {
   // Migrations for DBs created before these columns existed.
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
+  ensureColumn(db, "listing_snapshots", "available", "INTEGER");
 }
 
 function seed(db: Database.Database) {
