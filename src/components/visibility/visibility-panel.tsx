@@ -91,6 +91,7 @@ export function VisibilityPanel() {
   const [scanRunning, setScanRunning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   async function refresh() {
     try {
@@ -138,7 +139,11 @@ export function VisibilityPanel() {
   async function runScan() {
     setScanMsg(null);
     try {
-      const res = await fetch("/api/visibility/scan", { method: "POST" });
+      const res = await fetch("/api/visibility/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listingIds: selected.size ? Array.from(selected) : [] }),
+      });
       if (!res.ok) {
         const e = (await res.json().catch(() => ({}))) as { error?: string };
         setScanMsg(e.error || `could not start scan (${res.status})`);
@@ -160,22 +165,46 @@ export function VisibilityPanel() {
     });
   }
 
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+
   const topBar = (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={runScan}
-          disabled={scanRunning}
-          className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-60"
-        >
-          {scanRunning ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Play className="h-3.5 w-3.5" />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={runScan}
+            disabled={scanRunning}
+            className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-60"
+          >
+            {scanRunning ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Play className="h-3.5 w-3.5" />
+            )}
+            {scanRunning
+              ? "Scanning…"
+              : selected.size
+                ? `Run scan · ${selected.size} selected`
+                : "Run scan · all"}
+          </button>
+          {selected.size > 0 && !scanRunning && (
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              clear
+            </button>
           )}
-          {scanRunning ? "Scanning…" : "Run scan now"}
-        </button>
+        </div>
         <Link
           href="/visibility/manage"
           className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
@@ -264,6 +293,22 @@ export function VisibilityPanel() {
                 <table className="w-full text-xs">
                   <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                     <tr>
+                      <th className="px-2 py-2">
+                        <input
+                          type="checkbox"
+                          aria-label="select all in profile"
+                          checked={rows.length > 0 && rows.every((r) => selected.has(r.l.id))}
+                          onChange={(e) =>
+                            setSelected((prev) => {
+                              const n = new Set(prev);
+                              rows.forEach((r) =>
+                                e.target.checked ? n.add(r.l.id) : n.delete(r.l.id),
+                              );
+                              return n;
+                            })
+                          }
+                        />
+                      </th>
                       <th className="px-3 py-2 text-left">Listing</th>
                       <th className="px-3 py-2 text-left">Available?</th>
                       <th className="px-3 py-2 text-left">Position</th>
@@ -275,7 +320,15 @@ export function VisibilityPanel() {
                     {rows.map(({ l, v }) => {
                       const isOpen = open.has(l.id);
                       return (
-                        <ListingRows key={l.id} l={l} v={v} isOpen={isOpen} onToggle={() => toggle(l.id)} />
+                        <ListingRows
+                          key={l.id}
+                          l={l}
+                          v={v}
+                          isOpen={isOpen}
+                          onToggle={() => toggle(l.id)}
+                          selected={selected.has(l.id)}
+                          onSelect={() => toggleSelect(l.id)}
+                        />
                       );
                     })}
                   </tbody>
@@ -310,11 +363,15 @@ function ListingRows({
   v,
   isOpen,
   onToggle,
+  selected,
+  onSelect,
 }: {
   l: Listing;
   v: ReturnType<typeof listingView>;
   isOpen: boolean;
   onToggle: () => void;
+  selected: boolean;
+  onSelect: () => void;
 }) {
   return (
     <>
@@ -322,6 +379,9 @@ function ListingRows({
         className="border-t border-border/60 cursor-pointer hover:bg-muted/30"
         onClick={onToggle}
       >
+        <td className="px-2 py-2" onClick={(e) => e.stopPropagation()}>
+          <input type="checkbox" checked={selected} onChange={onSelect} aria-label={`select ${l.label}`} />
+        </td>
         <td className="px-3 py-2">
           <div className="font-medium">{l.label}</div>
           <div className="text-[10px] text-muted-foreground">
@@ -342,7 +402,7 @@ function ListingRows({
       </tr>
       {isOpen && (
         <tr className="border-t border-border/40 bg-background/40">
-          <td colSpan={5} className="px-3 py-2">
+          <td colSpan={6} className="px-3 py-2">
             {l.latest.length === 0 ? (
               <p className="text-[11px] text-muted-foreground">No scan data yet.</p>
             ) : (

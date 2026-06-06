@@ -187,6 +187,7 @@ export function ManagePanel() {
   const [pDates, setPDates] = useState("");
   const [pBox, setPBox] = useState("32.04,34.74,32.12,34.83");
   const [pZoom, setPZoom] = useState("14");
+  const [pDateMode, setPDateMode] = useState("fixed");
 
   async function addProfile() {
     const parts = pBox.split(",").map((s) => parseFloat(s.trim()));
@@ -205,6 +206,7 @@ export function ManagePanel() {
       neLat: parts[2],
       neLng: parts[3],
       zoom: parseInt(pZoom, 10) || 14,
+      dateMode: pDateMode,
     });
     setPLabel("");
     setPDates("");
@@ -279,19 +281,18 @@ export function ManagePanel() {
                     default {p.guests} guests · {p.currency} · stays {p.stayNights.join("/")}n ·{" "}
                     {p.startDates.length} date{p.startDates.length === 1 ? "" : "s"}
                   </span>
-                  <button
-                    type="button"
+                  <select
+                    value={p.dateMode}
                     disabled={busy}
-                    onClick={() =>
-                      call(`/api/visibility/profiles/${p.id}`, "PATCH", {
-                        dateMode: p.dateMode === "first_available" ? "fixed" : "first_available",
-                      })
+                    onChange={(e) =>
+                      call(`/api/visibility/profiles/${p.id}`, "PATCH", { dateMode: e.target.value })
                     }
-                    className="rounded-md border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-                    title="How check-in dates are chosen"
+                    className="rounded-md border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                    title="How check-in dates are chosen for this profile"
                   >
-                    dates: {p.dateMode === "first_available" ? "first-available" : "fixed"}
-                  </button>
+                    <option value="fixed">dates: fixed</option>
+                    <option value="first_available">dates: first-available</option>
+                  </select>
                   <button
                     type="button"
                     disabled={busy}
@@ -321,6 +322,10 @@ export function ManagePanel() {
               <input className={input} placeholder="Default check-in dates (2026-08-01,2026-09-01)" value={pDates} onChange={(e) => setPDates(e.target.value)} />
               <input className={input} placeholder="Zoom (14)" value={pZoom} onChange={(e) => setPZoom(e.target.value)} />
               <input className={`${input} sm:col-span-2 lg:col-span-3`} placeholder="Search box: swLat,swLng,neLat,neLng" value={pBox} onChange={(e) => setPBox(e.target.value)} />
+              <select className={input} value={pDateMode} onChange={(e) => setPDateMode(e.target.value)}>
+                <option value="fixed">Date strategy: fixed dates</option>
+                <option value="first_available">Date strategy: first available</option>
+              </select>
             </div>
             <button type="button" disabled={busy} onClick={addProfile} className={`${btn} mt-2`}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
