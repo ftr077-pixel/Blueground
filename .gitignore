@@ -12,3 +12,9 @@ data/
 firebase-debug.log
 firebase-debug.*.log
 .firebaserc.local
+
+# python (scraper)
+__pycache__/
+*.pyc
+.venv/
+scraper/.venv/
