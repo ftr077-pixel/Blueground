@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { ACTIVITY_FEED, DEPARTMENTS } from "@/lib/mock-data";
 import { APPROVAL_QUEUE } from "@/lib/synthesis-data";
+import { randomUUID } from "node:crypto";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "orchestrator.db");
@@ -105,6 +106,49 @@ function init(db: Database.Database) {
       text          TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_lines_run_seq ON orchestrator_lines(run_id, seq);
+
+    CREATE TABLE IF NOT EXISTS tracked_searches (
+      id            TEXT PRIMARY KEY,
+      listing_id    TEXT NOT NULL,
+      label         TEXT NOT NULL,
+      platform      TEXT NOT NULL DEFAULT 'Airbnb',
+      unit_id       TEXT,
+      guests        INTEGER NOT NULL DEFAULT 2,
+      currency      TEXT NOT NULL DEFAULT 'ILS',
+      sw_lat        REAL NOT NULL,
+      sw_lng        REAL NOT NULL,
+      ne_lat        REAL NOT NULL,
+      ne_lng        REAL NOT NULL,
+      zoom          INTEGER NOT NULL DEFAULT 14,
+      stay_nights   TEXT NOT NULL,
+      start_dates   TEXT NOT NULL,
+      min_nights    INTEGER,
+      active        INTEGER NOT NULL DEFAULT 1,
+      created_at    TEXT NOT NULL,
+      last_run_at   TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS rank_snapshots (
+      id            TEXT PRIMARY KEY,
+      search_id     TEXT NOT NULL REFERENCES tracked_searches(id),
+      listing_id    TEXT NOT NULL,
+      run_id        TEXT NOT NULL,
+      ts            TEXT NOT NULL,
+      stay_label    TEXT NOT NULL,
+      nights        INTEGER NOT NULL,
+      check_in      TEXT NOT NULL,
+      check_out     TEXT NOT NULL,
+      eligible      INTEGER NOT NULL,
+      min_nights    INTEGER,
+      found         INTEGER NOT NULL,
+      page          INTEGER,
+      position      INTEGER,
+      rank          INTEGER,
+      total         INTEGER,
+      price         REAL,
+      currency      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_snapshots_search_ts ON rank_snapshots(search_id, ts DESC);
 
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
@@ -230,12 +274,89 @@ export const SEED_UNITS = [
   },
 ];
 
+function seedVisibility(db: Database.Database) {
+  const seeded = db
+    .prepare("SELECT value FROM meta WHERE key = 'seeded_visibility'")
+    .get() as { value: string } | undefined;
+  if (seeded?.value === "v1") return;
+
+  // One tracked search: the listing + dates we proved the scraper against.
+  const search = {
+    id: "ts-portmamad",
+    listing_id: "1602229503214826484",
+    label: "Tel Aviv Port · Mamad High-End Balcony",
+    platform: "Airbnb",
+    unit_id: null as string | null,
+    guests: 2,
+    currency: "ILS",
+    sw_lat: 32.04,
+    sw_lng: 34.74,
+    ne_lat: 32.12,
+    ne_lng: 34.83,
+    zoom: 14,
+    stay_nights: JSON.stringify([7, 14, 30]),
+    start_dates: JSON.stringify([
+      "2026-08-01",
+      "2026-08-08",
+      "2026-08-15",
+      "2026-08-22",
+      "2026-09-01",
+    ]),
+    min_nights: 30,
+    active: 1,
+    created_at: new Date().toISOString(),
+    last_run_at: "2026-06-06T09:00:00.000Z",
+  };
+
+  // The real data point captured during the scraper proof (Aug 1 check-in).
+  const runId = "seed-proof-run";
+  const ts = "2026-06-06T09:00:00.000Z";
+  const snapshots = [
+    { stay_label: "1 week", nights: 7, check_in: "2026-08-01", check_out: "2026-08-08",
+      eligible: 0, min_nights: 30, found: 0, page: null, position: null, rank: null, total: 280, price: null, currency: "ILS" },
+    { stay_label: "2 weeks", nights: 14, check_in: "2026-08-01", check_out: "2026-08-15",
+      eligible: 0, min_nights: 30, found: 0, page: null, position: null, rank: null, total: 280, price: null, currency: "ILS" },
+    { stay_label: "1 month", nights: 30, check_in: "2026-08-01", check_out: "2026-08-31",
+      eligible: 1, min_nights: 30, found: 1, page: 3, position: 15, rank: 51, total: 280, price: 29783, currency: "ILS" },
+  ];
+
+  const insertSearch = db.prepare(`
+    INSERT INTO tracked_searches
+      (id, listing_id, label, platform, unit_id, guests, currency, sw_lat, sw_lng, ne_lat, ne_lng, zoom, stay_nights, start_dates, min_nights, active, created_at, last_run_at)
+    VALUES
+      (@id, @listing_id, @label, @platform, @unit_id, @guests, @currency, @sw_lat, @sw_lng, @ne_lat, @ne_lng, @zoom, @stay_nights, @start_dates, @min_nights, @active, @created_at, @last_run_at)
+  `);
+  const insertSnap = db.prepare(`
+    INSERT INTO rank_snapshots
+      (id, search_id, listing_id, run_id, ts, stay_label, nights, check_in, check_out, eligible, min_nights, found, page, position, rank, total, price, currency)
+    VALUES
+      (@id, @search_id, @listing_id, @run_id, @ts, @stay_label, @nights, @check_in, @check_out, @eligible, @min_nights, @found, @page, @position, @rank, @total, @price, @currency)
+  `);
+
+  const tx = db.transaction(() => {
+    insertSearch.run(search);
+    for (const s of snapshots) {
+      insertSnap.run({
+        id: randomUUID(),
+        search_id: search.id,
+        listing_id: search.listing_id,
+        run_id: runId,
+        ts,
+        ...s,
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_visibility', 'v1')").run();
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (global.__rohubDb) return global.__rohubDb;
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   const db = new Database(DB_PATH);
   init(db);
   seed(db);
+  seedVisibility(db);
   global.__rohubDb = db;
   return db;
 }
