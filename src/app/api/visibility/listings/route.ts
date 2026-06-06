@@ -8,6 +8,8 @@ interface ListingBody {
   airbnbId?: string;
   label?: string;
   bulk?: string;
+  guests?: number | null;
+  startDates?: string[] | null;
 }
 
 export async function GET() {
@@ -30,6 +32,8 @@ export async function POST(req: Request) {
     airbnbId: String(body.airbnbId).trim(),
     label: body.label,
     profileId: body.profileId,
+    guests: body.guests ?? null,
+    startDates: body.startDates ?? null,
   });
   return NextResponse.json(listing, { status: 201 });
 }

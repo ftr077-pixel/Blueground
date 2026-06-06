@@ -27,6 +27,8 @@ export interface TrackedListing {
   platform: string;
   profileId: string;
   unitId: string | null;
+  guests: number | null; // per-apartment override; null = use profile default
+  startDates: string[] | null; // per-apartment override; null = use profile dates
   minNights: number | null;
   minNightsCheckedAt: string | null;
   active: boolean;
@@ -80,6 +82,8 @@ interface ListingSql {
   platform: string;
   profile_id: string;
   unit_id: string | null;
+  guests: number | null;
+  start_dates: string | null;
   min_nights: number | null;
   min_nights_checked_at: string | null;
   active: number;
@@ -136,6 +140,8 @@ function rowToListing(r: ListingSql): TrackedListing {
     platform: r.platform,
     profileId: r.profile_id,
     unitId: r.unit_id,
+    guests: r.guests,
+    startDates: r.start_dates ? (JSON.parse(r.start_dates) as string[]) : null,
     minNights: r.min_nights,
     minNightsCheckedAt: r.min_nights_checked_at,
     active: !!r.active,
@@ -265,6 +271,8 @@ export interface ListingInput {
   profileId: string;
   platform?: string;
   unitId?: string | null;
+  guests?: number | null;
+  startDates?: string[] | null;
 }
 
 export function getListing(id: string): TrackedListing | null {
@@ -294,9 +302,9 @@ export function createListing(input: ListingInput): TrackedListing {
   const id = "lst-" + randomUUID().slice(0, 8);
   db.prepare(
     `INSERT INTO tracked_listings
-      (id, airbnb_id, label, platform, profile_id, unit_id, min_nights, min_nights_checked_at, active, created_at)
+      (id, airbnb_id, label, platform, profile_id, unit_id, guests, start_dates, min_nights, min_nights_checked_at, active, created_at)
      VALUES
-      (@id, @airbnb_id, @label, @platform, @profile_id, @unit_id, NULL, NULL, 1, @created_at)`,
+      (@id, @airbnb_id, @label, @platform, @profile_id, @unit_id, @guests, @start_dates, NULL, NULL, 1, @created_at)`,
   ).run({
     id,
     airbnb_id: input.airbnbId,
@@ -304,6 +312,9 @@ export function createListing(input: ListingInput): TrackedListing {
     platform: input.platform ?? "Airbnb",
     profile_id: input.profileId,
     unit_id: input.unitId ?? null,
+    guests: input.guests ?? null,
+    start_dates:
+      input.startDates && input.startDates.length ? JSON.stringify(input.startDates) : null,
     created_at: new Date().toISOString(),
   });
   return getListing(id)!;
@@ -311,18 +322,29 @@ export function createListing(input: ListingInput): TrackedListing {
 
 export function updateListing(
   id: string,
-  patch: { label?: string; active?: boolean; profileId?: string },
+  patch: {
+    label?: string;
+    active?: boolean;
+    profileId?: string;
+    guests?: number | null;
+    startDates?: string[] | null;
+  },
 ): void {
   const db = getDb();
   const cur = getListing(id);
   if (!cur) return;
+  const guests = patch.guests !== undefined ? patch.guests : cur.guests;
+  const startDates = patch.startDates !== undefined ? patch.startDates : cur.startDates;
   db.prepare(
-    "UPDATE tracked_listings SET label=@label, active=@active, profile_id=@profile_id WHERE id=@id",
+    `UPDATE tracked_listings SET label=@label, active=@active, profile_id=@profile_id,
+       guests=@guests, start_dates=@start_dates WHERE id=@id`,
   ).run({
     id,
     label: patch.label ?? cur.label,
     active: (patch.active ?? cur.active) ? 1 : 0,
     profile_id: patch.profileId ?? cur.profileId,
+    guests: guests ?? null,
+    start_dates: startDates && startDates.length ? JSON.stringify(startDates) : null,
   });
 }
 
@@ -502,6 +524,9 @@ export function getScanConfig() {
           id: l.id,
           airbnbId: l.airbnbId,
           label: l.label,
+          // effective values: per-apartment override, else the profile default
+          guests: l.guests ?? p.guests,
+          startDates: l.startDates && l.startDates.length ? l.startDates : p.startDates,
           minNights: l.minNights,
           minNightsCheckedAt: l.minNightsCheckedAt,
         })),

@@ -25,6 +25,8 @@ interface Listing {
   airbnbId: string;
   label: string;
   profileId: string;
+  guests: number | null;
+  startDates: string[] | null;
   active: boolean;
 }
 
@@ -32,6 +34,82 @@ const input =
   "rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:border-primary/50";
 const btn =
   "inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50";
+
+function ListingRow({
+  l,
+  profile,
+  busy,
+  onPatch,
+  onDelete,
+}: {
+  l: Listing;
+  profile: Profile | undefined;
+  busy: boolean;
+  onPatch: (id: string, body: Record<string, unknown>) => void;
+  onDelete: (l: Listing) => void;
+}) {
+  const [name, setName] = useState(l.label);
+  const [guests, setGuests] = useState(l.guests != null ? String(l.guests) : "");
+  const [dates, setDates] = useState(l.startDates ? l.startDates.join(", ") : "");
+
+  return (
+    <div
+      className={`flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-background/40 px-3 py-2 ${
+        l.active ? "" : "opacity-60"
+      }`}
+    >
+      <input
+        className={`${input} w-40`}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={() => {
+          if (name.trim() && name.trim() !== l.label) onPatch(l.id, { label: name.trim() });
+        }}
+        title="Name"
+      />
+      <span className="text-[10px] font-mono text-muted-foreground">{l.airbnbId}</span>
+      <input
+        className={`${input} w-14`}
+        value={guests}
+        placeholder={profile ? String(profile.guests) : "2"}
+        onChange={(e) => setGuests(e.target.value)}
+        onBlur={() => onPatch(l.id, { guests: guests.trim() ? parseInt(guests, 10) : null })}
+        title="Guests (blank = profile default)"
+      />
+      <input
+        className={`${input} w-44`}
+        value={dates}
+        placeholder={profile && profile.startDates.length ? profile.startDates.join(", ") : "profile dates"}
+        onChange={(e) => setDates(e.target.value)}
+        onBlur={() =>
+          onPatch(l.id, {
+            startDates: dates.trim()
+              ? dates.split(",").map((s) => s.trim()).filter(Boolean)
+              : null,
+          })
+        }
+        title="Check-in dates (blank = profile default)"
+      />
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onPatch(l.id, { active: !l.active })}
+        className="rounded-md border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+      >
+        {l.active ? "Pause" : "Resume"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onDelete(l)}
+        className="text-muted-foreground hover:text-[hsl(var(--danger))]"
+        title="Remove listing"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
 
 export function ManagePanel() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -135,11 +213,19 @@ export function ManagePanel() {
   const [lProfile, setLProfile] = useState("");
   const [lId, setLId] = useState("");
   const [lLabel, setLLabel] = useState("");
+  const [lGuests, setLGuests] = useState("");
   const [bulk, setBulk] = useState("");
 
   useEffect(() => {
     if (!lProfile && profiles.length) setLProfile(profiles[0].id);
   }, [profiles, lProfile]);
+
+  function patchListing(id: string, body: Record<string, unknown>) {
+    call(`/api/visibility/listings/${id}`, "PATCH", body);
+  }
+  function removeListing(l: Listing) {
+    if (confirm(`Remove "${l.label}"?`)) call(`/api/visibility/listings/${l.id}`, "DELETE");
+  }
 
   return (
     <div className="space-y-6">
@@ -174,8 +260,8 @@ export function ManagePanel() {
         <CardHeader className="pb-3">
           <CardTitle>Search profiles</CardTitle>
           <p className="text-[11px] text-muted-foreground">
-            A profile is one search — an area + guest count + the date windows to check. Many
-            listings share a profile, so the scanner runs a few searches instead of one per listing.
+            A profile is the shared search context — the area, currency, stay-lengths and default
+            dates/guests. Each apartment below can override guests and dates.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -189,7 +275,7 @@ export function ManagePanel() {
                   <span className="text-xs font-medium">{p.label}</span>
                   {!p.active && <Badge variant="muted">paused</Badge>}
                   <span className="text-[10px] text-muted-foreground">
-                    {p.guests} guests · {p.currency} · stays {p.stayNights.join("/")}n ·{" "}
+                    default {p.guests} guests · {p.currency} · stays {p.stayNights.join("/")}n ·{" "}
                     {p.startDates.length} date{p.startDates.length === 1 ? "" : "s"}
                   </span>
                   <button
@@ -215,10 +301,10 @@ export function ManagePanel() {
             </div>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               <input className={input} placeholder="Name (e.g. Tel Aviv · 2 guests)" value={pLabel} onChange={(e) => setPLabel(e.target.value)} />
-              <input className={input} placeholder="Guests" value={pGuests} onChange={(e) => setPGuests(e.target.value)} />
+              <input className={input} placeholder="Default guests" value={pGuests} onChange={(e) => setPGuests(e.target.value)} />
               <input className={input} placeholder="Currency" value={pCurrency} onChange={(e) => setPCurrency(e.target.value)} />
               <input className={input} placeholder="Stay lengths, nights (7,14,30)" value={pStays} onChange={(e) => setPStays(e.target.value)} />
-              <input className={input} placeholder="Check-in dates (2026-08-01,2026-09-01)" value={pDates} onChange={(e) => setPDates(e.target.value)} />
+              <input className={input} placeholder="Default check-in dates (2026-08-01,2026-09-01)" value={pDates} onChange={(e) => setPDates(e.target.value)} />
               <input className={input} placeholder="Zoom (14)" value={pZoom} onChange={(e) => setPZoom(e.target.value)} />
               <input className={`${input} sm:col-span-2 lg:col-span-3`} placeholder="Search box: swLat,swLng,neLat,neLng" value={pBox} onChange={(e) => setPBox(e.target.value)} />
             </div>
@@ -235,8 +321,8 @@ export function ManagePanel() {
         <CardHeader className="pb-3">
           <CardTitle>Tracked listings</CardTitle>
           <p className="text-[11px] text-muted-foreground">
-            Add the listings to track. Paste Airbnb IDs, room URLs, or rows straight from your sheet
-            (CSV) — one per line.
+            Each apartment. Guests &amp; dates default to the profile — leave them blank to inherit,
+            or set per-apartment. Bulk box accepts Airbnb IDs, room URLs, or rows from your sheet.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -258,13 +344,20 @@ export function ManagePanel() {
                 <div className="flex flex-wrap gap-2">
                   <input className={`${input} flex-1`} placeholder="Airbnb ID or room URL" value={lId} onChange={(e) => setLId(e.target.value)} />
                   <input className={`${input} flex-1`} placeholder="Label (optional)" value={lLabel} onChange={(e) => setLLabel(e.target.value)} />
+                  <input className={`${input} w-20`} placeholder="Guests" value={lGuests} onChange={(e) => setLGuests(e.target.value)} />
                   <button
                     type="button"
                     disabled={busy || !lId.trim()}
                     onClick={async () => {
-                      await call("/api/visibility/listings", "POST", { profileId: lProfile, airbnbId: lId, label: lLabel });
+                      await call("/api/visibility/listings", "POST", {
+                        profileId: lProfile,
+                        airbnbId: lId,
+                        label: lLabel,
+                        guests: lGuests.trim() ? parseInt(lGuests, 10) : null,
+                      });
                       setLId("");
                       setLLabel("");
+                      setLGuests("");
                     }}
                     className={btn}
                   >
@@ -295,31 +388,16 @@ export function ManagePanel() {
                 {listings.length === 0 && (
                   <p className="text-[11px] text-muted-foreground">No listings yet.</p>
                 )}
-                {listings.map((l) => {
-                  const prof = profiles.find((p) => p.id === l.profileId);
-                  return (
-                    <div
-                      key={l.id}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border/70 bg-background/40 px-3 py-2"
-                    >
-                      <span className="text-xs font-medium">{l.label}</span>
-                      <span className="text-[10px] font-mono text-muted-foreground">{l.airbnbId}</span>
-                      <Badge variant="info">{prof?.label ?? "—"}</Badge>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => {
-                          if (confirm(`Remove "${l.label}"?`))
-                            call(`/api/visibility/listings/${l.id}`, "DELETE");
-                        }}
-                        className="ml-auto text-muted-foreground hover:text-[hsl(var(--danger))]"
-                        title="Remove listing"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  );
-                })}
+                {listings.map((l) => (
+                  <ListingRow
+                    key={l.id}
+                    l={l}
+                    profile={profiles.find((p) => p.id === l.profileId)}
+                    busy={busy}
+                    onPatch={patchListing}
+                    onDelete={removeListing}
+                  />
+                ))}
               </div>
             </>
           )}
