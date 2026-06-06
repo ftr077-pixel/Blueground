@@ -76,8 +76,26 @@ def is_fresh(checked_at):
     return age.days < STALE_DAYS
 
 
-def detect_min_nights(airbnb_id):
-    """Map of {date -> minNights} from the listing calendar (best effort)."""
+def _calendar_price(day):
+    p = day.get("price")
+    if isinstance(p, dict):
+        for k in ("localPrice", "amount", "nativePrice"):
+            v = p.get(k)
+            if isinstance(v, (int, float)):
+                return float(v)
+        nested = p.get("price")
+        if isinstance(nested, dict):
+            for k in ("amount", "localPrice"):
+                v = nested.get(k)
+                if isinstance(v, (int, float)):
+                    return float(v)
+    if isinstance(p, (int, float)):
+        return float(p)
+    return None
+
+
+def fetch_calendar(airbnb_id):
+    """date -> {min, available, price} from the listing calendar (best effort)."""
     try:
         api_key = pyairbnb.get_api_key(PROXY_URL)
         months = pyairbnb.get_calendar(api_key=api_key, room_id=str(airbnb_id), proxy_url=PROXY_URL)
@@ -88,10 +106,39 @@ def detect_min_nights(airbnb_id):
     for m in months or []:
         for d in (m.get("days") or []):
             date = d.get("calendarDate") or d.get("date")
-            mn = d.get("minNights", d.get("min_nights"))
-            if date is not None and mn is not None:
-                out[date] = mn
+            if not date:
+                continue
+            avail = d.get("available")
+            if avail is None:
+                avail = d.get("availableForCheckin")
+            out[date] = {
+                "min": d.get("minNights", d.get("min_nights")),
+                "available": None if avail is None else bool(avail),
+                "price": _calendar_price(d),
+            }
     return out
+
+
+def window_available(cal, check_in, nights):
+    """True if every known night in the window is bookable; None if unknown."""
+    try:
+        d0 = datetime.date.fromisoformat(check_in)
+    except ValueError:
+        return None
+    seen = False
+    for i in range(nights):
+        info = cal.get((d0 + datetime.timedelta(days=i)).isoformat())
+        if info is None:
+            continue
+        seen = True
+        if not info.get("available"):
+            return False
+    return True if seen else None
+
+
+def window_price(cal, check_in):
+    info = cal.get(check_in)
+    return info.get("price") if info else None
 
 
 def result_price(r):
@@ -150,34 +197,27 @@ def scan_profile(profile):
 
     print(f"[{profile['id']}] {profile.get('label')} -- {len(listings)} listings")
 
-    # 1) min-stay per listing (only refetch stale/unknown ones)
-    date_maps = {}    # listing_id -> {date: min} (empty => use flat)
-    flat_min = {}     # listing_id -> int
-    posted_min = {}   # listing_id -> representative min to cache back
+    # 1) Pull each listing's calendar (availability + min-stay + asking price).
+    #    Fetched every run because availability changes as bookings come in.
+    cals = {}         # listing_id -> {date: {min, available, price}}
+    posted_min = {}   # listing_id -> representative min-stay to cache back
     for l in listings:
-        lid = l["id"]
-        if is_fresh(l.get("minNightsCheckedAt")) and l.get("minNights"):
-            date_maps[lid] = {}
-            flat_min[lid] = l["minNights"]
-        else:
-            m = detect_min_nights(l["airbnbId"])
-            date_maps[lid] = m
-            anchor = (l.get("startDates") or profile_dates or [None])[0]
-            rep = (m.get(anchor) if (m and anchor) else None)
-            if rep is None and m:
-                rep = min(m.values())
-            if rep is None:
-                rep = MIN_NIGHTS_FALLBACK
-            flat_min[lid] = rep
-            posted_min[lid] = rep
-            time.sleep(1)
+        cal = fetch_calendar(l["airbnbId"])
+        cals[l["id"]] = cal
+        mins = [v["min"] for v in cal.values() if v.get("min") is not None]
+        if mins:
+            posted_min[l["id"]] = min(mins)
+        time.sleep(1)
 
-    def min_for(listing, date):
-        lid = listing["id"]
-        mp = date_maps.get(lid)
-        if mp:
-            return mp.get(date, flat_min.get(lid, MIN_NIGHTS_FALLBACK))
-        return flat_min.get(lid, MIN_NIGHTS_FALLBACK)
+    def min_for(l, date):
+        cal = cals.get(l["id"], {})
+        info = cal.get(date)
+        if info and info.get("min") is not None:
+            return info["min"]
+        mins = [v["min"] for v in cal.values() if v.get("min") is not None]
+        if mins:
+            return min(mins)
+        return l.get("minNights") or MIN_NIGHTS_FALLBACK
 
     def eff_guests(l):
         return l.get("guests") or profile_guests
@@ -185,13 +225,13 @@ def scan_profile(profile):
     def eff_dates(l):
         return l.get("startDates") or profile_dates
 
-    # 2) Build the set of searches needed. A search = (guests, check-in, nights).
-    #    Listings sharing one are batched into a single request; ineligible
-    #    (below min-stay) windows are recorded directly, no search wasted.
+    # 2) Build searches for eligible windows; record ineligible directly. A search
+    #    = (guests, check-in, nights); listings sharing one are batched together.
     snapshots = []
-    searches = {}  # (guests, date, nights) -> [listings eligible for it]
+    searches = {}  # (guests, date, nights) -> [eligible listings]
     for l in listings:
         g = eff_guests(l)
+        cal = cals.get(l["id"], {})
         for d in eff_dates(l):
             for n in stay_nights:
                 req = min_for(l, d)
@@ -203,8 +243,10 @@ def scan_profile(profile):
                         "stayLabel": stay_label(n), "nights": n,
                         "checkIn": d, "checkOut": add_nights(d, n),
                         "eligible": False, "minNights": req,
+                        "available": window_available(cal, d, n),
                         "found": False, "page": None, "position": None,
-                        "rank": None, "total": None, "price": None, "currency": currency,
+                        "rank": None, "total": None,
+                        "price": window_price(cal, d), "currency": currency,
                     })
 
     print(f"  {len(searches)} unique searches (batched by guests + date + stay)")
@@ -224,19 +266,24 @@ def scan_profile(profile):
         found_total += hits
         print(f"  g{g} {stay_label(n):<8} {d}: {total} results, {hits}/{len(ls)} found")
         for l in ls:
+            cal = cals.get(l["id"], {})
+            info = rankmap.get(str(l["airbnbId"]))
             snap = {
                 "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
                 "stayLabel": stay_label(n), "nights": n,
                 "checkIn": d, "checkOut": check_out,
                 "eligible": True, "minNights": min_for(l, d),
-                "found": False, "page": None, "position": None,
-                "rank": None, "total": total, "price": None, "currency": currency,
+                # found in search => definitely available; else fall back to calendar
+                "available": True if info else window_available(cal, d, n),
+                "found": bool(info), "page": None, "position": None,
+                "rank": None, "total": total,
+                "price": None, "currency": currency,
             }
-            info = rankmap.get(str(l["airbnbId"]))
             if info:
                 page, pos, rank, price = info
-                snap.update({"found": True, "page": page, "position": pos,
-                             "rank": rank, "price": price})
+                snap.update({"page": page, "position": pos, "rank": rank, "price": price})
+            else:
+                snap["price"] = window_price(cal, d)
             snapshots.append(snap)
         time.sleep(PAUSE)
     return snapshots, posted_min, {

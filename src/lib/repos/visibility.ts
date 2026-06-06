@@ -49,6 +49,7 @@ export interface ListingSnapshot {
   eligible: boolean;
   minNights: number | null;
   found: boolean;
+  available: boolean | null;
   page: number | null;
   position: number | null;
   rank: number | null;
@@ -104,6 +105,7 @@ interface SnapshotSql {
   eligible: number;
   min_nights: number | null;
   found: number;
+  available: number | null;
   page: number | null;
   position: number | null;
   rank: number | null;
@@ -164,6 +166,7 @@ function rowToSnapshot(r: SnapshotSql): ListingSnapshot {
     eligible: !!r.eligible,
     minNights: r.min_nights,
     found: !!r.found,
+    available: r.available == null ? null : !!r.available,
     page: r.page,
     position: r.position,
     rank: r.rank,
@@ -419,6 +422,7 @@ export interface RecordRunInput {
     eligible: boolean;
     minNights?: number | null;
     found: boolean;
+    available?: boolean | null;
     page?: number | null;
     position?: number | null;
     rank?: number | null;
@@ -434,9 +438,9 @@ export function recordRun(input: RecordRunInput): number {
   const ts = new Date().toISOString();
   const ins = db.prepare(
     `INSERT INTO listing_snapshots
-      (id, listing_id, airbnb_id, profile_id, run_id, ts, stay_label, nights, check_in, check_out, eligible, min_nights, found, page, position, rank, total, price, currency)
+      (id, listing_id, airbnb_id, profile_id, run_id, ts, stay_label, nights, check_in, check_out, eligible, min_nights, found, available, page, position, rank, total, price, currency)
      VALUES
-      (@id, @listing_id, @airbnb_id, @profile_id, @run_id, @ts, @stay_label, @nights, @check_in, @check_out, @eligible, @min_nights, @found, @page, @position, @rank, @total, @price, @currency)`,
+      (@id, @listing_id, @airbnb_id, @profile_id, @run_id, @ts, @stay_label, @nights, @check_in, @check_out, @eligible, @min_nights, @found, @available, @page, @position, @rank, @total, @price, @currency)`,
   );
   const tx = db.transaction(() => {
     for (const s of input.snapshots) {
@@ -454,6 +458,7 @@ export function recordRun(input: RecordRunInput): number {
         eligible: s.eligible ? 1 : 0,
         min_nights: s.minNights ?? null,
         found: s.found ? 1 : 0,
+        available: s.available == null ? null : s.available ? 1 : 0,
         page: s.page ?? null,
         position: s.position ?? null,
         rank: s.rank ?? null,
