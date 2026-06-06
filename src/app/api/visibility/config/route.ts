@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
-import { getScanConfig } from "@/lib/repos/visibility";
+import { getScanConfig, getSetting } from "@/lib/repos/visibility";
 
 export const dynamic = "force-dynamic";
 
-// Consumed by the scraper box: active profiles, each with its listings.
+// Consumed by the scraper box: active profiles + the availability cutoff.
 export async function GET() {
-  return NextResponse.json({ profiles: getScanConfig() });
+  return NextResponse.json({
+    profiles: getScanConfig(),
+    availabilityDays: Number(getSetting("availability_days")) || 90,
+  });
 }

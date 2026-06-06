@@ -152,28 +152,38 @@ export function ManagePanel() {
 
   // ---- scanner settings (proxy) ----
   const [proxyUrl, setProxyUrl] = useState("");
-  const [proxySaved, setProxySaved] = useState(false);
+  const [availabilityDays, setAvailabilityDays] = useState("90");
+  const [primaryStay, setPrimaryStay] = useState("30");
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     fetch("/api/visibility/settings", { cache: "no-store" })
       .then((r) => r.json())
-      .then((s: { proxyUrl?: string }) => setProxyUrl(s.proxyUrl || ""))
+      .then((s: { proxyUrl?: string; availabilityDays?: number; primaryStay?: number }) => {
+        setProxyUrl(s.proxyUrl || "");
+        if (s.availabilityDays) setAvailabilityDays(String(s.availabilityDays));
+        if (s.primaryStay) setPrimaryStay(String(s.primaryStay));
+      })
       .catch(() => undefined);
   }, []);
 
-  async function saveProxy() {
+  async function saveSettings() {
     setBusy(true);
     setError(null);
     try {
       await fetch("/api/visibility/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ proxyUrl }),
+        body: JSON.stringify({
+          proxyUrl,
+          availabilityDays: parseInt(availabilityDays, 10) || 90,
+          primaryStay: parseInt(primaryStay, 10) || 30,
+        }),
       });
-      setProxySaved(true);
-      setTimeout(() => setProxySaved(false), 2000);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
     } catch {
-      setError("could not save proxy");
+      setError("could not save settings");
     } finally {
       setBusy(false);
     }
@@ -243,16 +253,39 @@ export function ManagePanel() {
             username or password. Powers the “Run scan now” button.
           </p>
         </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            <input
-              className={`${input} flex-1`}
-              placeholder="http://gate.decodo.com:10001"
-              value={proxyUrl}
-              onChange={(e) => setProxyUrl(e.target.value)}
-            />
-            <button type="button" disabled={busy} onClick={saveProxy} className={btn}>
-              {proxySaved ? "Saved ✓" : "Save proxy"}
+        <CardContent className="space-y-3">
+          <input
+            className={`${input} w-full`}
+            placeholder="Proxy: http://gate.decodo.com:10001"
+            value={proxyUrl}
+            onChange={(e) => setProxyUrl(e.target.value)}
+          />
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-muted-foreground">
+            <label className="flex items-center gap-1.5">
+              Skip if no availability within
+              <input
+                className={`${input} w-16`}
+                value={availabilityDays}
+                onChange={(e) => setAvailabilityDays(e.target.value)}
+              />
+              days
+            </label>
+            <label className="flex items-center gap-1.5">
+              Primary stay (what you optimise for)
+              <select
+                className={input}
+                value={primaryStay}
+                onChange={(e) => setPrimaryStay(e.target.value)}
+              >
+                <option value="7">1 week</option>
+                <option value="14">2 weeks</option>
+                <option value="30">1 month</option>
+                <option value="60">2 months</option>
+                <option value="90">3 months</option>
+              </select>
+            </label>
+            <button type="button" disabled={busy} onClick={saveSettings} className={btn}>
+              {saved ? "Saved ✓" : "Save settings"}
             </button>
           </div>
         </CardContent>

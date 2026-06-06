@@ -104,14 +104,13 @@ function money(n: number | null) {
   return n != null ? `₪${Math.round(n).toLocaleString()}` : "—";
 }
 
-const STATE_ORDER: Record<State, number> = {
-  ranked: 0,
-  buried: 1,
-  booked: 2,
-  unknown: 3,
-  minstay: 4,
-  none: 5,
-};
+function cellRank(c: ReturnType<typeof stayCell>) {
+  if (c.kind === "ranked") return c.page ?? 99;
+  if (c.kind === "buried") return 1000;
+  if (c.kind === "booked") return 2000;
+  if (c.kind === "minstay") return 3000;
+  return 4000;
+}
 
 export function VisibilityPanel() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -124,14 +123,20 @@ export function VisibilityPanel() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [primaryStay, setPrimaryStay] = useState(30);
 
   async function refresh() {
     try {
       const res = await fetch("/api/visibility", { cache: "no-store" });
       if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-      const body = (await res.json()) as { profiles: Profile[]; listings: Listing[] };
+      const body = (await res.json()) as {
+        profiles: Profile[];
+        listings: Listing[];
+        primaryStay?: number;
+      };
       setProfiles(body.profiles);
       setListings(body.listings);
+      if (body.primaryStay) setPrimaryStay(body.primaryStay);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
     } finally {
@@ -205,19 +210,19 @@ export function VisibilityPanel() {
     });
   }
 
-  function matches(l: Listing, v: ReturnType<typeof listingView>) {
+  function matches(l: Listing, cell: ReturnType<typeof stayCell>) {
     if (q && !`${l.label} ${l.airbnbId}`.toLowerCase().includes(q.toLowerCase())) return false;
     switch (statusFilter) {
       case "page1":
-        return v.bestPage === 1;
+        return cell.kind === "ranked" && cell.page === 1;
       case "insearch":
-        return v.state === "ranked";
+        return cell.kind === "ranked";
       case "buried":
-        return v.state === "buried";
+        return cell.kind === "buried";
       case "booked":
-        return v.state === "booked";
+        return cell.kind === "booked";
       case "minstay":
-        return v.state === "minstay";
+        return cell.kind === "minstay";
       default:
         return true;
     }
@@ -290,11 +295,12 @@ export function VisibilityPanel() {
     );
   }
 
-  const views = listings.map((l) => listingView(l.latest));
+  const primaryLabel = nightsLabel(primaryStay);
+  const pcells = listings.map((l) => stayCell(l.latest, primaryLabel));
   const total = listings.length;
-  const available = views.filter((v) => v.state === "ranked" || v.state === "buried").length;
-  const inSearch = views.filter((v) => v.state === "ranked").length;
-  const page1 = views.filter((v) => v.bestPage === 1).length;
+  const available = pcells.filter((c) => c.kind === "ranked" || c.kind === "buried").length;
+  const inSearch = pcells.filter((c) => c.kind === "ranked").length;
+  const page1 = pcells.filter((c) => c.kind === "ranked" && c.page === 1).length;
   const stat = (label: string, value: number, tone = "text-foreground") => (
     <div>
       <div className={`text-2xl font-semibold tracking-tight ${tone}`}>{value}</div>
@@ -312,9 +318,9 @@ export function VisibilityPanel() {
       <Card>
         <CardContent className="flex flex-wrap items-center gap-x-10 gap-y-3 p-5">
           {stat("Listings", total)}
-          {stat("Available", available, "text-[hsl(var(--success))]")}
-          {stat("Appearing in search", inSearch, "text-primary")}
-          {stat("On page 1", page1, "text-[hsl(var(--success))]")}
+          {stat(`Available · ${primaryLabel}`, available, "text-[hsl(var(--success))]")}
+          {stat(`In search · ${primaryLabel}`, inSearch, "text-primary")}
+          {stat(`Page 1 · ${primaryLabel}`, page1, "text-[hsl(var(--success))]")}
         </CardContent>
       </Card>
 
@@ -343,12 +349,9 @@ export function VisibilityPanel() {
         const stayCols = [...(p.stayNights ?? [])].sort((a, b) => a - b).map(nightsLabel);
         const rows = listings
           .filter((l) => l.profileId === p.id)
-          .map((l) => ({ l, v: listingView(l.latest) }))
-          .filter(({ l, v }) => matches(l, v))
-          .sort((a, b) => {
-            const d = STATE_ORDER[a.v.state] - STATE_ORDER[b.v.state];
-            return d !== 0 ? d : (a.v.bestPage ?? 999) - (b.v.bestPage ?? 999);
-          });
+          .map((l) => ({ l, v: listingView(l.latest), pc: stayCell(l.latest, primaryLabel) }))
+          .filter(({ l, pc }) => matches(l, pc))
+          .sort((a, b) => cellRank(a.pc) - cellRank(b.pc));
         const colSpan = stayCols.length + 4;
         return (
           <Card key={p.id}>
@@ -372,8 +375,13 @@ export function VisibilityPanel() {
                       <th className="px-2 py-2" />
                       <th className="px-3 py-2 text-left">Listing</th>
                       {stayCols.map((c) => (
-                        <th key={c} className="px-3 py-2 text-center">
-                          {c}
+                        <th
+                          key={c}
+                          className={`px-3 py-2 text-center ${
+                            c === primaryLabel ? "text-foreground font-semibold" : ""
+                          }`}
+                        >
+                          {c === primaryLabel ? `★ ${c}` : c}
                         </th>
                       ))}
                       <th className="px-3 py-2 text-right">Price</th>
