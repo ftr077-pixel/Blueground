@@ -513,7 +513,7 @@ export function recentSnapshots(listingId: string, limit = 300): ListingSnapshot
 export function getDashboard() {
   const profiles = listProfiles();
   const listings = listListings().map((l) => ({ ...l, latest: latestSnapshots(l.id) }));
-  return { profiles, listings };
+  return { profiles, listings, primaryStay: Number(getSetting("primary_stay")) || 30 };
 }
 
 // What the scraper box pulls: active profiles, each with its active listings.

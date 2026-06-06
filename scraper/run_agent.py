@@ -142,6 +142,16 @@ def window_price(cal, check_in):
     return info.get("price") if info else None
 
 
+def has_availability_within(cal, days):
+    """True if any night in the next `days` is bookable."""
+    today = datetime.date.today()
+    for off in range(1, days + 1):
+        info = cal.get((today + datetime.timedelta(days=off)).isoformat())
+        if info and info.get("available"):
+            return True
+    return False
+
+
 def availability_for(cal, nights, horizon_days=180):
     """Classify the soonest option for an `nights`-long stay:
       ("ok", date, reqmin)       bookable from `date`
@@ -216,7 +226,7 @@ def search_with_retry(box, check_in, check_out, guests, currency, attempts=3):
     raise last if last else RuntimeError("search failed")
 
 
-def scan_profile(profile):
+def scan_profile(profile, availability_days=90):
     box = profile["box"]
     currency = profile.get("currency", "ILS")
     listings = profile.get("listings", [])
@@ -259,9 +269,24 @@ def scan_profile(profile):
     #    = (guests, check-in, nights); listings sharing one are batched together.
     snapshots = []
     searches = {}  # (guests, date, nights) -> [eligible listings]
+    skipped = 0
     for l in listings:
         g = eff_guests(l)
         cal = cals.get(l["id"], {})
+        # Availability rule: don't waste a scrape on a listing with no opening soon.
+        if not has_availability_within(cal, availability_days):
+            skipped += 1
+            for n in stay_nights:
+                snapshots.append({
+                    "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
+                    "stayLabel": stay_label(n), "nights": n,
+                    "checkIn": "", "checkOut": "",
+                    "eligible": True, "minNights": None,
+                    "available": False, "found": False,
+                    "page": None, "position": None, "rank": None, "total": None,
+                    "price": None, "currency": currency,
+                })
+            continue
         if date_mode == "first_available":
             for n in stay_nights:
                 status, d, reqmin = availability_for(cal, n)
@@ -343,10 +368,13 @@ def scan_profile(profile):
                 snap["price"] = window_price(cal, d)
             snapshots.append(snap)
         time.sleep(PAUSE)
+    if skipped:
+        print(f"  skipped {skipped} listing(s) with no availability in {availability_days}d")
     return snapshots, posted_min, {
         "found": found_total,
         "errors": error_count,
         "searches": len(searches),
+        "skipped": skipped,
     }
 
 
@@ -355,7 +383,8 @@ def main():
           f"key={'set' if SCRAPER_API_KEY else 'MISSING'}")
     cfg = http_get_json(f"{APP_URL}/api/visibility/config")
     profiles = cfg.get("profiles", [])
-    print(f"{len(profiles)} active profile(s)\n" + "=" * 60)
+    availability_days = cfg.get("availabilityDays", 90)
+    print(f"{len(profiles)} active profile(s), availability filter {availability_days}d\n" + "=" * 60)
 
     scope = {x.strip() for x in SCAN_LISTING_IDS.split(",") if x.strip()}
     if scope:
@@ -371,7 +400,7 @@ def main():
             continue
         run_id = uuid.uuid4().hex
         try:
-            snapshots, posted_min, stats = scan_profile(profile)
+            snapshots, posted_min, stats = scan_profile(profile, availability_days)
         except Exception as e:
             print(f"[error] profile {profile.get('id')}: {e}")
             continue
