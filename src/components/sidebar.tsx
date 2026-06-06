@@ -6,6 +6,7 @@ import {
   Activity,
   Banknote,
   Boxes,
+  Building2,
   ConciergeBell,
   GitBranch,
   LayoutDashboard,
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_PRIMARY = [
   { href: "/", label: "Mission Control", icon: LayoutDashboard },
+  { href: "/portfolio", label: "Portfolio", icon: Building2 },
   { href: "/synthesis", label: "Synthesis View", icon: GitBranch },
   { href: "/visibility", label: "Search Visibility", icon: Radar },
   { href: "/action-center", label: "Action Center", icon: ShieldAlert },
