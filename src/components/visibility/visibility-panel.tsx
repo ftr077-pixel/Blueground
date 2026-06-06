@@ -19,6 +19,7 @@ import { formatRelative } from "@/lib/utils";
 interface Snapshot {
   id: string;
   stayLabel: string;
+  nights: number;
   checkIn: string;
   eligible: boolean;
   available: boolean | null;
@@ -37,6 +38,7 @@ interface Profile {
   guests: number;
   currency: string;
   active: boolean;
+  stayNights: number[];
   lastRunAt: string | null;
 }
 
@@ -52,6 +54,15 @@ interface Listing {
 }
 
 type State = "ranked" | "buried" | "booked" | "minstay" | "unknown" | "none";
+
+const STAY_LABELS: Record<number, string> = {
+  7: "1 week",
+  14: "2 weeks",
+  30: "1 month",
+  60: "2 months",
+  90: "3 months",
+};
+const nightsLabel = (n: number) => STAY_LABELS[n] ?? `${n} nights`;
 
 function listingView(latest: Snapshot[]) {
   const eligible = latest.filter((s) => s.eligible);
@@ -69,7 +80,28 @@ function listingView(latest: Snapshot[]) {
   else if (availTrue.length) state = "buried";
   else if (eligible.some((s) => s.available === false)) state = "booked";
   else state = "unknown";
-  return { state, bestPage, price, available: availTrue.length > 0 };
+  return { state, bestPage, price };
+}
+
+// Best result for one listing at one stay length (across its dates).
+function stayCell(latest: Snapshot[], label: string) {
+  const rows = latest.filter((s) => s.stayLabel === label);
+  if (!rows.length) return { kind: "none" as const };
+  const found = rows.filter((s) => s.found && s.page != null);
+  if (found.length) {
+    const best = found.reduce((b, r) => ((r.page as number) < (b.page as number) ? r : b));
+    return { kind: "ranked" as const, page: best.page, rank: best.rank, total: best.total };
+  }
+  if (rows.some((s) => s.eligible && s.available === true)) return { kind: "buried" as const };
+  if (rows.some((s) => !s.eligible)) {
+    return { kind: "minstay" as const, min: rows.find((s) => !s.eligible)?.minNights ?? null };
+  }
+  if (rows.some((s) => s.available === false)) return { kind: "booked" as const };
+  return { kind: "unknown" as const };
+}
+
+function money(n: number | null) {
+  return n != null ? `₪${Math.round(n).toLocaleString()}` : "—";
 }
 
 const STATE_ORDER: Record<State, number> = {
@@ -81,10 +113,6 @@ const STATE_ORDER: Record<State, number> = {
   none: 5,
 };
 
-function money(n: number | null) {
-  return n != null ? `₪${Math.round(n).toLocaleString()}` : "—";
-}
-
 export function VisibilityPanel() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [listings, setListings] = useState<Listing[]>([]);
@@ -94,6 +122,8 @@ export function VisibilityPanel() {
   const [scanMsg, setScanMsg] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
 
   async function refresh() {
     try {
@@ -159,21 +189,38 @@ export function VisibilityPanel() {
   }
 
   function toggle(id: string) {
-    setOpen((prev) => {
-      const n = new Set(prev);
+    setOpen((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+  function toggleSelect(id: string) {
+    setSelected((p) => {
+      const n = new Set(p);
       if (n.has(id)) n.delete(id);
       else n.add(id);
       return n;
     });
   }
 
-  function toggleSelect(id: string) {
-    setSelected((prev) => {
-      const n = new Set(prev);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
+  function matches(l: Listing, v: ReturnType<typeof listingView>) {
+    if (q && !`${l.label} ${l.airbnbId}`.toLowerCase().includes(q.toLowerCase())) return false;
+    switch (statusFilter) {
+      case "page1":
+        return v.bestPage === 1;
+      case "insearch":
+        return v.state === "ranked";
+      case "buried":
+        return v.state === "buried";
+      case "booked":
+        return v.state === "booked";
+      case "minstay":
+        return v.state === "minstay";
+      default:
+        return true;
+    }
   }
 
   const topBar = (
@@ -236,26 +283,27 @@ export function VisibilityPanel() {
         <Card>
           <CardContent className="p-5 text-xs text-muted-foreground">
             No listings tracked yet. Open <span className="text-foreground">Manage</span> to add a
-            profile and your listings, then hit <span className="text-foreground">Run scan now</span>.
+            profile and your listings, then hit <span className="text-foreground">Run scan</span>.
           </CardContent>
         </Card>
       </div>
     );
   }
 
-  // portfolio summary
   const views = listings.map((l) => listingView(l.latest));
   const total = listings.length;
   const available = views.filter((v) => v.state === "ranked" || v.state === "buried").length;
   const inSearch = views.filter((v) => v.state === "ranked").length;
   const page1 = views.filter((v) => v.bestPage === 1).length;
-
   const stat = (label: string, value: number, tone = "text-foreground") => (
     <div>
       <div className={`text-2xl font-semibold tracking-tight ${tone}`}>{value}</div>
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
     </div>
   );
+
+  const inputCls =
+    "rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:border-primary/50";
 
   return (
     <div className="space-y-6">
@@ -267,23 +315,41 @@ export function VisibilityPanel() {
           {stat("Available", available, "text-[hsl(var(--success))]")}
           {stat("Appearing in search", inSearch, "text-primary")}
           {stat("On page 1", page1, "text-[hsl(var(--success))]")}
-          <p className="ml-auto max-w-xs text-[11px] text-muted-foreground">
-            “Available but not in search” are your price-experiment targets — bookable, just ranked
-            past the cap.
-          </p>
         </CardContent>
       </Card>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          className={`${inputCls} w-64`}
+          placeholder="Filter by name or Airbnb ID…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <select
+          className={inputCls}
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+        >
+          <option value="all">All statuses</option>
+          <option value="page1">On page 1</option>
+          <option value="insearch">In search</option>
+          <option value="buried">Available · not ranked</option>
+          <option value="booked">Booked</option>
+          <option value="minstay">Min-stay only</option>
+        </select>
+      </div>
+
       {profiles.map((p) => {
+        const stayCols = [...(p.stayNights ?? [])].sort((a, b) => a - b).map(nightsLabel);
         const rows = listings
           .filter((l) => l.profileId === p.id)
           .map((l) => ({ l, v: listingView(l.latest) }))
+          .filter(({ l, v }) => matches(l, v))
           .sort((a, b) => {
             const d = STATE_ORDER[a.v.state] - STATE_ORDER[b.v.state];
-            if (d !== 0) return d;
-            return (a.v.bestPage ?? 999) - (b.v.bestPage ?? 999);
+            return d !== 0 ? d : (a.v.bestPage ?? 999) - (b.v.bestPage ?? 999);
           });
-        if (rows.length === 0) return null;
+        const colSpan = stayCols.length + 4;
         return (
           <Card key={p.id}>
             <CardHeader className="pb-3">
@@ -299,48 +365,43 @@ export function VisibilityPanel() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="overflow-hidden rounded-lg border border-border">
+              <div className="overflow-x-auto rounded-lg border border-border">
                 <table className="w-full text-xs">
                   <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                     <tr>
-                      <th className="px-2 py-2">
-                        <input
-                          type="checkbox"
-                          aria-label="select all in profile"
-                          checked={rows.length > 0 && rows.every((r) => selected.has(r.l.id))}
-                          onChange={(e) =>
-                            setSelected((prev) => {
-                              const n = new Set(prev);
-                              rows.forEach((r) =>
-                                e.target.checked ? n.add(r.l.id) : n.delete(r.l.id),
-                              );
-                              return n;
-                            })
-                          }
-                        />
-                      </th>
+                      <th className="px-2 py-2" />
                       <th className="px-3 py-2 text-left">Listing</th>
-                      <th className="px-3 py-2 text-left">Available?</th>
-                      <th className="px-3 py-2 text-left">Position</th>
+                      {stayCols.map((c) => (
+                        <th key={c} className="px-3 py-2 text-center">
+                          {c}
+                        </th>
+                      ))}
                       <th className="px-3 py-2 text-right">Price</th>
                       <th className="px-2 py-2" />
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map(({ l, v }) => {
-                      const isOpen = open.has(l.id);
-                      return (
+                    {rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={colSpan} className="px-3 py-3 text-[11px] text-muted-foreground">
+                          No listings match the filter.
+                        </td>
+                      </tr>
+                    ) : (
+                      rows.map(({ l, v }) => (
                         <ListingRows
                           key={l.id}
                           l={l}
                           v={v}
-                          isOpen={isOpen}
+                          stayCols={stayCols}
+                          colSpan={colSpan}
+                          isOpen={open.has(l.id)}
                           onToggle={() => toggle(l.id)}
                           selected={selected.has(l.id)}
                           onSelect={() => toggleSelect(l.id)}
                         />
-                      );
-                    })}
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -352,25 +413,33 @@ export function VisibilityPanel() {
   );
 }
 
-function AvailBadge({ state }: { state: State }) {
-  if (state === "ranked" || state === "buried") return <Badge variant="success">Available</Badge>;
-  if (state === "booked") return <Badge variant="muted">Booked</Badge>;
-  if (state === "minstay") return <Badge variant="muted">Min-stay</Badge>;
-  if (state === "none") return <span className="text-[11px] text-muted-foreground">not scanned</span>;
-  return <span className="text-[11px] text-muted-foreground">unknown</span>;
-}
-
-function PositionCell({ state, bestPage }: { state: State; bestPage: number | null }) {
-  if (state === "ranked")
-    return <Badge variant="success">page {bestPage}</Badge>;
-  if (state === "buried")
-    return <span className="text-[11px] text-[hsl(var(--warning))]">not in top 280</span>;
-  return <span className="text-[11px] text-muted-foreground">—</span>;
+function StayCell({ cell }: { cell: ReturnType<typeof stayCell> }) {
+  if (cell.kind === "ranked")
+    return (
+      <span
+        className="font-semibold text-[hsl(var(--success))]"
+        title={`rank ${cell.rank}/${cell.total}`}
+      >
+        p{cell.page}
+      </span>
+    );
+  if (cell.kind === "buried")
+    return <span className="text-[hsl(var(--warning))]" title="available, ranked beyond ~280">&gt;280</span>;
+  if (cell.kind === "minstay")
+    return (
+      <span className="text-muted-foreground" title={cell.min ? `min stay ${cell.min}n` : "min-stay"}>
+        min{cell.min ? ` ${cell.min}` : ""}
+      </span>
+    );
+  if (cell.kind === "booked") return <span className="text-muted-foreground">booked</span>;
+  return <span className="text-muted-foreground/50">·</span>;
 }
 
 function ListingRows({
   l,
   v,
+  stayCols,
+  colSpan,
   isOpen,
   onToggle,
   selected,
@@ -378,6 +447,8 @@ function ListingRows({
 }: {
   l: Listing;
   v: ReturnType<typeof listingView>;
+  stayCols: string[];
+  colSpan: number;
   isOpen: boolean;
   onToggle: () => void;
   selected: boolean;
@@ -385,10 +456,7 @@ function ListingRows({
 }) {
   return (
     <>
-      <tr
-        className="border-t border-border/60 cursor-pointer hover:bg-muted/30"
-        onClick={onToggle}
-      >
+      <tr className="border-t border-border/60 cursor-pointer hover:bg-muted/30" onClick={onToggle}>
         <td className="px-2 py-2" onClick={(e) => e.stopPropagation()}>
           <input type="checkbox" checked={selected} onChange={onSelect} aria-label={`select ${l.label}`} />
         </td>
@@ -405,12 +473,11 @@ function ListingRows({
             {l.guests != null && ` · ${l.guests} guests`}
           </div>
         </td>
-        <td className="px-3 py-2">
-          <AvailBadge state={v.state} />
-        </td>
-        <td className="px-3 py-2">
-          <PositionCell state={v.state} bestPage={v.bestPage} />
-        </td>
+        {stayCols.map((c) => (
+          <td key={c} className="px-3 py-2 text-center font-mono">
+            <StayCell cell={stayCell(l.latest, c)} />
+          </td>
+        ))}
         <td className="px-3 py-2 text-right font-mono">{money(v.price)}</td>
         <td className="px-2 py-2 text-muted-foreground">
           {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
@@ -418,7 +485,7 @@ function ListingRows({
       </tr>
       {isOpen && (
         <tr className="border-t border-border/40 bg-background/40">
-          <td colSpan={6} className="px-3 py-2">
+          <td colSpan={colSpan} className="px-3 py-2">
             {l.latest.length === 0 ? (
               <p className="text-[11px] text-muted-foreground">No scan data yet.</p>
             ) : (
@@ -435,7 +502,7 @@ function ListingRows({
                 <tbody>
                   {l.latest.map((s) => (
                     <tr key={s.id} className="border-t border-border/40">
-                      <td className="px-2 py-1 font-mono text-muted-foreground">{s.checkIn}</td>
+                      <td className="px-2 py-1 font-mono text-muted-foreground">{s.checkIn || "—"}</td>
                       <td className="px-2 py-1">{s.stayLabel}</td>
                       <td className="px-2 py-1">
                         {!s.eligible
@@ -451,7 +518,7 @@ function ListingRows({
                       <td className="px-2 py-1">
                         {s.found && s.page != null
                           ? `page ${s.page} · pos ${s.position} (${s.rank}/${s.total})`
-                          : s.eligible && (s.available === true)
+                          : s.eligible && s.available === true
                             ? "not in top 280"
                             : "—"}
                       </td>
