@@ -21,6 +21,7 @@ interface Snapshot {
   checkIn: string;
   eligible: boolean;
   available: boolean | null;
+  minNights: number | null;
   found: boolean;
   page: number | null;
   position: number | null;
@@ -423,7 +424,9 @@ function ListingRows({
                       <td className="px-2 py-1">{s.stayLabel}</td>
                       <td className="px-2 py-1">
                         {!s.eligible
-                          ? "min-stay"
+                          ? s.minNights != null
+                            ? `min-stay ${s.minNights}n`
+                            : "min-stay"
                           : s.available === true || s.found
                             ? "yes"
                             : s.available === false

@@ -142,26 +142,32 @@ def window_price(cal, check_in):
     return info.get("price") if info else None
 
 
-def first_available_window(cal, nights, horizon_days=180):
-    """Earliest check-in (from tomorrow) with `nights` consecutive bookable nights
-    that also satisfies the min-stay at that date. None if none within the horizon."""
+def availability_for(cal, nights, horizon_days=180):
+    """Classify the soonest option for an `nights`-long stay:
+      ("ok", date, reqmin)       bookable from `date`
+      ("minstay", date, reqmin)  those nights ARE open, but min-stay > nights
+      ("none", None, None)       no open `nights`-night block within the horizon
+    """
     today = datetime.date.today()
+    blocked = None  # first open block whose min-stay is too long
     for off in range(1, horizon_days):
         d0 = today + datetime.timedelta(days=off)
-        ok = True
+        ok_avail = True
         for i in range(nights):
             info = cal.get((d0 + datetime.timedelta(days=i)).isoformat())
             if info is None or not info.get("available"):
-                ok = False
+                ok_avail = False
                 break
-            if i == 0:
-                mn = info.get("min")
-                if mn is not None and nights < mn:
-                    ok = False
-                    break
-        if ok:
-            return d0.isoformat()
-    return None
+        if not ok_avail:
+            continue
+        reqmin = cal.get(d0.isoformat(), {}).get("min")
+        if reqmin is None or nights >= reqmin:
+            return ("ok", d0.isoformat(), reqmin)
+        if blocked is None:
+            blocked = (d0.isoformat(), reqmin)
+    if blocked:
+        return ("minstay", blocked[0], blocked[1])
+    return ("none", None, None)
 
 
 def result_price(r):
@@ -257,18 +263,27 @@ def scan_profile(profile):
         g = eff_guests(l)
         cal = cals.get(l["id"], {})
         if date_mode == "first_available":
-            mins = [v["min"] for v in cal.values() if v.get("min") is not None]
-            repmin = min(mins) if mins else (l.get("minNights") or MIN_NIGHTS_FALLBACK)
             for n in stay_nights:
-                d = first_available_window(cal, n)
-                if d:
+                status, d, reqmin = availability_for(cal, n)
+                if status == "ok":
                     searches.setdefault((g, d, n), []).append(l)
-                else:
+                elif status == "minstay":
+                    # those nights are open, but the min-stay is longer than n
+                    snapshots.append({
+                        "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
+                        "stayLabel": stay_label(n), "nights": n,
+                        "checkIn": d, "checkOut": add_nights(d, n),
+                        "eligible": False, "minNights": reqmin,
+                        "available": True, "found": False,
+                        "page": None, "position": None, "rank": None, "total": None,
+                        "price": window_price(cal, d), "currency": currency,
+                    })
+                else:  # "none" -- no n-night opening within the horizon
                     snapshots.append({
                         "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
                         "stayLabel": stay_label(n), "nights": n,
                         "checkIn": "", "checkOut": "",
-                        "eligible": n >= repmin, "minNights": repmin,
+                        "eligible": True, "minNights": None,
                         "available": False, "found": False,
                         "page": None, "position": None, "rank": None, "total": None,
                         "price": None, "currency": currency,
