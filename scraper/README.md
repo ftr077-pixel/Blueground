@@ -5,6 +5,16 @@ holds in Airbnb search, for several date windows. Uses the open-source
 [`pyairbnb`](https://github.com/johnbalvin/pyairbnb) library, which calls
 Airbnb's internal `StaysSearch` GraphQL API.
 
+## Scripts
+
+- **`airbnb_rank_proof.py`** — the original proof: page/position of one listing
+  for three fixed date windows.
+- **`airbnb_visibility.py`** — the measurement layer: auto-detects the listing's
+  **minimum-stay** from its calendar, builds an **eligibility** map (which
+  stay-lengths can even appear), sweeps rank across **shifted check-in dates**,
+  and reports a v2 index that keeps *ineligible (min-stay)* separate from
+  *eligible-but-ranked-low*.
+
 > ⚠️ Run this on a **residential IP** (your laptop / home connection). Datacenter
 > IPs get blocked by Airbnb. If you hit blocks or empty results, add a proxy.
 
