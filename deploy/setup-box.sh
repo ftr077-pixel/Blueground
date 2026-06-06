@@ -37,7 +37,6 @@ log()  { echo -e "\n\033[1;36m== $* ==\033[0m"; }
 need() { [ -n "${!1:-}" ] || { echo "ERROR: set $1 (CONFIG block or env var)"; exit 1; }; }
 
 need REPO_URL
-need PROXY_URL
 [ -n "$DOMAIN" ] && need BASIC_AUTH_PASS
 
 log "Installing system packages"
@@ -107,12 +106,19 @@ cd "$APP_DIR/scraper"
 python3 -m venv .venv
 ./.venv/bin/pip install --quiet -r requirements.txt
 
-log "Daily scan cron ($CRON_SCHEDULE)"
-cat >/etc/cron.d/visibility-scan <<CRON
+if [ -n "$PROXY_URL" ]; then
+  log "Daily scan cron ($CRON_SCHEDULE)"
+  cat >/etc/cron.d/visibility-scan <<CRON
 SHELL=/bin/bash
 $CRON_SCHEDULE root cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT SCRAPER_API_KEY=$SCRAPER_API_KEY PROXY_URL='$PROXY_URL' ./.venv/bin/python run_agent.py >> /var/log/visibility-scan.log 2>&1
 CRON
-chmod 0644 /etc/cron.d/visibility-scan
+  chmod 0644 /etc/cron.d/visibility-scan
+else
+  log "No PROXY_URL — daily scan left OFF (dashboard-only)"
+  rm -f /etc/cron.d/visibility-scan
+  echo "The dashboard runs and shows seeded data, but live scanning needs a"
+  echo "residential proxy (datacenter IPs get blocked). Re-run with PROXY_URL to enable."
+fi
 
 if [ -n "$DOMAIN" ]; then
   log "Caddy (HTTPS + login) for $DOMAIN"
@@ -136,9 +142,14 @@ else
 fi
 echo "SCRAPER_API_KEY (in $ENV_FILE): $SCRAPER_API_KEY"
 echo
-echo "Run a scan right now:"
-echo "  cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT \\"
-echo "    SCRAPER_API_KEY=$SCRAPER_API_KEY PROXY_URL='$PROXY_URL' \\"
-echo "    ./.venv/bin/python run_agent.py"
+if [ -n "$PROXY_URL" ]; then
+  echo "Run a scan right now:"
+  echo "  cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT \\"
+  echo "    SCRAPER_API_KEY=$SCRAPER_API_KEY PROXY_URL='$PROXY_URL' \\"
+  echo "    ./.venv/bin/python run_agent.py"
+else
+  echo "Scanning is OFF (no proxy). Get a residential proxy, then re-run this"
+  echo "script with PROXY_URL set to turn on the nightly scan."
+fi
 echo
 echo "Logs:  journalctl -u rohub -f   |   tail -f /var/log/visibility-scan.log"
