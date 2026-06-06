@@ -9,6 +9,7 @@ import {
   ConciergeBell,
   GitBranch,
   LayoutDashboard,
+  Radar,
   ShieldAlert,
   TrendingUp,
 } from "lucide-react";
@@ -17,6 +18,7 @@ import { cn } from "@/lib/utils";
 const NAV_PRIMARY = [
   { href: "/", label: "Mission Control", icon: LayoutDashboard },
   { href: "/synthesis", label: "Synthesis View", icon: GitBranch },
+  { href: "/visibility", label: "Search Visibility", icon: Radar },
   { href: "/action-center", label: "Action Center", icon: ShieldAlert },
 ];
 
