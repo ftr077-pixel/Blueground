@@ -26,6 +26,10 @@ DOMAIN="${DOMAIN:-}"
 BASIC_AUTH_USER="${BASIC_AUTH_USER:-admin}"
 BASIC_AUTH_PASS="${BASIC_AUTH_PASS:-}"          # required when DOMAIN is set
 
+# Optional dashboard login (HTTP basic auth) — works WITHOUT a domain.
+DASHBOARD_USER="${DASHBOARD_USER:-}"
+DASHBOARD_PASS="${DASHBOARD_PASS:-}"
+
 # Residential proxy for the scraper — REQUIRED (datacenter IPs get blocked).
 PROXY_URL="${PROXY_URL:-}"
 
@@ -61,15 +65,12 @@ fi
 
 log "Fetching the app into $APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
+  git -C "$APP_DIR" remote set-url origin "$REPO_URL"
   git -C "$APP_DIR" pull --ff-only
 else
   git clone "$REPO_URL" "$APP_DIR"
 fi
-
-log "Building the dashboard"
 cd "$APP_DIR"
-npm install
-npm run build
 
 log "App environment"
 ENV_FILE="$APP_DIR/.env.local"
@@ -78,6 +79,15 @@ if ! grep -q '^SCRAPER_API_KEY=' "$ENV_FILE"; then
   echo "SCRAPER_API_KEY=$(openssl rand -hex 16)" >> "$ENV_FILE"
 fi
 SCRAPER_API_KEY="$(grep '^SCRAPER_API_KEY=' "$ENV_FILE" | cut -d= -f2-)"
+# Optional dashboard login. Set DASHBOARD_USER + DASHBOARD_PASS to enable it.
+if [ -n "$DASHBOARD_USER" ] && [ -n "$DASHBOARD_PASS" ]; then
+  sed -i '/^DASHBOARD_USER=/d; /^DASHBOARD_PASS=/d' "$ENV_FILE"
+  printf 'DASHBOARD_USER=%s\nDASHBOARD_PASS=%s\n' "$DASHBOARD_USER" "$DASHBOARD_PASS" >> "$ENV_FILE"
+fi
+
+log "Building the dashboard"
+npm install
+npm run build
 
 log "systemd service for the dashboard"
 cat >/etc/systemd/system/rohub.service <<UNIT
