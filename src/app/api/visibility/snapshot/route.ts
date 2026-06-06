@@ -25,19 +25,18 @@ export async function POST(req: Request) {
   }
 
   const input = (body ?? {}) as Partial<RecordRunInput>;
-  if (!input.searchId || !input.runId || !Array.isArray(input.snapshots)) {
+  if (!input.profileId || !input.runId || !Array.isArray(input.snapshots)) {
     return NextResponse.json(
-      { error: "missing searchId, runId, or snapshots[]" },
+      { error: "missing profileId, runId, or snapshots[]" },
       { status: 400 },
     );
   }
 
   const recorded = recordRun({
-    searchId: input.searchId,
+    profileId: input.profileId,
     runId: input.runId,
-    listingId: input.listingId,
-    minNights: input.minNights ?? null,
     snapshots: input.snapshots,
+    listingMinNights: input.listingMinNights,
   });
   return NextResponse.json({ ok: true, recorded });
 }
