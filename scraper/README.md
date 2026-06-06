@@ -1,7 +1,7 @@
-# Airbnb rank proof
+# Airbnb visibility scraper
 
-Proves the core of the product: capture **what page + position** one listing
-holds in Airbnb search, for several date windows. Uses the open-source
+Captures **what page + position** a listing holds in Airbnb search, by stay
+length and check-in date, and feeds the dashboard. Uses the open-source
 [`pyairbnb`](https://github.com/johnbalvin/pyairbnb) library, which calls
 Airbnb's internal `StaysSearch` GraphQL API.
 
@@ -14,6 +14,9 @@ Airbnb's internal `StaysSearch` GraphQL API.
   stay-lengths can even appear), sweeps rank across **shifted check-in dates**,
   and reports a v2 index that keeps *ineligible (min-stay)* separate from
   *eligible-but-ranked-low*.
+- **`run_agent.py`** — **server mode** (the box's cron entrypoint): pulls tracked
+  searches from the dashboard (`GET /api/visibility/config`), scans each, and posts
+  results back (`POST /api/visibility/snapshot`). This is what runs on the box.
 
 > ⚠️ Run this on a **residential IP** (your laptop / home connection). Datacenter
 > IPs get blocked by Airbnb. If you hit blocks or empty results, add a proxy.
@@ -46,6 +49,30 @@ python airbnb_rank_proof.py
 
 Edit the `CONFIG` block at the top of `airbnb_rank_proof.py` to change the
 listing, guests, currency, search box, or date windows.
+
+## Server mode (the box)
+
+`run_agent.py` is what runs on the always-on box — it connects the scraper to the
+dashboard so the two share data.
+
+```bash
+APP_URL="http://localhost:3000" \
+SCRAPER_API_KEY="<same value as the app's SCRAPER_API_KEY>" \
+PROXY_URL="http://user:pass@host:port" \
+python run_agent.py
+```
+
+| Var | Purpose |
+|-----|---------|
+| `APP_URL` | Dashboard base URL (default `http://localhost:3000`) |
+| `SCRAPER_API_KEY` | Must match the app's `SCRAPER_API_KEY`, or the app rejects writes |
+| `PROXY_URL` | Residential proxy — **required on a datacenter box** (Airbnb blocks cloud IPs) |
+
+Daily cron at 08:00:
+
+```
+0 8 * * * cd ~/app/scraper && . .venv/bin/activate && APP_URL=http://localhost:3000 SCRAPER_API_KEY=xxx PROXY_URL=http://user:pass@host:port python run_agent.py >> ~/scan.log 2>&1
+```
 
 ## Notes / known limits
 
