@@ -17,6 +17,7 @@ interface Profile {
   zoom: number;
   stayNights: number[];
   startDates: string[];
+  dateMode: string;
   active: boolean;
 }
 
@@ -278,6 +279,19 @@ export function ManagePanel() {
                     default {p.guests} guests · {p.currency} · stays {p.stayNights.join("/")}n ·{" "}
                     {p.startDates.length} date{p.startDates.length === 1 ? "" : "s"}
                   </span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      call(`/api/visibility/profiles/${p.id}`, "PATCH", {
+                        dateMode: p.dateMode === "first_available" ? "fixed" : "first_available",
+                      })
+                    }
+                    className="rounded-md border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                    title="How check-in dates are chosen"
+                  >
+                    dates: {p.dateMode === "first_available" ? "first-available" : "fixed"}
+                  </button>
                   <button
                     type="button"
                     disabled={busy}
