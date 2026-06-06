@@ -7,6 +7,8 @@ interface ListingPatch {
   label?: string;
   active?: boolean;
   profileId?: string;
+  guests?: number | null;
+  startDates?: string[] | null;
 }
 
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {

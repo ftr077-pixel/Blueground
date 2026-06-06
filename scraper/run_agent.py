@@ -130,15 +130,13 @@ def run_search(box, check_in, check_out, guests, currency):
 
 def scan_profile(profile):
     box = profile["box"]
-    guests = profile.get("guests", 2)
     currency = profile.get("currency", "ILS")
     listings = profile.get("listings", [])
-    start_dates = profile.get("startDates", [])
     stay_nights = profile.get("stayNights", [])
-    anchor = start_dates[0] if start_dates else None
+    profile_guests = profile.get("guests", 2)
+    profile_dates = profile.get("startDates", [])
 
-    print(f"[{profile['id']}] {profile.get('label')} -- {len(listings)} listings, "
-          f"{len(start_dates)}x{len(stay_nights)} search windows")
+    print(f"[{profile['id']}] {profile.get('label')} -- {len(listings)} listings")
 
     # 1) min-stay per listing (only refetch stale/unknown ones)
     date_maps = {}    # listing_id -> {date: min} (empty => use flat)
@@ -152,6 +150,7 @@ def scan_profile(profile):
         else:
             m = detect_min_nights(l["airbnbId"])
             date_maps[lid] = m
+            anchor = (l.get("startDates") or profile_dates or [None])[0]
             rep = (m.get(anchor) if (m and anchor) else None)
             if rep is None and m:
                 rep = min(m.values())
@@ -168,40 +167,62 @@ def scan_profile(profile):
             return mp.get(date, flat_min.get(lid, MIN_NIGHTS_FALLBACK))
         return flat_min.get(lid, MIN_NIGHTS_FALLBACK)
 
-    # 2) one search per window; match every listing against the same results
+    def eff_guests(l):
+        return l.get("guests") or profile_guests
+
+    def eff_dates(l):
+        return l.get("startDates") or profile_dates
+
+    # 2) Build the set of searches needed. A search = (guests, check-in, nights).
+    #    Listings sharing one are batched into a single request; ineligible
+    #    (below min-stay) windows are recorded directly, no search wasted.
     snapshots = []
-    for start in start_dates:
-        for nights in stay_nights:
-            check_out = add_nights(start, nights)
-            try:
-                results = run_search(box, start, check_out, guests, currency)
-            except Exception as e:
-                print(f"  [error] search {start} {nights}n: {e}")
-                results = []
-            rankmap = build_rankmap(results)
-            total = len(results)
-            hits = sum(1 for l in listings if str(l["airbnbId"]) in rankmap)
-            print(f"  {stay_label(nights):<9} {start}: {total} results, {hits} of our listings found")
-            for l in listings:
-                req = min_for(l, start)
-                eligible = nights >= req
-                snap = {
-                    "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
-                    "stayLabel": stay_label(nights), "nights": nights,
-                    "checkIn": start, "checkOut": check_out,
-                    "eligible": eligible, "minNights": req,
-                    "found": False, "page": None, "position": None,
-                    "rank": None, "total": total if eligible else None,
-                    "price": None, "currency": currency,
-                }
-                if eligible:
-                    info = rankmap.get(str(l["airbnbId"]))
-                    if info:
-                        page, pos, rank, price = info
-                        snap.update({"found": True, "page": page, "position": pos,
-                                     "rank": rank, "price": price})
-                snapshots.append(snap)
-            time.sleep(PAUSE)
+    searches = {}  # (guests, date, nights) -> [listings eligible for it]
+    for l in listings:
+        g = eff_guests(l)
+        for d in eff_dates(l):
+            for n in stay_nights:
+                req = min_for(l, d)
+                if n >= req:
+                    searches.setdefault((g, d, n), []).append(l)
+                else:
+                    snapshots.append({
+                        "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
+                        "stayLabel": stay_label(n), "nights": n,
+                        "checkIn": d, "checkOut": add_nights(d, n),
+                        "eligible": False, "minNights": req,
+                        "found": False, "page": None, "position": None,
+                        "rank": None, "total": None, "price": None, "currency": currency,
+                    })
+
+    print(f"  {len(searches)} unique searches (batched by guests + date + stay)")
+    for (g, d, n), ls in searches.items():
+        check_out = add_nights(d, n)
+        try:
+            results = run_search(box, d, check_out, g, currency)
+        except Exception as e:
+            print(f"  [error] search g{g} {d} {n}n: {e}")
+            results = []
+        rankmap = build_rankmap(results)
+        total = len(results)
+        hits = sum(1 for l in ls if str(l["airbnbId"]) in rankmap)
+        print(f"  g{g} {stay_label(n):<8} {d}: {total} results, {hits}/{len(ls)} found")
+        for l in ls:
+            snap = {
+                "listingId": l["id"], "airbnbId": str(l["airbnbId"]),
+                "stayLabel": stay_label(n), "nights": n,
+                "checkIn": d, "checkOut": check_out,
+                "eligible": True, "minNights": min_for(l, d),
+                "found": False, "page": None, "position": None,
+                "rank": None, "total": total, "price": None, "currency": currency,
+            }
+            info = rankmap.get(str(l["airbnbId"]))
+            if info:
+                page, pos, rank, price = info
+                snap.update({"found": True, "page": page, "position": pos,
+                             "rank": rank, "price": price})
+            snapshots.append(snap)
+        time.sleep(PAUSE)
     return snapshots, posted_min
 
 

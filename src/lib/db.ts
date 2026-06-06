@@ -13,6 +13,13 @@ declare global {
   var __rohubDb: Database.Database | undefined;
 }
 
+function ensureColumn(db: Database.Database, table: string, column: string, decl: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
+}
+
 function init(db: Database.Database) {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
@@ -175,6 +182,8 @@ function init(db: Database.Database) {
       platform      TEXT NOT NULL DEFAULT 'Airbnb',
       profile_id    TEXT NOT NULL REFERENCES search_profiles(id),
       unit_id       TEXT,
+      guests        INTEGER,
+      start_dates   TEXT,
       min_nights    INTEGER,
       min_nights_checked_at TEXT,
       active        INTEGER NOT NULL DEFAULT 1,
@@ -210,6 +219,10 @@ function init(db: Database.Database) {
       value         TEXT NOT NULL
     );
   `);
+
+  // Migrations for DBs created before these columns existed.
+  ensureColumn(db, "tracked_listings", "guests", "INTEGER");
+  ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
 }
 
 function seed(db: Database.Database) {
