@@ -1,0 +1,13 @@
+# Example Caddyfile — HTTPS + a login in front of the dashboard.
+# setup-box.sh writes this for you (with a hashed password). This copy is for
+# reference / manual tweaks. Put the real file at /etc/caddy/Caddyfile.
+#
+# Generate the password hash with:  caddy hash-password --plaintext "yourpassword"
+# Point your domain's DNS A record at the box IP; Caddy auto-issues the TLS cert.
+
+your-domain.com {
+    basic_auth {
+        admin $2a$14$REPLACE_WITH_BCRYPT_HASH
+    }
+    reverse_proxy localhost:3000
+}
