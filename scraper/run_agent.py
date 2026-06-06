@@ -128,6 +128,18 @@ def run_search(box, check_in, check_out, guests, currency):
     return results if isinstance(results, list) else []
 
 
+def search_with_retry(box, check_in, check_out, guests, currency, attempts=3):
+    last = None
+    for i in range(attempts):
+        try:
+            return run_search(box, check_in, check_out, guests, currency)
+        except Exception as e:
+            last = e
+            print(f"    retry {i + 1}/{attempts} after: {e}")
+            time.sleep(2 * (i + 1))
+    raise last if last else RuntimeError("search failed")
+
+
 def scan_profile(profile):
     box = profile["box"]
     currency = profile.get("currency", "ILS")
@@ -196,16 +208,20 @@ def scan_profile(profile):
                     })
 
     print(f"  {len(searches)} unique searches (batched by guests + date + stay)")
+    found_total = 0
+    error_count = 0
     for (g, d, n), ls in searches.items():
         check_out = add_nights(d, n)
         try:
-            results = run_search(box, d, check_out, g, currency)
+            results = search_with_retry(box, d, check_out, g, currency)
         except Exception as e:
             print(f"  [error] search g{g} {d} {n}n: {e}")
+            error_count += 1
             results = []
         rankmap = build_rankmap(results)
         total = len(results)
         hits = sum(1 for l in ls if str(l["airbnbId"]) in rankmap)
+        found_total += hits
         print(f"  g{g} {stay_label(n):<8} {d}: {total} results, {hits}/{len(ls)} found")
         for l in ls:
             snap = {
@@ -223,7 +239,11 @@ def scan_profile(profile):
                              "rank": rank, "price": price})
             snapshots.append(snap)
         time.sleep(PAUSE)
-    return snapshots, posted_min
+    return snapshots, posted_min, {
+        "found": found_total,
+        "errors": error_count,
+        "searches": len(searches),
+    }
 
 
 def main():
@@ -240,9 +260,13 @@ def main():
             continue
         run_id = uuid.uuid4().hex
         try:
-            snapshots, posted_min = scan_profile(profile)
+            snapshots, posted_min, stats = scan_profile(profile)
         except Exception as e:
             print(f"[error] profile {profile.get('id')}: {e}")
+            continue
+        if stats["found"] == 0 and stats["errors"] > 0:
+            print(f"  !! all searches errored and nothing was found -- NOT posting, "
+                  f"keeping previous data for {profile['id']}\n")
             continue
         payload = {
             "profileId": profile["id"],
