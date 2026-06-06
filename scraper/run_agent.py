@@ -30,6 +30,7 @@ import pyairbnb
 APP_URL = os.environ.get("APP_URL", "http://localhost:3000").rstrip("/")
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
 PROXY_URL = os.environ.get("PROXY_URL", "")
+SCAN_LISTING_IDS = os.environ.get("SCAN_LISTING_IDS", "")
 LANGUAGE = "en"
 WEB_PAGE_SIZE = 18
 PAUSE = 3
@@ -341,10 +342,17 @@ def main():
     profiles = cfg.get("profiles", [])
     print(f"{len(profiles)} active profile(s)\n" + "=" * 60)
 
+    scope = {x.strip() for x in SCAN_LISTING_IDS.split(",") if x.strip()}
+    if scope:
+        print(f"scope: only {len(scope)} selected listing(s)")
     headers = {"x-scraper-key": SCRAPER_API_KEY} if SCRAPER_API_KEY else {}
     for profile in profiles:
+        if scope:
+            profile["listings"] = [
+                l for l in profile.get("listings", []) if l["id"] in scope
+            ]
         if not profile.get("listings"):
-            print(f"[{profile.get('id')}] no listings -- skipping")
+            print(f"[{profile.get('id')}] no listings in scope -- skipping")
             continue
         run_id = uuid.uuid4().hex
         try:
