@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 import { ACTIVITY_FEED, DEPARTMENTS } from "@/lib/mock-data";
-import { APPROVAL_QUEUE } from "@/lib/synthesis-data";
+import { APPROVAL_QUEUE } from "@/lib/action-center-data";
 import { randomUUID } from "node:crypto";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -79,40 +79,6 @@ function init(db: Database.Database) {
       status        TEXT NOT NULL CHECK (status IN ('applied','pending_approval','rejected'))
     );
     CREATE INDEX IF NOT EXISTS idx_pricing_unit_ts ON pricing_history(unit_id, ts DESC);
-
-    CREATE TABLE IF NOT EXISTS orchestrator_runs (
-      id            TEXT PRIMARY KEY,
-      workspace     TEXT NOT NULL,
-      started_at    TEXT NOT NULL,
-      ended_at      TEXT,
-      state         TEXT NOT NULL,
-      phase         TEXT NOT NULL,
-      turn_count    INTEGER NOT NULL DEFAULT 0,
-      driver        TEXT NOT NULL DEFAULT 'scripted'
-    );
-
-    CREATE TABLE IF NOT EXISTS orchestrator_turns (
-      id            TEXT PRIMARY KEY,
-      run_id        TEXT NOT NULL REFERENCES orchestrator_runs(id),
-      seq           INTEGER NOT NULL,
-      turn          INTEGER NOT NULL,
-      role          TEXT NOT NULL,
-      ts            TEXT NOT NULL,
-      title         TEXT NOT NULL,
-      summary       TEXT NOT NULL,
-      artifacts     TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_turns_run_seq ON orchestrator_turns(run_id, seq);
-
-    CREATE TABLE IF NOT EXISTS orchestrator_lines (
-      id            TEXT PRIMARY KEY,
-      run_id        TEXT NOT NULL REFERENCES orchestrator_runs(id),
-      seq           INTEGER NOT NULL,
-      ts            TEXT NOT NULL,
-      stream        TEXT NOT NULL,
-      text          TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_lines_run_seq ON orchestrator_lines(run_id, seq);
 
     CREATE TABLE IF NOT EXISTS tracked_searches (
       id            TEXT PRIMARY KEY,
