@@ -594,3 +594,132 @@ export function markScanFinished(message: string): void {
   setSetting("scan_finished_at", new Date().toISOString());
   setSetting("scan_message", message);
 }
+
+// ---------------------------------------------------------------- analytics
+export interface TrendPoint {
+  runId: string;
+  ts: string;
+  listings: number;
+  appearing: number;
+  page1: number;
+  available: number;
+}
+
+// Per-scan portfolio counts over time (one point per run, chronological).
+export function portfolioTrend(limitRuns = 90): TrendPoint[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `WITH per_listing AS (
+         SELECT run_id, listing_id,
+           MAX(found) AS appeared,
+           MAX(CASE WHEN page = 1 THEN 1 ELSE 0 END) AS p1,
+           MAX(CASE WHEN found = 1 OR available = 1 THEN 1 ELSE 0 END) AS avail
+         FROM listing_snapshots GROUP BY run_id, listing_id
+       ),
+       run_ts AS (SELECT run_id, MAX(ts) AS ts FROM listing_snapshots GROUP BY run_id)
+       SELECT pl.run_id AS runId, rt.ts AS ts,
+         COUNT(*) AS listings,
+         SUM(pl.appeared) AS appearing,
+         SUM(pl.p1) AS page1,
+         SUM(pl.avail) AS available
+       FROM per_listing pl JOIN run_ts rt ON rt.run_id = pl.run_id
+       GROUP BY pl.run_id ORDER BY rt.ts DESC LIMIT ?`,
+    )
+    .all(limitRuns) as TrendPoint[];
+  return rows.reverse();
+}
+
+export interface Mover {
+  listingId: string;
+  label: string;
+  airbnbId: string;
+  latestRank: number | null;
+  prevRank: number | null;
+  delta: number | null; // positive = climbed (rank got smaller)
+  kind: "up" | "down" | "entered" | "left";
+}
+
+export function computeMovers(limit = 40): Mover[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT listing_id AS listingId, run_id AS runId, MAX(ts) AS ts,
+         MIN(CASE WHEN found = 1 THEN rank END) AS bestRank
+       FROM listing_snapshots GROUP BY listing_id, run_id`,
+    )
+    .all() as Array<{ listingId: string; runId: string; ts: string; bestRank: number | null }>;
+
+  const byListing = new Map<string, Array<{ ts: string; bestRank: number | null }>>();
+  for (const r of rows) {
+    const arr = byListing.get(r.listingId) ?? [];
+    arr.push({ ts: r.ts, bestRank: r.bestRank });
+    byListing.set(r.listingId, arr);
+  }
+  const listings = new Map(listListings().map((l) => [l.id, l]));
+
+  const movers: Mover[] = [];
+  for (const [lid, runs] of byListing) {
+    if (runs.length < 2) continue;
+    runs.sort((a, b) => a.ts.localeCompare(b.ts));
+    const latest = runs[runs.length - 1];
+    const prev = runs[runs.length - 2];
+    const l = listings.get(lid);
+    if (!l) continue;
+    const base = {
+      listingId: lid,
+      label: l.label,
+      airbnbId: l.airbnbId,
+      latestRank: latest.bestRank,
+      prevRank: prev.bestRank,
+    };
+    if (latest.bestRank != null && prev.bestRank != null) {
+      const delta = prev.bestRank - latest.bestRank;
+      if (delta !== 0) movers.push({ ...base, delta, kind: delta > 0 ? "up" : "down" });
+    } else if (latest.bestRank != null && prev.bestRank == null) {
+      movers.push({ ...base, delta: null, kind: "entered" });
+    } else if (latest.bestRank == null && prev.bestRank != null) {
+      movers.push({ ...base, delta: null, kind: "left" });
+    }
+  }
+  movers.sort((a, b) => Math.abs(b.delta ?? 0) - Math.abs(a.delta ?? 0));
+  return movers.slice(0, limit);
+}
+
+export interface HistoryPoint {
+  runId: string;
+  ts: string;
+  bestRank: number | null;
+  bestPage: number | null;
+  price: number | null;
+  available: boolean;
+}
+
+export function listingHistory(listingId: string): HistoryPoint[] {
+  const snaps = recentSnapshots(listingId, 3000);
+  const byRun = new Map<string, ListingSnapshot[]>();
+  for (const s of snaps) {
+    const arr = byRun.get(s.runId) ?? [];
+    arr.push(s);
+    byRun.set(s.runId, arr);
+  }
+  const points: HistoryPoint[] = [];
+  for (const [runId, rows] of byRun) {
+    const ts = rows.reduce((m, r) => (r.ts > m ? r.ts : m), rows[0].ts);
+    const found = rows.filter((r) => r.found && r.rank != null);
+    const bestRow = found.length
+      ? found.reduce((b, r) => ((r.rank as number) < (b.rank as number) ? r : b))
+      : null;
+    const price = bestRow?.price ?? rows.find((r) => r.price != null)?.price ?? null;
+    points.push({
+      runId,
+      ts,
+      bestRank: bestRow?.rank ?? null,
+      bestPage: bestRow?.page ?? null,
+      price,
+      available: rows.some((r) => r.available === true || r.found),
+    });
+  }
+  points.sort((a, b) => a.ts.localeCompare(b.ts));
+  return points;
+}
