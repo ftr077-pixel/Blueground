@@ -71,6 +71,35 @@ export function ManagePanel() {
     }
   }
 
+  // ---- scanner settings (proxy) ----
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [proxySaved, setProxySaved] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/visibility/settings", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((s: { proxyUrl?: string }) => setProxyUrl(s.proxyUrl || ""))
+      .catch(() => undefined);
+  }, []);
+
+  async function saveProxy() {
+    setBusy(true);
+    setError(null);
+    try {
+      await fetch("/api/visibility/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxyUrl }),
+      });
+      setProxySaved(true);
+      setTimeout(() => setProxySaved(false), 2000);
+    } catch {
+      setError("could not save proxy");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ---- new profile form ----
   const [pLabel, setPLabel] = useState("");
   const [pGuests, setPGuests] = useState("2");
@@ -115,6 +144,30 @@ export function ManagePanel() {
   return (
     <div className="space-y-6">
       {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
+
+      {/* ---------------------------------------------------------- settings */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle>Scanner settings</CardTitle>
+          <p className="text-[11px] text-muted-foreground">
+            Your residential proxy endpoint. With IP-whitelisting it&apos;s just the host:port — no
+            username or password. Powers the “Run scan now” button.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap gap-2">
+            <input
+              className={`${input} flex-1`}
+              placeholder="http://gate.decodo.com:10001"
+              value={proxyUrl}
+              onChange={(e) => setProxyUrl(e.target.value)}
+            />
+            <button type="button" disabled={busy} onClick={saveProxy} className={btn}>
+              {proxySaved ? "Saved ✓" : "Save proxy"}
+            </button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* ---------------------------------------------------------- profiles */}
       <Card>
@@ -182,7 +235,8 @@ export function ManagePanel() {
         <CardHeader className="pb-3">
           <CardTitle>Tracked listings</CardTitle>
           <p className="text-[11px] text-muted-foreground">
-            Add the listings to track. Paste Airbnb IDs or room URLs — one per line for bulk.
+            Add the listings to track. Paste Airbnb IDs, room URLs, or rows straight from your sheet
+            (CSV) — one per line.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -219,8 +273,8 @@ export function ManagePanel() {
                 </div>
                 <textarea
                   className={`${input} w-full font-mono`}
-                  rows={3}
-                  placeholder="Bulk: paste many Airbnb IDs or room URLs, one per line"
+                  rows={4}
+                  placeholder={"Bulk / CSV — one per line, e.g.:\nRothschild 14 Studio, https://www.airbnb.com/rooms/123456789\n1602229503214826484"}
                   value={bulk}
                   onChange={(e) => setBulk(e.target.value)}
                 />
@@ -233,7 +287,7 @@ export function ManagePanel() {
                   }}
                   className={btn}
                 >
-                  <Plus className="h-3.5 w-3.5" /> Add all (bulk)
+                  <Plus className="h-3.5 w-3.5" /> Add all (bulk / CSV)
                 </button>
               </div>
 
