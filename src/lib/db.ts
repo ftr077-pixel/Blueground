@@ -236,6 +236,10 @@ function init(db: Database.Database) {
   ensureColumn(db, "units", "monthly_discount_pct", "REAL NOT NULL DEFAULT 0.20");
   ensureColumn(db, "units", "min_stay", "INTEGER NOT NULL DEFAULT 30");
   ensureColumn(db, "units", "lowest_min_stay", "INTEGER NOT NULL DEFAULT 30");
+
+  // MiniHotel connection: each unit maps to a MiniHotel room-type code (names
+  // differ between this app and MiniHotel, so we store the link explicitly).
+  ensureColumn(db, "units", "minihotel_room_type", "TEXT");
   // Floors/ceilings derive from the base rate; backfill any rows still missing
   // them (covers both pre-existing DBs and freshly-seeded rows, which insert
   // only the original columns). Floor = 80% of base, ceiling = 120% (a surge cap
