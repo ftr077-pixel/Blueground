@@ -14,7 +14,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatRelative } from "@/lib/utils";
-import { applyLos } from "@/lib/revenue";
+import { applyLos, type LosDiscounts } from "@/lib/revenue";
 
 interface Snapshot {
   id: string;
@@ -144,7 +144,13 @@ export function VisibilityPanel() {
   const [showAllStays, setShowAllStays] = useState(false);
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "primary", dir: 1 });
   const [losWeekly, setLosWeekly] = useState(0);
+  const [losBiweekly, setLosBiweekly] = useState(0);
   const [losMonthly, setLosMonthly] = useState(0);
+  const disc: LosDiscounts = {
+    weeklyDiscountPct: losWeekly,
+    biWeeklyDiscountPct: losBiweekly,
+    monthlyDiscountPct: losMonthly,
+  };
 
   async function refresh() {
     try {
@@ -154,12 +160,17 @@ export function VisibilityPanel() {
         profiles: Profile[];
         listings: Listing[];
         primaryStay?: number;
-        costDefaults?: { weeklyDiscountPct?: number; monthlyDiscountPct?: number };
+        costDefaults?: {
+          weeklyDiscountPct?: number;
+          biWeeklyDiscountPct?: number;
+          monthlyDiscountPct?: number;
+        };
       };
       setProfiles(body.profiles);
       setListings(body.listings);
       if (body.primaryStay) setPrimaryStay(body.primaryStay);
       setLosWeekly(body.costDefaults?.weeklyDiscountPct ?? 0);
+      setLosBiweekly(body.costDefaults?.biWeeklyDiscountPct ?? 0);
       setLosMonthly(body.costDefaults?.monthlyDiscountPct ?? 0);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
@@ -390,7 +401,7 @@ export function VisibilityPanel() {
             return {
               l,
               pc: stayCell(l.latest, primaryLabel),
-              h: { ...h, price: applyLos(h.price, primaryStay, losWeekly, losMonthly) },
+              h: { ...h, price: applyLos(h.price, primaryStay, disc) },
             };
           })
           .filter(({ l, pc }) => matches(l, pc))
@@ -482,8 +493,7 @@ export function VisibilityPanel() {
                           h={h}
                           stayCols={stayCols}
                           colSpan={colSpan}
-                          losWeekly={losWeekly}
-                          losMonthly={losMonthly}
+                          disc={disc}
                           isOpen={open.has(l.id)}
                           onToggle={() => toggle(l.id)}
                           selected={selected.has(l.id)}
@@ -529,8 +539,7 @@ function ListingRows({
   h,
   stayCols,
   colSpan,
-  losWeekly,
-  losMonthly,
+  disc,
   isOpen,
   onToggle,
   selected,
@@ -540,8 +549,7 @@ function ListingRows({
   h: ReturnType<typeof headline>;
   stayCols: string[];
   colSpan: number;
-  losWeekly: number;
-  losMonthly: number;
+  disc: LosDiscounts;
   isOpen: boolean;
   onToggle: () => void;
   selected: boolean;
@@ -623,7 +631,7 @@ function ListingRows({
                             : "—"}
                       </td>
                       <td className="px-2 py-1 text-right font-mono">
-                        {money(applyLos(s.price, s.nights, losWeekly, losMonthly))}
+                        {money(applyLos(s.price, s.nights, disc))}
                       </td>
                     </tr>
                   ))}

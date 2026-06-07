@@ -645,6 +645,7 @@ export function getDashboard() {
       defaultUtilities: num("default_utilities", 1000),
       defaultCleaning: num("default_cleaning", 500),
       weeklyDiscountPct: num("los_weekly_pct", 0),
+      biWeeklyDiscountPct: num("los_biweekly_pct", 0),
       monthlyDiscountPct: num("los_monthly_pct", 0),
     },
   };
