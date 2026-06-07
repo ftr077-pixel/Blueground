@@ -409,7 +409,12 @@ function importTokens(line: string): string[] {
     .filter(Boolean);
 }
 
-export function bulkSetRentAddress(text: string): { updated: number; unmatched: string[] } {
+export function bulkSetRentAddress(text: string): {
+  updated: number;
+  unmatched: string[];
+  sampleListings: string[];
+  listingCount: number;
+} {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const listings = listListings();
   const byAirbnb = new Map<string, TrackedListing>();
@@ -472,7 +477,12 @@ export function bulkSetRentAddress(text: string): { updated: number; unmatched: 
     updateListing(target.id, { monthlyRent: rent, ...(address ? { address } : {}) });
     updated++;
   }
-  return { updated, unmatched };
+  return {
+    updated,
+    unmatched,
+    sampleListings: listings.slice(0, 12).map((l) => l.label),
+    listingCount: listings.length,
+  };
 }
 
 // Parse pasted listings — one per line. Handles plain Airbnb IDs, room URLs, and
