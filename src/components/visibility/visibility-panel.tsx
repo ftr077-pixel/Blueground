@@ -54,8 +54,6 @@ interface Listing {
   latest: Snapshot[];
 }
 
-type State = "ranked" | "buried" | "booked" | "minstay" | "unknown" | "none";
-
 const STAY_LABELS: Record<number, string> = {
   7: "1 week",
   14: "2 weeks",
@@ -64,25 +62,6 @@ const STAY_LABELS: Record<number, string> = {
   90: "3 months",
 };
 const nightsLabel = (n: number) => STAY_LABELS[n] ?? `${n} nights`;
-
-function listingView(latest: Snapshot[]) {
-  const eligible = latest.filter((s) => s.eligible);
-  const found = latest.filter((s) => s.found && s.page != null);
-  const availTrue = latest.filter((s) => s.available === true || s.found);
-  const bestPage = found.length ? Math.min(...found.map((s) => s.page as number)) : null;
-  const price =
-    found.find((s) => s.price != null)?.price ??
-    latest.find((s) => s.price != null)?.price ??
-    null;
-  let state: State;
-  if (!latest.length) state = "none";
-  else if (!eligible.length) state = "minstay";
-  else if (found.length) state = "ranked";
-  else if (availTrue.length) state = "buried";
-  else if (eligible.some((s) => s.available === false)) state = "booked";
-  else state = "unknown";
-  return { state, bestPage, price };
-}
 
 // Best result for one listing at one stay length (across its dates).
 function stayCell(latest: Snapshot[], label: string) {
@@ -105,21 +84,26 @@ function money(n: number | null) {
   return n != null ? `₪${Math.round(n).toLocaleString()}` : "—";
 }
 
-// Most recent scan time across a listing's latest snapshots.
-function lastChecked(latest: Snapshot[]): string | null {
-  let t: string | null = null;
-  for (const s of latest) if (s.ts && (!t || s.ts > t)) t = s.ts;
-  return t;
+// The check-in (first available) date + matching price for the row's headline.
+// Prefers the primary (monthly) stay's best-ranked result, falling back to the
+// earliest dated snapshot, then to any stay length.
+function headline(latest: Snapshot[], primaryLabel: string) {
+  const pickFrom = (rows: Snapshot[]) => {
+    const found = rows.filter((s): s is Snapshot & { page: number } => s.found && s.page != null);
+    if (found.length) return found.reduce((b, s) => (s.page < b.page ? s : b));
+    const dated = rows.filter((s) => s.checkIn);
+    return dated.length ? dated.reduce((b, s) => (s.checkIn < b.checkIn ? s : b)) : null;
+  };
+  const s = pickFrom(latest.filter((r) => r.stayLabel === primaryLabel)) ?? pickFrom(latest);
+  return { checkIn: s?.checkIn ?? null, price: s?.price ?? null };
 }
 
-function fmtChecked(ts: string | null) {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+function fmtDate(d: string | null) {
+  if (!d) return "—";
+  const dt = new Date(`${d}T00:00:00`);
+  return Number.isNaN(dt.getTime())
+    ? d
+    : dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function cellRank(c: ReturnType<typeof stayCell>) {
@@ -380,7 +364,7 @@ export function VisibilityPanel() {
           showAllStays || !allCols.includes(primaryLabel) ? allCols : [primaryLabel];
         const rows = listings
           .filter((l) => l.profileId === p.id)
-          .map((l) => ({ l, v: listingView(l.latest), pc: stayCell(l.latest, primaryLabel) }))
+          .map((l) => ({ l, pc: stayCell(l.latest, primaryLabel) }))
           .filter(({ l, pc }) => matches(l, pc))
           .sort((a, b) => cellRank(a.pc) - cellRank(b.pc));
         const colSpan = stayCols.length + 5;
@@ -405,7 +389,6 @@ export function VisibilityPanel() {
                     <tr>
                       <th className="px-2 py-2" />
                       <th className="px-3 py-2 text-left">Listing</th>
-                      <th className="px-3 py-2 text-left">Checked</th>
                       {stayCols.map((c) => (
                         <th
                           key={c}
@@ -416,6 +399,7 @@ export function VisibilityPanel() {
                           {c === primaryLabel ? `★ ${c}` : c}
                         </th>
                       ))}
+                      <th className="px-3 py-2 text-left">Check-in</th>
                       <th className="px-3 py-2 text-right">Price</th>
                       <th className="px-2 py-2" />
                     </tr>
@@ -428,12 +412,12 @@ export function VisibilityPanel() {
                         </td>
                       </tr>
                     ) : (
-                      rows.map(({ l, v }) => (
+                      rows.map(({ l }) => (
                         <ListingRows
                           key={l.id}
                           l={l}
-                          v={v}
                           stayCols={stayCols}
+                          primaryLabel={primaryLabel}
                           colSpan={colSpan}
                           isOpen={open.has(l.id)}
                           onToggle={() => toggle(l.id)}
@@ -477,8 +461,8 @@ function StayCell({ cell }: { cell: ReturnType<typeof stayCell> }) {
 
 function ListingRows({
   l,
-  v,
   stayCols,
+  primaryLabel,
   colSpan,
   isOpen,
   onToggle,
@@ -486,15 +470,15 @@ function ListingRows({
   onSelect,
 }: {
   l: Listing;
-  v: ReturnType<typeof listingView>;
   stayCols: string[];
+  primaryLabel: string;
   colSpan: number;
   isOpen: boolean;
   onToggle: () => void;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const checked = lastChecked(l.latest);
+  const h = headline(l.latest, primaryLabel);
   return (
     <>
       <tr className="border-t border-border/60 cursor-pointer hover:bg-muted/30" onClick={onToggle}>
@@ -514,18 +498,18 @@ function ListingRows({
             {l.guests != null && ` · ${l.guests} guests`}
           </div>
         </td>
-        <td
-          className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground"
-          title={checked ?? ""}
-        >
-          {fmtChecked(checked)}
-        </td>
         {stayCols.map((c) => (
           <td key={c} className="px-3 py-2 text-center font-mono">
             <StayCell cell={stayCell(l.latest, c)} />
           </td>
         ))}
-        <td className="px-3 py-2 text-right font-mono">{money(v.price)}</td>
+        <td
+          className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground"
+          title={h.checkIn ?? ""}
+        >
+          {fmtDate(h.checkIn)}
+        </td>
+        <td className="px-3 py-2 text-right font-mono">{money(h.price)}</td>
         <td className="px-2 py-2 text-muted-foreground">
           {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </td>
