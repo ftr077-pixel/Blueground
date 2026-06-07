@@ -538,7 +538,20 @@ export function recentSnapshots(listingId: string, limit = 300): ListingSnapshot
 export function getDashboard() {
   const profiles = listProfiles();
   const listings = listListings().map((l) => ({ ...l, latest: latestSnapshots(l.id) }));
-  return { profiles, listings, primaryStay: Number(getSetting("primary_stay")) || 30 };
+  const num = (k: string, d: number) => {
+    const v = getSetting(k);
+    return v != null && v !== "" ? Number(v) : d;
+  };
+  return {
+    profiles,
+    listings,
+    primaryStay: num("primary_stay", 30),
+    costDefaults: {
+      bgFeePct: num("bg_fee_pct", 6),
+      defaultUtilities: num("default_utilities", 1000),
+      defaultCleaning: num("default_cleaning", 500),
+    },
+  };
 }
 
 // What the scraper box pulls: active profiles, each with its active listings.
@@ -709,6 +722,109 @@ export function computeMovers(limit = 40): Mover[] {
   }
   movers.sort((a, b) => Math.abs(b.delta ?? 0) - Math.abs(a.delta ?? 0));
   return movers.slice(0, limit);
+}
+
+// ---------------------------------------------------------------- comp-set / market data
+// Our home-grown analog to PriceLabs' "Neighborhood Data": percentile nightly
+// rate bands derived from the competitor prices we already scrape. Snapshot
+// `price` is the total for the stay, so nightly = price / nights.
+export interface RateBand {
+  profileId: string;
+  area: string; // profile label
+  nights: number;
+  stayLabel: string;
+  n: number;
+  p25: number; // nightly, in `currency`
+  p50: number;
+  p75: number;
+  currency: string;
+}
+
+function percentile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = (sorted.length - 1) * q;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+export function marketRateBands(): RateBand[] {
+  const db = getDb();
+  // Most-recent priced appearance per (listing, nights), so a frequently-scanned
+  // listing isn't over-counted; then group by search area (profile) × stay length.
+  const rows = db
+    .prepare(
+      `SELECT listing_id, profile_id, nights, stay_label, price, currency
+       FROM listing_snapshots
+       WHERE found = 1 AND price IS NOT NULL AND price > 0 AND nights > 0
+       ORDER BY ts DESC`,
+    )
+    .all() as Array<{
+    listing_id: string;
+    profile_id: string;
+    nights: number;
+    stay_label: string;
+    price: number;
+    currency: string | null;
+  }>;
+
+  const profiles = new Map(listProfiles().map((p) => [p.id, p]));
+  const seen = new Set<string>();
+  const groups = new Map<
+    string,
+    { profileId: string; nights: number; stayLabel: string; currency: string; nightly: number[] }
+  >();
+  for (const r of rows) {
+    const dedupe = `${r.listing_id}::${r.nights}`;
+    if (seen.has(dedupe)) continue; // keep only the latest per listing×nights
+    seen.add(dedupe);
+    const key = `${r.profile_id}::${r.nights}`;
+    const g =
+      groups.get(key) ??
+      {
+        profileId: r.profile_id,
+        nights: r.nights,
+        stayLabel: r.stay_label,
+        currency: r.currency ?? "ILS",
+        nightly: [],
+      };
+    g.nightly.push(r.price / r.nights);
+    groups.set(key, g);
+  }
+
+  const bands: RateBand[] = [];
+  for (const g of groups.values()) {
+    const sorted = [...g.nightly].sort((a, b) => a - b);
+    bands.push({
+      profileId: g.profileId,
+      area: profiles.get(g.profileId)?.label ?? g.profileId,
+      nights: g.nights,
+      stayLabel: g.stayLabel,
+      n: sorted.length,
+      p25: Math.round(percentile(sorted, 0.25)),
+      p50: Math.round(percentile(sorted, 0.5)),
+      p75: Math.round(percentile(sorted, 0.75)),
+      currency: g.currency,
+    });
+  }
+  bands.sort((a, b) => a.area.localeCompare(b.area) || a.nights - b.nights);
+  return bands;
+}
+
+// Median competitor minimum-stay across tracked listings — a benchmark the
+// Pricing Specialist uses when recommending our own min-stay.
+export function marketMinNightsBenchmark(): { median: number | null; n: number } {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT min_nights FROM tracked_listings WHERE min_nights IS NOT NULL")
+    .all() as Array<{ min_nights: number }>;
+  const vals = rows.map((r) => r.min_nights).filter((v) => v > 0).sort((a, b) => a - b);
+  if (vals.length === 0) return { median: null, n: 0 };
+  const mid = Math.floor(vals.length / 2);
+  const median =
+    vals.length % 2 ? vals[mid] : Math.round((vals[mid - 1] + vals[mid]) / 2);
+  return { median, n: vals.length };
 }
 
 export interface HistoryPoint {

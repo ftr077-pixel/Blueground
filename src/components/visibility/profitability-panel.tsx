@@ -21,17 +21,18 @@ export function ProfitabilityPanel() {
   if (!data) return null;
 
   const primary = data.primaryStay;
+  const { bgFeePct } = data.costDefaults;
   const rows = data.listings
-    .map((l) => ({ l, e: economics(l), page: bestPage(l, primary) }))
+    .map((l) => ({ l, e: economics(l, data.costDefaults), page: bestPage(l, primary) }))
     .sort((a, b) => (b.e.profit ?? -Infinity) - (a.e.profit ?? -Infinity));
 
-  const withProfit = rows.filter((r) => r.e.profit != null);
-  const totRev = withProfit.reduce((s, r) => s + (r.e.revenue ?? 0), 0);
-  const totCost = withProfit.reduce((s, r) => s + (r.e.cost ?? 0), 0);
+  const withRev = rows.filter((r) => r.e.profit != null);
+  const totRev = withRev.reduce((s, r) => s + (r.e.revenue ?? 0), 0);
+  const totCost = withRev.reduce((s, r) => s + (r.e.cost ?? 0), 0);
   const totProfit = totRev - totCost;
   const avgMargin = totRev ? totProfit / totRev : null;
-  const missing = rows.filter((r) => !r.e.costsKnown).length;
-  const losers = withProfit.filter((r) => (r.e.profit ?? 0) < 0).length;
+  const losers = withRev.filter((r) => (r.e.profit ?? 0) < 0).length;
+  const missingRent = rows.filter((r) => !r.e.rentKnown).length;
 
   return (
     <div className="space-y-6">
@@ -49,22 +50,25 @@ export function ProfitabilityPanel() {
         </CardContent>
       </Card>
 
-      {missing > 0 && (
-        <p className="text-[11px] text-muted-foreground">
-          {missing} listing(s) missing cost inputs — set rent / utilities / cleaning in{" "}
-          <Link href="/visibility/manage" className="text-primary hover:underline">
-            Manage
-          </Link>{" "}
-          to include them here.
-        </p>
-      )}
+      <p className="text-[11px] text-muted-foreground">
+        Costs = <span className="text-foreground">BG fee {bgFeePct}%</span> of revenue + utilities +
+        cleaning + rent. Utilities ({fmtMoney(data.costDefaults.defaultUtilities)}) and cleaning (
+        {fmtMoney(data.costDefaults.defaultCleaning)}) use the{" "}
+        <Link href="/settings" className="text-primary hover:underline">
+          Settings
+        </Link>{" "}
+        defaults unless overridden per listing in{" "}
+        <Link href="/visibility/manage" className="text-primary hover:underline">
+          Manage
+        </Link>
+        .{missingRent > 0 && ` ${missingRent} listing(s) have no rent set yet — their profit excludes rent (marked *).`}
+      </p>
 
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Profit by listing (per month)</CardTitle>
           <p className="text-[11px] text-muted-foreground">
-            Revenue = the 1-month price from the latest scan. Cost = rent + utilities + cleaning.
-            Profit = revenue − cost.
+            Hover &ldquo;Fees &amp; bills&rdquo; for the BG-fee / utilities / cleaning breakdown.
           </p>
         </CardHeader>
         <CardContent>
@@ -75,42 +79,57 @@ export function ProfitabilityPanel() {
                   <th className="px-3 py-2 text-left">Listing</th>
                   <th className="px-3 py-2 text-center">★ {nightsLabel(primary)}</th>
                   <th className="px-3 py-2 text-right">Revenue</th>
-                  <th className="px-3 py-2 text-right">Cost</th>
+                  <th className="px-3 py-2 text-right">Rent</th>
+                  <th className="px-3 py-2 text-right">Fees &amp; bills</th>
                   <th className="px-3 py-2 text-right">Profit</th>
                   <th className="px-3 py-2 text-right">Margin</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map(({ l, e, page }) => (
-                  <tr key={l.id} className="border-t border-border/60 hover:bg-muted/30">
-                    <td className="px-3 py-2">
-                      <Link
-                        href={`/visibility/listing/${l.id}`}
-                        className="font-medium hover:text-primary"
+                {rows.map(({ l, e, page }) => {
+                  const feesBills = e.revenue != null ? (e.bgFee ?? 0) + e.utilities + e.cleaning : null;
+                  return (
+                    <tr key={l.id} className="border-t border-border/60 hover:bg-muted/30">
+                      <td className="px-3 py-2">
+                        <Link
+                          href={`/visibility/listing/${l.id}`}
+                          className="font-medium hover:text-primary"
+                        >
+                          {l.label}
+                        </Link>
+                        <div className="text-[10px] text-muted-foreground">{l.airbnbId}</div>
+                      </td>
+                      <td className="px-3 py-2 text-center font-mono">
+                        {page != null ? `p${page}` : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">{fmtMoney(e.revenue)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                        {e.rentKnown ? fmtMoney(e.rent) : <span className="italic">set rent</span>}
+                      </td>
+                      <td
+                        className="px-3 py-2 text-right font-mono text-muted-foreground"
+                        title={`BG fee ${fmtMoney(e.bgFee)} · utilities ${fmtMoney(
+                          e.utilities,
+                        )} · cleaning ${fmtMoney(e.cleaning)}`}
                       >
-                        {l.label}
-                      </Link>
-                      <div className="text-[10px] text-muted-foreground">{l.airbnbId}</div>
-                    </td>
-                    <td className="px-3 py-2 text-center font-mono">{page != null ? `p${page}` : "—"}</td>
-                    <td className="px-3 py-2 text-right font-mono">{fmtMoney(e.revenue)}</td>
-                    <td className="px-3 py-2 text-right font-mono text-muted-foreground">
-                      {e.costsKnown ? fmtMoney(e.cost) : <span className="italic">set costs</span>}
-                    </td>
-                    <td
-                      className={`px-3 py-2 text-right font-mono ${
-                        e.profit == null
-                          ? "text-muted-foreground"
-                          : e.profit >= 0
-                            ? "text-[hsl(var(--success))]"
-                            : "text-[hsl(var(--danger))]"
-                      }`}
-                    >
-                      {fmtMoney(e.profit)}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono">{fmtPct(e.margin)}</td>
-                  </tr>
-                ))}
+                        {fmtMoney(feesBills)}
+                      </td>
+                      <td
+                        className={`px-3 py-2 text-right font-mono ${
+                          e.profit == null
+                            ? "text-muted-foreground"
+                            : e.profit >= 0
+                              ? "text-[hsl(var(--success))]"
+                              : "text-[hsl(var(--danger))]"
+                        }`}
+                      >
+                        {fmtMoney(e.profit)}
+                        {!e.rentKnown && e.profit != null && <span title="rent not set">*</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">{fmtPct(e.margin)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
