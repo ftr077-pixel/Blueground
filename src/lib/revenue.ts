@@ -45,6 +45,7 @@ export interface CostDefaults {
   defaultUtilities: number;
   defaultCleaning: number;
   weeklyDiscountPct: number;
+  biWeeklyDiscountPct: number;
   monthlyDiscountPct: number;
 }
 
@@ -95,26 +96,28 @@ export function rawMonthlyPrice(l: DashListing): number | null {
   return rows.find((s) => s.price != null)?.price ?? null;
 }
 
-// Fixed length-of-stay discount that applies to a stay of `nights`: monthly for
-// 28+, weekly for 7-27, none below a week (Airbnb's standard buckets).
-export function losDiscountPct(nights: number, weeklyPct: number, monthlyPct: number): number {
-  if (nights >= 28) return monthlyPct;
-  if (nights >= 7) return weeklyPct;
+export type LosDiscounts = {
+  weeklyDiscountPct: number;
+  biWeeklyDiscountPct: number;
+  monthlyDiscountPct: number;
+};
+
+// Fixed length-of-stay discount for a stay of `nights`: monthly for 28+,
+// two-week for 14-27, weekly for 7-13, none below a week.
+export function losDiscountPct(nights: number, d: LosDiscounts): number {
+  if (nights >= 28) return d.monthlyDiscountPct;
+  if (nights >= 14) return d.biWeeklyDiscountPct;
+  if (nights >= 7) return d.weeklyDiscountPct;
   return 0;
 }
-export function applyLos(
-  raw: number | null,
-  nights: number,
-  weeklyPct: number,
-  monthlyPct: number,
-): number | null {
+export function applyLos(raw: number | null, nights: number, d: LosDiscounts): number | null {
   if (raw == null) return null;
-  return raw * (1 - losDiscountPct(nights, weeklyPct, monthlyPct) / 100);
+  return raw * (1 - losDiscountPct(nights, d) / 100);
 }
 
 // Monthly revenue = the 1-month list price with your fixed monthly discount applied.
 export function monthlyPrice(l: DashListing, d: CostDefaults): number | null {
-  return applyLos(rawMonthlyPrice(l), 30, d.weeklyDiscountPct, d.monthlyDiscountPct);
+  return applyLos(rawMonthlyPrice(l), 30, d);
 }
 
 export interface Economics {

@@ -17,6 +17,7 @@ export async function GET() {
     defaultUtilities: num("default_utilities", 1000),
     defaultCleaning: num("default_cleaning", 500),
     weeklyDiscountPct: num("los_weekly_pct", 0),
+    biWeeklyDiscountPct: num("los_biweekly_pct", 0),
     monthlyDiscountPct: num("los_monthly_pct", 0),
   });
 }
@@ -30,6 +31,7 @@ export async function POST(req: Request) {
     defaultUtilities?: number;
     defaultCleaning?: number;
     weeklyDiscountPct?: number;
+    biWeeklyDiscountPct?: number;
     monthlyDiscountPct?: number;
   } | null;
   if (body == null) return NextResponse.json({ error: "invalid json" }, { status: 400 });
@@ -46,6 +48,8 @@ export async function POST(req: Request) {
     setSetting("default_cleaning", String(Math.max(0, Math.round(body.defaultCleaning))));
   if (body.weeklyDiscountPct !== undefined)
     setSetting("los_weekly_pct", String(Math.max(0, Math.min(90, body.weeklyDiscountPct))));
+  if (body.biWeeklyDiscountPct !== undefined)
+    setSetting("los_biweekly_pct", String(Math.max(0, Math.min(90, body.biWeeklyDiscountPct))));
   if (body.monthlyDiscountPct !== undefined)
     setSetting("los_monthly_pct", String(Math.max(0, Math.min(90, body.monthlyDiscountPct))));
   return NextResponse.json({ ok: true });
