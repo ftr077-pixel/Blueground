@@ -12,6 +12,7 @@ import {
   ConciergeBell,
   LayoutDashboard,
   Radar,
+  Settings,
   ShieldAlert,
   TrendingUp,
 } from "lucide-react";
@@ -94,7 +95,26 @@ export function Sidebar() {
         </div>
       </nav>
 
-      <div className="border-t border-border px-4 py-4">
+      <div className="space-y-2 border-t border-border px-3 py-3">
+        <Link
+          href="/settings"
+          className={cn(
+            "group flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors",
+            pathname === "/settings"
+              ? "bg-primary/10 text-foreground"
+              : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+          )}
+        >
+          <Settings
+            className={cn(
+              "h-4 w-4 shrink-0",
+              pathname === "/settings"
+                ? "text-primary"
+                : "text-muted-foreground group-hover:text-foreground",
+            )}
+          />
+          <span>Settings</span>
+        </Link>
         <div className="rounded-lg bg-muted/40 px-3 py-3">
           <div className="flex items-center justify-between">
             <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
