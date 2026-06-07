@@ -16,6 +16,29 @@ interface UnitDto {
   occupancy30d: number;
   platform: string;
   lastRateChangeAt: string | null;
+  minRate: number;
+  maxRate: number;
+  weeklyDiscountPct: number;
+  monthlyDiscountPct: number;
+  minStay: number;
+  lowestMinStay: number;
+}
+
+interface RateBandDto {
+  profileId: string;
+  area: string;
+  nights: number;
+  stayLabel: string;
+  n: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  currency: string;
+}
+
+interface MarketDto {
+  bands: RateBandDto[];
+  minNights: { median: number | null; n: number };
 }
 
 interface HistoryDto {
@@ -49,6 +72,7 @@ const STATUS_LABEL: Record<HistoryDto["status"], string> = {
 export function PricingPanel() {
   const [units, setUnits] = useState<UnitDto[]>([]);
   const [history, setHistory] = useState<HistoryDto[]>([]);
+  const [market, setMarket] = useState<MarketDto | null>(null);
   const [running, setRunning] = useState(false);
   const [lastRun, setLastRun] = useState<RunSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,9 +81,14 @@ export function PricingPanel() {
     try {
       const res = await fetch("/api/agents/pricing", { cache: "no-store" });
       if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-      const body = (await res.json()) as { units: UnitDto[]; history: HistoryDto[] };
+      const body = (await res.json()) as {
+        units: UnitDto[];
+        history: HistoryDto[];
+        market?: MarketDto;
+      };
       setUnits(body.units);
       setHistory(body.history);
+      setMarket(body.market ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
     }
@@ -92,8 +121,9 @@ export function PricingPanel() {
           <div>
             <CardTitle>Pricing Specialist · live</CardTitle>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              Real agent. Each pass scores demand + occupancy per unit, applies moves under ±15%
-              directly, and escalates anything bigger to the Action Center per spec.md §5.
+              Real agent. Each pass scores demand + occupancy per unit, pins the result to the
+              unit&apos;s floor/ceiling, recommends a min-stay (benchmarked vs. market), applies
+              moves under ±15% directly, and escalates anything bigger to the Action Center (spec §5).
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -136,13 +166,19 @@ export function PricingPanel() {
                   <th className="px-3 py-2 text-left">Hood</th>
                   <th className="px-3 py-2 text-right">Base</th>
                   <th className="px-3 py-2 text-right">Current</th>
+                  <th className="px-3 py-2 text-right">Floor / Ceil</th>
+                  <th className="px-3 py-2 text-right">₪/mo</th>
                   <th className="px-3 py-2 text-right">Occ 30d</th>
+                  <th className="px-3 py-2 text-right">Min-stay</th>
                   <th className="px-3 py-2 text-left">Last move</th>
                 </tr>
               </thead>
               <tbody>
                 {units.map((u) => {
                   const delta = ((u.currentRate - u.baseRate) / u.baseRate) * 100;
+                  const effMonthly = Math.round(u.currentRate * 30 * (1 - u.monthlyDiscountPct));
+                  const atFloor = u.currentRate <= u.minRate;
+                  const atCeil = u.currentRate >= u.maxRate;
                   return (
                     <tr key={u.id} className="border-t border-border/60">
                       <td className="px-3 py-2">
@@ -171,8 +207,31 @@ export function PricingPanel() {
                           </span>
                         )}
                       </td>
+                      <td className="px-3 py-2 text-right font-mono text-[10px] text-muted-foreground">
+                        ₪{u.minRate}–₪{u.maxRate}
+                        {atFloor && (
+                          <span className="ml-1 text-[hsl(var(--danger))]">floor</span>
+                        )}
+                        {atCeil && (
+                          <span className="ml-1 text-[hsl(var(--success))]">ceil</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        ₪{effMonthly.toLocaleString()}
+                        <span className="ml-1 text-[10px] text-muted-foreground">
+                          −{Math.round(u.monthlyDiscountPct * 100)}%
+                        </span>
+                      </td>
                       <td className="px-3 py-2 text-right font-mono">
                         {(u.occupancy30d * 100).toFixed(0)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {u.minStay}n
+                        {u.minStay > u.lowestMinStay && (
+                          <span className="ml-1 text-[10px] text-muted-foreground">
+                            ≥{u.lowestMinStay}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-[11px] text-muted-foreground">
                         {u.lastRateChangeAt ? formatRelative(u.lastRateChangeAt) : "—"}
@@ -183,6 +242,65 @@ export function PricingPanel() {
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div>
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Market rate bands · from visibility scans
+            </span>
+            {market?.minNights.median != null && (
+              <span className="text-[10px] text-muted-foreground">
+                competitor min-stay median {market.minNights.median}n (n={market.minNights.n})
+              </span>
+            )}
+          </div>
+          {!market || market.bands.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">
+              No competitor price data yet — run a visibility scan to populate nightly rate bands.
+            </p>
+          ) : (
+            <div className="overflow-hidden rounded-lg border border-border">
+              <table className="w-full text-xs">
+                <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Area</th>
+                    <th className="px-3 py-2 text-left">Stay</th>
+                    <th className="px-3 py-2 text-right">n</th>
+                    <th className="px-3 py-2 text-right">P25</th>
+                    <th className="px-3 py-2 text-right">Median</th>
+                    <th className="px-3 py-2 text-right">P75</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {market.bands.map((b) => (
+                    <tr
+                      key={`${b.profileId}-${b.nights}`}
+                      className="border-t border-border/60"
+                    >
+                      <td className="px-3 py-2">{b.area}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{b.stayLabel}</td>
+                      <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                        {b.n}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                        ₪{b.p25.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold">
+                        ₪{b.p50.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                        ₪{b.p75.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="px-3 py-2 text-[10px] text-muted-foreground">
+                Nightly equivalents (stay total ÷ nights) from tracked competitor listings.
+              </p>
+            </div>
+          )}
         </div>
 
         <div>

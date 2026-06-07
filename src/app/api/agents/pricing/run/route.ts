@@ -20,6 +20,10 @@ export async function POST() {
       deltaPct: Number(d.deltaPct.toFixed(2)),
       status: d.status,
       reason: d.reason,
+      bound: d.bound,
+      effectiveMonthlyRate: d.effectiveMonthlyRate,
+      minStay: d.minStay,
+      prevMinStay: d.prevMinStay,
     })),
   });
 }
