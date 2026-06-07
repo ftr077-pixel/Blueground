@@ -228,6 +228,22 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
   ensureColumn(db, "tracked_listings", "address", "TEXT");
 
+  // One-time backfill: give every apartment the default utilities/cleaning the
+  // operator asked for, so the costs are filled in and visible (not just applied
+  // implicitly in the profit math). Runs once, guarded by a meta flag.
+  const costsBackfilled = db
+    .prepare("SELECT value FROM meta WHERE key = 'cost_defaults_backfilled'")
+    .get();
+  if (!costsBackfilled) {
+    db.exec(`
+      UPDATE tracked_listings SET utilities = 1000 WHERE utilities IS NULL;
+      UPDATE tracked_listings SET cleaning_fee = 500 WHERE cleaning_fee IS NULL;
+    `);
+    db.prepare(
+      "INSERT OR REPLACE INTO meta (key, value) VALUES ('cost_defaults_backfilled', 'v1')",
+    ).run();
+  }
+
   // Pricing v2 (PriceLabs-inspired): per-unit price floor/ceiling, weekly/monthly
   // LOS discounts, and a minimum-stay policy (recommended + hard floor).
   ensureColumn(db, "units", "min_rate", "INTEGER");

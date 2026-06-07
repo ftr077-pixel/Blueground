@@ -44,12 +44,16 @@ function ListingRow({
   l,
   profile,
   busy,
+  defaultUtilities,
+  defaultCleaning,
   onPatch,
   onDelete,
 }: {
   l: Listing;
   profile: Profile | undefined;
   busy: boolean;
+  defaultUtilities: number;
+  defaultCleaning: number;
   onPatch: (id: string, body: Record<string, unknown>) => void;
   onDelete: (l: Listing) => void;
 }) {
@@ -122,16 +126,16 @@ function ListingRow({
       <input
         className={`${input} w-20`}
         value={util}
-        placeholder="Utils/mo"
-        title="Monthly utilities (your cost)"
+        placeholder={`${defaultUtilities}`}
+        title="Monthly utilities (blank = default)"
         onChange={(e) => setUtil(e.target.value)}
         onBlur={() => onPatch(l.id, { utilities: parseNum(util) })}
       />
       <input
         className={`${input} w-20`}
         value={clean}
-        placeholder="Cleaning"
-        title="Cleaning fee per stay (your cost)"
+        placeholder={`${defaultCleaning}`}
+        title="Cleaning fee per stay (blank = default)"
         onChange={(e) => setClean(e.target.value)}
         onBlur={() => onPatch(l.id, { cleaningFee: parseNum(clean) })}
       />
@@ -198,16 +202,28 @@ export function ManagePanel() {
   const [proxyUrl, setProxyUrl] = useState("");
   const [availabilityDays, setAvailabilityDays] = useState("90");
   const [primaryStay, setPrimaryStay] = useState("30");
+  const [defUtil, setDefUtil] = useState(1000);
+  const [defClean, setDefClean] = useState(500);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     fetch("/api/visibility/settings", { cache: "no-store" })
       .then((r) => r.json())
-      .then((s: { proxyUrl?: string; availabilityDays?: number; primaryStay?: number }) => {
-        setProxyUrl(s.proxyUrl || "");
-        if (s.availabilityDays) setAvailabilityDays(String(s.availabilityDays));
-        if (s.primaryStay) setPrimaryStay(String(s.primaryStay));
-      })
+      .then(
+        (s: {
+          proxyUrl?: string;
+          availabilityDays?: number;
+          primaryStay?: number;
+          defaultUtilities?: number;
+          defaultCleaning?: number;
+        }) => {
+          setProxyUrl(s.proxyUrl || "");
+          if (s.availabilityDays) setAvailabilityDays(String(s.availabilityDays));
+          if (s.primaryStay) setPrimaryStay(String(s.primaryStay));
+          if (s.defaultUtilities != null) setDefUtil(s.defaultUtilities);
+          if (s.defaultCleaning != null) setDefClean(s.defaultCleaning);
+        },
+      )
       .catch(() => undefined);
   }, []);
 
@@ -587,6 +603,8 @@ export function ManagePanel() {
                     l={l}
                     profile={profiles.find((p) => p.id === l.profileId)}
                     busy={busy}
+                    defaultUtilities={defUtil}
+                    defaultCleaning={defClean}
                     onPatch={patchListing}
                     onDelete={removeListing}
                   />
