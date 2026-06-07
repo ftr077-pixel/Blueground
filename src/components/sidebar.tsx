@@ -10,6 +10,7 @@ import {
   Boxes,
   ChevronDown,
   ConciergeBell,
+  FileSpreadsheet,
   LayoutDashboard,
   Radar,
   ShieldAlert,
@@ -38,6 +39,7 @@ const REVENUE_HUB = {
 
 const OPS_BOTTOM: Item[] = [
   { href: "/pnl", label: "P&L Forecast", icon: Wallet },
+  { href: "/pnl/bridge", label: "Business Plan", icon: FileSpreadsheet },
   { href: "/action-center", label: "Action Center", icon: ShieldAlert },
 ];
 
