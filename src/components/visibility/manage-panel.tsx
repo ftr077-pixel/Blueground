@@ -273,9 +273,12 @@ export function ManagePanel() {
   const [lGuests, setLGuests] = useState("");
   const [bulk, setBulk] = useState("");
   const [importText, setImportText] = useState("");
-  const [importResult, setImportResult] = useState<{ updated: number; unmatched: string[] } | null>(
-    null,
-  );
+  const [importResult, setImportResult] = useState<{
+    updated: number;
+    unmatched: string[];
+    sampleListings: string[];
+    listingCount: number;
+  } | null>(null);
 
   useEffect(() => {
     if (!lProfile && profiles.length) setLProfile(profiles[0].id);
@@ -298,9 +301,20 @@ export function ManagePanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: importText }),
       });
-      const r = (await res.json()) as { updated?: number; unmatched?: string[]; error?: string };
+      const r = (await res.json()) as {
+        updated?: number;
+        unmatched?: string[];
+        sampleListings?: string[];
+        listingCount?: number;
+        error?: string;
+      };
       if (!res.ok) throw new Error(r.error || "import failed");
-      setImportResult({ updated: r.updated ?? 0, unmatched: r.unmatched ?? [] });
+      setImportResult({
+        updated: r.updated ?? 0,
+        unmatched: r.unmatched ?? [],
+        sampleListings: r.sampleListings ?? [],
+        listingCount: r.listingCount ?? 0,
+      });
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "import failed");
@@ -537,6 +551,15 @@ export function ManagePanel() {
                     <p className="text-[hsl(var(--success))]">
                       Updated {importResult.updated} listing(s).
                     </p>
+                    {importResult.updated === 0 && importResult.sampleListings.length > 0 && (
+                      <p className="mt-2 text-muted-foreground">
+                        For reference, your {importResult.listingCount} listings are named like:{" "}
+                        <span className="text-foreground">
+                          {importResult.sampleListings.join(", ")}
+                        </span>
+                        . Send me a few of these and I&apos;ll map them to your rent table.
+                      </p>
+                    )}
                     {importResult.unmatched.length > 0 && (
                       <div className="mt-1">
                         <p className="text-[hsl(var(--warning))]">
