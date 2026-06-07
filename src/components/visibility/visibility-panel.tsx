@@ -18,6 +18,7 @@ import { formatRelative } from "@/lib/utils";
 
 interface Snapshot {
   id: string;
+  ts: string;
   stayLabel: string;
   nights: number;
   checkIn: string;
@@ -104,6 +105,23 @@ function money(n: number | null) {
   return n != null ? `₪${Math.round(n).toLocaleString()}` : "—";
 }
 
+// Most recent scan time across a listing's latest snapshots.
+function lastChecked(latest: Snapshot[]): string | null {
+  let t: string | null = null;
+  for (const s of latest) if (s.ts && (!t || s.ts > t)) t = s.ts;
+  return t;
+}
+
+function fmtChecked(ts: string | null) {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function cellRank(c: ReturnType<typeof stayCell>) {
   if (c.kind === "ranked") return c.page ?? 99;
   if (c.kind === "buried") return 1000;
@@ -124,6 +142,7 @@ export function VisibilityPanel() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [primaryStay, setPrimaryStay] = useState(30);
+  const [showAllStays, setShowAllStays] = useState(false);
 
   async function refresh() {
     try {
@@ -343,16 +362,28 @@ export function VisibilityPanel() {
           <option value="booked">Booked</option>
           <option value="minstay">Min-stay only</option>
         </select>
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={showAllStays}
+            onChange={(e) => setShowAllStays(e.target.checked)}
+          />
+          Show all stay lengths
+        </label>
       </div>
 
       {profiles.map((p) => {
-        const stayCols = [...(p.stayNights ?? [])].sort((a, b) => a - b).map(nightsLabel);
+        const allCols = [...(p.stayNights ?? [])].sort((a, b) => a - b).map(nightsLabel);
+        // Default to just the primary (monthly) column; the row's expander still
+        // shows every stay length. Fall back to all if this profile lacks it.
+        const stayCols =
+          showAllStays || !allCols.includes(primaryLabel) ? allCols : [primaryLabel];
         const rows = listings
           .filter((l) => l.profileId === p.id)
           .map((l) => ({ l, v: listingView(l.latest), pc: stayCell(l.latest, primaryLabel) }))
           .filter(({ l, pc }) => matches(l, pc))
           .sort((a, b) => cellRank(a.pc) - cellRank(b.pc));
-        const colSpan = stayCols.length + 4;
+        const colSpan = stayCols.length + 5;
         return (
           <Card key={p.id}>
             <CardHeader className="pb-3">
@@ -374,6 +405,7 @@ export function VisibilityPanel() {
                     <tr>
                       <th className="px-2 py-2" />
                       <th className="px-3 py-2 text-left">Listing</th>
+                      <th className="px-3 py-2 text-left">Checked</th>
                       {stayCols.map((c) => (
                         <th
                           key={c}
@@ -462,6 +494,7 @@ function ListingRows({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const checked = lastChecked(l.latest);
   return (
     <>
       <tr className="border-t border-border/60 cursor-pointer hover:bg-muted/30" onClick={onToggle}>
@@ -480,6 +513,12 @@ function ListingRows({
             {l.airbnbId}
             {l.guests != null && ` · ${l.guests} guests`}
           </div>
+        </td>
+        <td
+          className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground"
+          title={checked ?? ""}
+        >
+          {fmtChecked(checked)}
         </td>
         {stayCols.map((c) => (
           <td key={c} className="px-3 py-2 text-center font-mono">
