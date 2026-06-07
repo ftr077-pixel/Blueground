@@ -11,6 +11,7 @@ const btn =
 
 export function CostDefaultsCard() {
   const [bgFee, setBgFee] = useState("6");
+  const [airbnbFee, setAirbnbFee] = useState("0");
   const [util, setUtil] = useState("1000");
   const [clean, setClean] = useState("500");
   const [losWk, setLosWk] = useState("0");
@@ -25,6 +26,7 @@ export function CostDefaultsCard() {
       .then(
         (s: {
           bgFeePct?: number;
+          airbnbFeePct?: number;
           defaultUtilities?: number;
           defaultCleaning?: number;
           weeklyDiscountPct?: number;
@@ -32,6 +34,7 @@ export function CostDefaultsCard() {
           monthlyDiscountPct?: number;
         }) => {
           if (s.bgFeePct != null) setBgFee(String(s.bgFeePct));
+          if (s.airbnbFeePct != null) setAirbnbFee(String(s.airbnbFeePct));
           if (s.defaultUtilities != null) setUtil(String(s.defaultUtilities));
           if (s.defaultCleaning != null) setClean(String(s.defaultCleaning));
           if (s.weeklyDiscountPct != null) setLosWk(String(s.weeklyDiscountPct));
@@ -50,6 +53,7 @@ export function CostDefaultsCard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           bgFeePct: parseFloat(bgFee) || 0,
+          airbnbFeePct: parseFloat(airbnbFee) || 0,
           defaultUtilities: parseInt(util, 10) || 0,
           defaultCleaning: parseInt(clean, 10) || 0,
           weeklyDiscountPct: parseFloat(losWk) || 0,
@@ -84,6 +88,14 @@ export function CostDefaultsCard() {
           <label className="flex flex-col gap-1">
             BG fee %
             <input className={`${input} w-24`} value={bgFee} onChange={(e) => setBgFee(e.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            Airbnb fee %
+            <input
+              className={`${input} w-24`}
+              value={airbnbFee}
+              onChange={(e) => setAirbnbFee(e.target.value)}
+            />
           </label>
           <label className="flex flex-col gap-1">
             Utilities / mo

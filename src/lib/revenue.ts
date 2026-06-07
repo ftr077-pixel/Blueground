@@ -42,6 +42,7 @@ export interface DashProfile {
 
 export interface CostDefaults {
   bgFeePct: number;
+  airbnbFeePct: number;
   defaultUtilities: number;
   defaultCleaning: number;
   weeklyDiscountPct: number;
@@ -123,6 +124,7 @@ export function monthlyPrice(l: DashListing, d: CostDefaults): number | null {
 export interface Economics {
   revenue: number | null;
   bgFee: number | null;
+  airbnbFee: number | null;
   utilities: number;
   cleaning: number;
   rent: number | null;
@@ -138,14 +140,16 @@ export interface Economics {
 export function economics(l: DashListing, d: CostDefaults): Economics {
   const revenue = monthlyPrice(l, d);
   const bgFee = revenue != null ? (revenue * d.bgFeePct) / 100 : null;
+  const airbnbFee = revenue != null ? (revenue * d.airbnbFeePct) / 100 : null;
   const utilities = l.utilities ?? d.defaultUtilities;
   const cleaning = l.cleaningFee ?? d.defaultCleaning;
   const rent = l.monthlyRent;
   const rentKnown = rent != null;
-  const cost = revenue != null ? (bgFee ?? 0) + utilities + cleaning + (rent ?? 0) : null;
+  const cost =
+    revenue != null ? (bgFee ?? 0) + (airbnbFee ?? 0) + utilities + cleaning + (rent ?? 0) : null;
   const profit = revenue != null && cost != null ? revenue - cost : null;
   const margin = profit != null && revenue ? profit / revenue : null;
-  return { revenue, bgFee, utilities, cleaning, rent, rentKnown, cost, profit, margin };
+  return { revenue, bgFee, airbnbFee, utilities, cleaning, rent, rentKnown, cost, profit, margin };
 }
 
 export const CHART = {
