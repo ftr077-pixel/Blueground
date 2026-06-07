@@ -39,7 +39,7 @@ export function PortfolioPanel() {
       page1: ranked.filter((x) => x === 1).length,
       avgPage: ranked.length ? ranked.reduce((s, x) => s + x, 0) / ranked.length : null,
       revenue: ls.reduce((s, l) => s + (monthlyPrice(l) ?? 0), 0),
-      profit: ls.reduce((s, l) => s + (economics(l).profit ?? 0), 0),
+      profit: ls.reduce((s, l) => s + (economics(l, data.costDefaults).profit ?? 0), 0),
     };
   });
 

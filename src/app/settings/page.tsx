@@ -1,5 +1,6 @@
 import { Settings as SettingsIcon } from "lucide-react";
 import { UpdateCard } from "@/components/admin/update-card";
+import { CostDefaultsCard } from "@/components/admin/cost-defaults-card";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,7 @@ export default function SettingsPage() {
           </p>
         </div>
       </header>
+      <CostDefaultsCard />
       <UpdateCard />
     </div>
   );

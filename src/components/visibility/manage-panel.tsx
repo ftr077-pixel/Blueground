@@ -408,7 +408,9 @@ export function ManagePanel() {
           <CardTitle>Tracked listings</CardTitle>
           <p className="text-[11px] text-muted-foreground">
             Each apartment. Guests &amp; dates default to the profile — leave them blank to inherit,
-            or set per-apartment. Bulk box accepts Airbnb IDs, room URLs, or rows from your sheet.
+            or set per-apartment. Rent / utilities / cleaning are your monthly costs — utilities and
+            cleaning fall back to the Settings defaults, and the BG fee is applied automatically.
+            Bulk box accepts Airbnb IDs, room URLs, or rows from your sheet.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">

@@ -538,7 +538,20 @@ export function recentSnapshots(listingId: string, limit = 300): ListingSnapshot
 export function getDashboard() {
   const profiles = listProfiles();
   const listings = listListings().map((l) => ({ ...l, latest: latestSnapshots(l.id) }));
-  return { profiles, listings, primaryStay: Number(getSetting("primary_stay")) || 30 };
+  const num = (k: string, d: number) => {
+    const v = getSetting(k);
+    return v != null && v !== "" ? Number(v) : d;
+  };
+  return {
+    profiles,
+    listings,
+    primaryStay: num("primary_stay", 30),
+    costDefaults: {
+      bgFeePct: num("bg_fee_pct", 6),
+      defaultUtilities: num("default_utilities", 1000),
+      defaultCleaning: num("default_cleaning", 500),
+    },
+  };
 }
 
 // What the scraper box pulls: active profiles, each with its active listings.
