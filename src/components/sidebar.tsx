@@ -12,6 +12,7 @@ import {
   Radar,
   ShieldAlert,
   TrendingUp,
+  Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,7 @@ const NAV_PRIMARY = [
   { href: "/", label: "Mission Control", icon: LayoutDashboard },
   { href: "/visibility", label: "Search Visibility", icon: Radar },
   { href: "/visibility/analytics", label: "Visibility Analytics", icon: BarChart3 },
+  { href: "/pnl", label: "P&L Forecast", icon: Wallet },
   { href: "/action-center", label: "Action Center", icon: ShieldAlert },
 ];
 
