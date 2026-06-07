@@ -8,6 +8,7 @@ import {
   Banknote,
   BarChart3,
   Boxes,
+  CalendarRange,
   ChevronDown,
   ConciergeBell,
   FileSpreadsheet,
@@ -29,6 +30,7 @@ const REVENUE_HUB = {
   icon: Banknote,
   base: "/visibility",
   children: [
+    { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
     { href: "/visibility", label: "Search Visibility", icon: Radar },
     { href: "/visibility/profitability", label: "Profitability", icon: Banknote },

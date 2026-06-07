@@ -199,6 +199,23 @@ function init(db: Database.Database) {
       sort           INTEGER NOT NULL DEFAULT 0,
       created_at     TEXT NOT NULL
     );
+
+    -- Per-listing, per-night rate overrides. The Rates Calendar computes a
+    -- deterministic baseline (rate + occupancy) on read; this table stores only
+    -- *overrides*: operator edits (source='manual') and ingested actuals from
+    -- MiniHotel Bulk ARI (source='minihotel'). NULL columns mean "not overridden".
+    CREATE TABLE IF NOT EXISTS rate_calendar (
+      unit_id     TEXT NOT NULL REFERENCES units(id),
+      date        TEXT NOT NULL,
+      price       INTEGER,
+      available   INTEGER,
+      min_nights  INTEGER,
+      closed      INTEGER,
+      booked      INTEGER,
+      source      TEXT NOT NULL DEFAULT 'manual',
+      updated_at  TEXT,
+      PRIMARY KEY (unit_id, date)
+    );
   `);
 
   // Migrations for DBs created before these columns existed.
