@@ -13,6 +13,7 @@ interface ListingBody {
   monthlyRent?: number | null;
   utilities?: number | null;
   cleaningFee?: number | null;
+  address?: string | null;
 }
 
 export async function GET() {
@@ -40,6 +41,7 @@ export async function POST(req: Request) {
     monthlyRent: body.monthlyRent ?? null,
     utilities: body.utilities ?? null,
     cleaningFee: body.cleaningFee ?? null,
+    address: body.address ?? null,
   });
   return NextResponse.json(listing, { status: 201 });
 }

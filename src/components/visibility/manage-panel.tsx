@@ -31,6 +31,7 @@ interface Listing {
   monthlyRent: number | null;
   utilities: number | null;
   cleaningFee: number | null;
+  address: string | null;
   active: boolean;
 }
 
@@ -55,6 +56,7 @@ function ListingRow({
   const [name, setName] = useState(l.label);
   const [guests, setGuests] = useState(l.guests != null ? String(l.guests) : "");
   const [dates, setDates] = useState(l.startDates ? l.startDates.join(", ") : "");
+  const [address, setAddress] = useState(l.address ?? "");
   const [rent, setRent] = useState(l.monthlyRent != null ? String(l.monthlyRent) : "");
   const [util, setUtil] = useState(l.utilities != null ? String(l.utilities) : "");
   const [clean, setClean] = useState(l.cleaningFee != null ? String(l.cleaningFee) : "");
@@ -79,6 +81,14 @@ function ListingRow({
         title="Name"
       />
       <span className="text-[10px] font-mono text-muted-foreground">{l.airbnbId}</span>
+      <input
+        className={`${input} w-44`}
+        value={address}
+        placeholder="Address"
+        title="Address"
+        onChange={(e) => setAddress(e.target.value)}
+        onBlur={() => onPatch(l.id, { address: address.trim() || null })}
+      />
       <input
         className={`${input} w-14`}
         value={guests}
@@ -262,6 +272,10 @@ export function ManagePanel() {
   const [lLabel, setLLabel] = useState("");
   const [lGuests, setLGuests] = useState("");
   const [bulk, setBulk] = useState("");
+  const [importText, setImportText] = useState("");
+  const [importResult, setImportResult] = useState<{ updated: number; unmatched: string[] } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!lProfile && profiles.length) setLProfile(profiles[0].id);
@@ -272,6 +286,27 @@ export function ManagePanel() {
   }
   function removeListing(l: Listing) {
     if (confirm(`Remove "${l.label}"?`)) call(`/api/visibility/listings/${l.id}`, "DELETE");
+  }
+
+  async function runImport() {
+    setBusy(true);
+    setError(null);
+    setImportResult(null);
+    try {
+      const res = await fetch("/api/visibility/listings/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: importText }),
+      });
+      const r = (await res.json()) as { updated?: number; unmatched?: string[]; error?: string };
+      if (!res.ok) throw new Error(r.error || "import failed");
+      setImportResult({ updated: r.updated ?? 0, unmatched: r.unmatched ?? [] });
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "import failed");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -470,6 +505,53 @@ export function ManagePanel() {
                 >
                   <Plus className="h-3.5 w-3.5" /> Add all (bulk / CSV)
                 </button>
+              </div>
+
+              <div className="rounded-lg border border-dashed border-border p-3 space-y-2">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Import rent &amp; address (bulk)
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Paste rows of <span className="font-mono">address &lt;tab&gt; rent</span> (a leading
+                  row-number is fine). Each address is matched to a listing&apos;s name; you can also
+                  use the Airbnb ID as the key. Unmatched rows are listed so you can fix them.
+                </p>
+                <textarea
+                  className={`${input} w-full font-mono`}
+                  rows={5}
+                  placeholder={"Florentin 7, 23\t7500\nHerzel 114, 32\t9400"}
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                />
+                <button
+                  type="button"
+                  disabled={busy || !importText.trim()}
+                  onClick={runImport}
+                  className={btn}
+                >
+                  {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                  Import rent &amp; address
+                </button>
+                {importResult && (
+                  <div className="text-[11px]">
+                    <p className="text-[hsl(var(--success))]">
+                      Updated {importResult.updated} listing(s).
+                    </p>
+                    {importResult.unmatched.length > 0 && (
+                      <div className="mt-1">
+                        <p className="text-[hsl(var(--warning))]">
+                          {importResult.unmatched.length} not matched (no listing with that
+                          name/ID):
+                        </p>
+                        <ul className="mt-1 max-h-32 overflow-y-auto font-mono text-muted-foreground">
+                          {importResult.unmatched.map((u, i) => (
+                            <li key={i}>{u}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">

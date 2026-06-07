@@ -226,6 +226,7 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "monthly_rent", "REAL");
   ensureColumn(db, "tracked_listings", "utilities", "REAL");
   ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
+  ensureColumn(db, "tracked_listings", "address", "TEXT");
 
   // Pricing v2 (PriceLabs-inspired): per-unit price floor/ceiling, weekly/monthly
   // LOS discounts, and a minimum-stay policy (recommended + hard floor).

@@ -97,7 +97,9 @@ export function ProfitabilityPanel() {
                         >
                           {l.label}
                         </Link>
-                        <div className="text-[10px] text-muted-foreground">{l.airbnbId}</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          {l.address || l.airbnbId}
+                        </div>
                       </td>
                       <td className="px-3 py-2 text-center font-mono">
                         {page != null ? `p${page}` : "—"}
