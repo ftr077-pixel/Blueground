@@ -644,6 +644,8 @@ export function getDashboard() {
       bgFeePct: num("bg_fee_pct", 6),
       defaultUtilities: num("default_utilities", 1000),
       defaultCleaning: num("default_cleaning", 500),
+      weeklyDiscountPct: num("los_weekly_pct", 0),
+      monthlyDiscountPct: num("los_monthly_pct", 0),
     },
   };
 }

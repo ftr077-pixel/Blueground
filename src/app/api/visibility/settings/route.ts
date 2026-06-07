@@ -16,6 +16,8 @@ export async function GET() {
     bgFeePct: num("bg_fee_pct", 6),
     defaultUtilities: num("default_utilities", 1000),
     defaultCleaning: num("default_cleaning", 500),
+    weeklyDiscountPct: num("los_weekly_pct", 0),
+    monthlyDiscountPct: num("los_monthly_pct", 0),
   });
 }
 
@@ -27,6 +29,8 @@ export async function POST(req: Request) {
     bgFeePct?: number;
     defaultUtilities?: number;
     defaultCleaning?: number;
+    weeklyDiscountPct?: number;
+    monthlyDiscountPct?: number;
   } | null;
   if (body == null) return NextResponse.json({ error: "invalid json" }, { status: 400 });
   if (body.proxyUrl !== undefined) setSetting("proxy_url", (body.proxyUrl ?? "").trim());
@@ -40,5 +44,9 @@ export async function POST(req: Request) {
     setSetting("default_utilities", String(Math.max(0, Math.round(body.defaultUtilities))));
   if (body.defaultCleaning !== undefined)
     setSetting("default_cleaning", String(Math.max(0, Math.round(body.defaultCleaning))));
+  if (body.weeklyDiscountPct !== undefined)
+    setSetting("los_weekly_pct", String(Math.max(0, Math.min(90, body.weeklyDiscountPct))));
+  if (body.monthlyDiscountPct !== undefined)
+    setSetting("los_monthly_pct", String(Math.max(0, Math.min(90, body.monthlyDiscountPct))));
   return NextResponse.json({ ok: true });
 }

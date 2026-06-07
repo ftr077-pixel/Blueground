@@ -40,7 +40,7 @@ export function PricingRankPanel() {
 
   const primary = data.primaryStay;
   const points: Point[] = data.listings
-    .map((l) => ({ price: monthlyPrice(l), page: bestPage(l, primary), label: l.label }))
+    .map((l) => ({ price: monthlyPrice(l, data.costDefaults), page: bestPage(l, primary), label: l.label }))
     .filter((p): p is { price: number; page: number; label: string } => p.price != null && p.page != null)
     .map((p) => ({ x: p.price, y: p.page, label: p.label }));
 
