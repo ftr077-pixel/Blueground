@@ -10,7 +10,6 @@ import {
   Boxes,
   ChevronDown,
   ConciergeBell,
-  GitBranch,
   LayoutDashboard,
   Radar,
   ShieldAlert,
@@ -20,10 +19,7 @@ import { cn } from "@/lib/utils";
 
 type Item = { href: string; label: string; icon: typeof Activity };
 
-const OPS_TOP: Item[] = [
-  { href: "/", label: "Mission Control", icon: LayoutDashboard },
-  { href: "/synthesis", label: "Synthesis View", icon: GitBranch },
-];
+const OPS_TOP: Item[] = [{ href: "/", label: "Mission Control", icon: LayoutDashboard }];
 
 const REVENUE_HUB = {
   label: "Revenue & Yield",
@@ -110,7 +106,7 @@ export function Sidebar() {
             </span>
           </div>
           <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
-            Dialectical loop · Player + Coach synthesis engaged.
+            Autonomous departments · agents monitoring live.
           </p>
         </div>
       </div>

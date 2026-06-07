@@ -7,11 +7,8 @@ build/
 .env*.local
 .vercel
 next-env.d.ts
+*.tsbuildinfo
 data/
-.firebase/
-firebase-debug.log
-firebase-debug.*.log
-.firebaserc.local
 
 # python (scraper)
 __pycache__/

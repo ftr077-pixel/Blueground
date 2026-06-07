@@ -7,7 +7,6 @@ import {
   Boxes,
   ConciergeBell,
   CornerDownLeft,
-  GitBranch,
   LayoutDashboard,
   Search,
   ShieldAlert,
@@ -35,14 +34,6 @@ const STATIC_ITEMS: PaletteItem[] = [
     icon: LayoutDashboard,
     href: "/",
     hint: "Global overview",
-  },
-  {
-    id: "nav-syn",
-    label: "Synthesis View",
-    group: "Pages",
-    icon: GitBranch,
-    href: "/synthesis",
-    hint: "Player ↔ Coach loop",
   },
   {
     id: "nav-ac",
