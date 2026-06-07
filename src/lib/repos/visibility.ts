@@ -32,6 +32,9 @@ export interface TrackedListing {
   startDates: string[] | null; // per-apartment override; null = use profile dates
   minNights: number | null;
   minNightsCheckedAt: string | null;
+  monthlyRent: number | null;
+  utilities: number | null;
+  cleaningFee: number | null;
   active: boolean;
   createdAt: string;
 }
@@ -89,6 +92,9 @@ interface ListingSql {
   start_dates: string | null;
   min_nights: number | null;
   min_nights_checked_at: string | null;
+  monthly_rent: number | null;
+  utilities: number | null;
+  cleaning_fee: number | null;
   active: number;
   created_at: string;
 }
@@ -149,6 +155,9 @@ function rowToListing(r: ListingSql): TrackedListing {
     startDates: r.start_dates ? (JSON.parse(r.start_dates) as string[]) : null,
     minNights: r.min_nights,
     minNightsCheckedAt: r.min_nights_checked_at,
+    monthlyRent: r.monthly_rent,
+    utilities: r.utilities,
+    cleaningFee: r.cleaning_fee,
     active: !!r.active,
     createdAt: r.created_at,
   };
@@ -282,6 +291,9 @@ export interface ListingInput {
   unitId?: string | null;
   guests?: number | null;
   startDates?: string[] | null;
+  monthlyRent?: number | null;
+  utilities?: number | null;
+  cleaningFee?: number | null;
 }
 
 export function getListing(id: string): TrackedListing | null {
@@ -311,9 +323,9 @@ export function createListing(input: ListingInput): TrackedListing {
   const id = "lst-" + randomUUID().slice(0, 8);
   db.prepare(
     `INSERT INTO tracked_listings
-      (id, airbnb_id, label, platform, profile_id, unit_id, guests, start_dates, min_nights, min_nights_checked_at, active, created_at)
+      (id, airbnb_id, label, platform, profile_id, unit_id, guests, start_dates, min_nights, min_nights_checked_at, monthly_rent, utilities, cleaning_fee, active, created_at)
      VALUES
-      (@id, @airbnb_id, @label, @platform, @profile_id, @unit_id, @guests, @start_dates, NULL, NULL, 1, @created_at)`,
+      (@id, @airbnb_id, @label, @platform, @profile_id, @unit_id, @guests, @start_dates, NULL, NULL, @monthly_rent, @utilities, @cleaning_fee, 1, @created_at)`,
   ).run({
     id,
     airbnb_id: input.airbnbId,
@@ -324,6 +336,9 @@ export function createListing(input: ListingInput): TrackedListing {
     guests: input.guests ?? null,
     start_dates:
       input.startDates && input.startDates.length ? JSON.stringify(input.startDates) : null,
+    monthly_rent: input.monthlyRent ?? null,
+    utilities: input.utilities ?? null,
+    cleaning_fee: input.cleaningFee ?? null,
     created_at: new Date().toISOString(),
   });
   return getListing(id)!;
@@ -337,6 +352,9 @@ export function updateListing(
     profileId?: string;
     guests?: number | null;
     startDates?: string[] | null;
+    monthlyRent?: number | null;
+    utilities?: number | null;
+    cleaningFee?: number | null;
   },
 ): void {
   const db = getDb();
@@ -344,9 +362,13 @@ export function updateListing(
   if (!cur) return;
   const guests = patch.guests !== undefined ? patch.guests : cur.guests;
   const startDates = patch.startDates !== undefined ? patch.startDates : cur.startDates;
+  const monthlyRent = patch.monthlyRent !== undefined ? patch.monthlyRent : cur.monthlyRent;
+  const utilities = patch.utilities !== undefined ? patch.utilities : cur.utilities;
+  const cleaningFee = patch.cleaningFee !== undefined ? patch.cleaningFee : cur.cleaningFee;
   db.prepare(
     `UPDATE tracked_listings SET label=@label, active=@active, profile_id=@profile_id,
-       guests=@guests, start_dates=@start_dates WHERE id=@id`,
+       guests=@guests, start_dates=@start_dates, monthly_rent=@monthly_rent,
+       utilities=@utilities, cleaning_fee=@cleaning_fee WHERE id=@id`,
   ).run({
     id,
     label: patch.label ?? cur.label,
@@ -354,6 +376,9 @@ export function updateListing(
     profile_id: patch.profileId ?? cur.profileId,
     guests: guests ?? null,
     start_dates: startDates && startDates.length ? JSON.stringify(startDates) : null,
+    monthly_rent: monthlyRent ?? null,
+    utilities: utilities ?? null,
+    cleaning_fee: cleaningFee ?? null,
   });
 }
 
