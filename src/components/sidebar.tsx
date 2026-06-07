@@ -14,6 +14,7 @@ import {
   Radar,
   ShieldAlert,
   TrendingUp,
+  Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -35,7 +36,10 @@ const REVENUE_HUB = {
   ] as Item[],
 };
 
-const OPS_BOTTOM: Item[] = [{ href: "/action-center", label: "Action Center", icon: ShieldAlert }];
+const OPS_BOTTOM: Item[] = [
+  { href: "/pnl", label: "P&L Forecast", icon: Wallet },
+  { href: "/action-center", label: "Action Center", icon: ShieldAlert },
+];
 
 const NAV_DEPARTMENTS: Item[] = [
   { href: "/departments/logistics", label: "Logistics & QC", icon: Boxes },
