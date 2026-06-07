@@ -184,6 +184,21 @@ function init(db: Database.Database) {
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
     );
+
+    -- Operator-entered P&L lines (operating costs, extra revenue streams) that
+    -- aren't derivable from units/listings. Revenue and direct costs are
+    -- computed live; these are the manual additions on top.
+    CREATE TABLE IF NOT EXISTS pnl_lines (
+      id             TEXT PRIMARY KEY,
+      label          TEXT NOT NULL,
+      category       TEXT NOT NULL CHECK (category IN ('revenue','cost')),
+      section        TEXT NOT NULL DEFAULT 'Operating',
+      monthly_amount REAL NOT NULL DEFAULT 0,
+      growth_pct     REAL NOT NULL DEFAULT 0,
+      active         INTEGER NOT NULL DEFAULT 1,
+      sort           INTEGER NOT NULL DEFAULT 0,
+      created_at     TEXT NOT NULL
+    );
   `);
 
   // Migrations for DBs created before these columns existed.
@@ -191,6 +206,9 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
   ensureColumn(db, "listing_snapshots", "available", "INTEGER");
   ensureColumn(db, "search_profiles", "date_mode", "TEXT");
+  ensureColumn(db, "tracked_listings", "monthly_rent", "REAL");
+  ensureColumn(db, "tracked_listings", "utilities", "REAL");
+  ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
 
   // Pricing v2 (PriceLabs-inspired): per-unit price floor/ceiling, weekly/monthly
   // LOS discounts, and a minimum-stay policy (recommended + hard floor).

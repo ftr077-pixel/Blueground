@@ -9,6 +9,9 @@ interface ListingPatch {
   profileId?: string;
   guests?: number | null;
   startDates?: string[] | null;
+  monthlyRent?: number | null;
+  utilities?: number | null;
+  cleaningFee?: number | null;
 }
 
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {

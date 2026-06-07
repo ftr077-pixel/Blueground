@@ -28,6 +28,9 @@ interface Listing {
   profileId: string;
   guests: number | null;
   startDates: string[] | null;
+  monthlyRent: number | null;
+  utilities: number | null;
+  cleaningFee: number | null;
   active: boolean;
 }
 
@@ -52,6 +55,13 @@ function ListingRow({
   const [name, setName] = useState(l.label);
   const [guests, setGuests] = useState(l.guests != null ? String(l.guests) : "");
   const [dates, setDates] = useState(l.startDates ? l.startDates.join(", ") : "");
+  const [rent, setRent] = useState(l.monthlyRent != null ? String(l.monthlyRent) : "");
+  const [util, setUtil] = useState(l.utilities != null ? String(l.utilities) : "");
+  const [clean, setClean] = useState(l.cleaningFee != null ? String(l.cleaningFee) : "");
+  const parseNum = (s: string) => {
+    const n = parseFloat(s);
+    return s.trim() && Number.isFinite(n) ? n : null;
+  };
 
   return (
     <div
@@ -90,6 +100,30 @@ function ListingRow({
           })
         }
         title="Check-in dates (blank = profile default)"
+      />
+      <input
+        className={`${input} w-20`}
+        value={rent}
+        placeholder="Rent/mo"
+        title="Monthly rent (your cost)"
+        onChange={(e) => setRent(e.target.value)}
+        onBlur={() => onPatch(l.id, { monthlyRent: parseNum(rent) })}
+      />
+      <input
+        className={`${input} w-20`}
+        value={util}
+        placeholder="Utils/mo"
+        title="Monthly utilities (your cost)"
+        onChange={(e) => setUtil(e.target.value)}
+        onBlur={() => onPatch(l.id, { utilities: parseNum(util) })}
+      />
+      <input
+        className={`${input} w-20`}
+        value={clean}
+        placeholder="Cleaning"
+        title="Cleaning fee per stay (your cost)"
+        onChange={(e) => setClean(e.target.value)}
+        onBlur={() => onPatch(l.id, { cleaningFee: parseNum(clean) })}
       />
       <button
         type="button"

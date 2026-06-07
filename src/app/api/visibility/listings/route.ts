@@ -10,6 +10,9 @@ interface ListingBody {
   bulk?: string;
   guests?: number | null;
   startDates?: string[] | null;
+  monthlyRent?: number | null;
+  utilities?: number | null;
+  cleaningFee?: number | null;
 }
 
 export async function GET() {
@@ -34,6 +37,9 @@ export async function POST(req: Request) {
     profileId: body.profileId,
     guests: body.guests ?? null,
     startDates: body.startDates ?? null,
+    monthlyRent: body.monthlyRent ?? null,
+    utilities: body.utilities ?? null,
+    cleaningFee: body.cleaningFee ?? null,
   });
   return NextResponse.json(listing, { status: 201 });
 }
