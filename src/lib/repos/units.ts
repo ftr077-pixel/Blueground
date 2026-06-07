@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
+import { UNIT_PRICING_DEFAULTS, roundRate } from "@/lib/config/pricing";
 
 export interface Unit {
   id: string;
@@ -79,12 +80,12 @@ function rowToUnit(r: UnitSql): Unit {
     occupancy30d: r.occupancy_30d,
     platform: r.platform,
     lastRateChangeAt: r.last_rate_change_at,
-    minRate: r.min_rate ?? Math.round((r.base_rate * 0.8) / 5) * 5,
-    maxRate: r.max_rate ?? Math.round((r.base_rate * 1.2) / 5) * 5,
-    weeklyDiscountPct: r.weekly_discount_pct ?? 0.1,
-    monthlyDiscountPct: r.monthly_discount_pct ?? 0.2,
-    minStay: r.min_stay ?? 30,
-    lowestMinStay: r.lowest_min_stay ?? 30,
+    minRate: r.min_rate ?? roundRate(r.base_rate * UNIT_PRICING_DEFAULTS.floorPctOfBase),
+    maxRate: r.max_rate ?? roundRate(r.base_rate * UNIT_PRICING_DEFAULTS.ceilingPctOfBase),
+    weeklyDiscountPct: r.weekly_discount_pct ?? UNIT_PRICING_DEFAULTS.weeklyDiscountPct,
+    monthlyDiscountPct: r.monthly_discount_pct ?? UNIT_PRICING_DEFAULTS.monthlyDiscountPct,
+    minStay: r.min_stay ?? UNIT_PRICING_DEFAULTS.minStay,
+    lowestMinStay: r.lowest_min_stay ?? UNIT_PRICING_DEFAULTS.lowestMinStay,
   };
 }
 

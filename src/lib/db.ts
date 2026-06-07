@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { ACTIVITY_FEED, DEPARTMENTS } from "@/lib/mock-data";
 import { APPROVAL_QUEUE } from "@/lib/action-center-data";
+import { UNIT_PRICING_DEFAULTS, PRICING_AGENT } from "@/lib/config/pricing";
 import { randomUUID } from "node:crypto";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -212,19 +213,22 @@ function init(db: Database.Database) {
 
   // Pricing v2 (PriceLabs-inspired): per-unit price floor/ceiling, weekly/monthly
   // LOS discounts, and a minimum-stay policy (recommended + hard floor).
+  // Defaults come from src/lib/config/pricing.ts (single source of truth).
   ensureColumn(db, "units", "min_rate", "INTEGER");
   ensureColumn(db, "units", "max_rate", "INTEGER");
-  ensureColumn(db, "units", "weekly_discount_pct", "REAL NOT NULL DEFAULT 0.10");
-  ensureColumn(db, "units", "monthly_discount_pct", "REAL NOT NULL DEFAULT 0.20");
-  ensureColumn(db, "units", "min_stay", "INTEGER NOT NULL DEFAULT 30");
-  ensureColumn(db, "units", "lowest_min_stay", "INTEGER NOT NULL DEFAULT 30");
+  ensureColumn(db, "units", "weekly_discount_pct", `REAL NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.weeklyDiscountPct}`);
+  ensureColumn(db, "units", "monthly_discount_pct", `REAL NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.monthlyDiscountPct}`);
+  ensureColumn(db, "units", "min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.minStay}`);
+  ensureColumn(db, "units", "lowest_min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.lowestMinStay}`);
   // Floors/ceilings derive from the base rate; backfill any rows still missing
   // them (covers both pre-existing DBs and freshly-seeded rows, which insert
-  // only the original columns). Floor = 80% of base, ceiling = 120% (a surge cap
-  // that can actually bind given the ±25% single-pass tilt), ₪5-rounded.
+  // only the original columns), ₪-step rounded.
+  const floorPct = UNIT_PRICING_DEFAULTS.floorPctOfBase;
+  const ceilPct = UNIT_PRICING_DEFAULTS.ceilingPctOfBase;
+  const step = PRICING_AGENT.roundingStep;
   db.exec(`
-    UPDATE units SET min_rate = CAST(ROUND(base_rate * 0.80 / 5) * 5 AS INTEGER) WHERE min_rate IS NULL;
-    UPDATE units SET max_rate = CAST(ROUND(base_rate * 1.20 / 5) * 5 AS INTEGER) WHERE max_rate IS NULL;
+    UPDATE units SET min_rate = CAST(ROUND(base_rate * ${floorPct} / ${step}) * ${step} AS INTEGER) WHERE min_rate IS NULL;
+    UPDATE units SET max_rate = CAST(ROUND(base_rate * ${ceilPct} / ${step}) * ${step} AS INTEGER) WHERE max_rate IS NULL;
   `);
 }
 
