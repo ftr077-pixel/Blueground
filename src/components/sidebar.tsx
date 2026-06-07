@@ -8,13 +8,16 @@ import {
   Banknote,
   BarChart3,
   Boxes,
+  CalendarRange,
   ChevronDown,
   ConciergeBell,
+  FileSpreadsheet,
   LayoutDashboard,
   Radar,
   Settings,
   ShieldAlert,
   TrendingUp,
+  Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -27,6 +30,7 @@ const REVENUE_HUB = {
   icon: Banknote,
   base: "/visibility",
   children: [
+    { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
     { href: "/visibility", label: "Search Visibility", icon: Radar },
     { href: "/visibility/profitability", label: "Profitability", icon: Banknote },
@@ -36,7 +40,11 @@ const REVENUE_HUB = {
   ] as Item[],
 };
 
-const OPS_BOTTOM: Item[] = [{ href: "/action-center", label: "Action Center", icon: ShieldAlert }];
+const OPS_BOTTOM: Item[] = [
+  { href: "/pnl", label: "P&L Forecast", icon: Wallet },
+  { href: "/pnl/bridge", label: "Business Plan", icon: FileSpreadsheet },
+  { href: "/action-center", label: "Action Center", icon: ShieldAlert },
+];
 
 const NAV_DEPARTMENTS: Item[] = [
   { href: "/departments/logistics", label: "Logistics & QC", icon: Boxes },

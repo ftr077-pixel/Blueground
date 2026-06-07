@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 
 // Machine-to-machine endpoints the scraper box calls — these carry their own
 // key auth (or are read-only config) and must bypass the browser login.
-const BYPASS = ["/api/visibility/snapshot", "/api/visibility/config"];
+const BYPASS = ["/api/visibility/snapshot", "/api/visibility/config", "/api/rates/snapshot"];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
