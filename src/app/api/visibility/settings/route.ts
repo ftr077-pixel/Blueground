@@ -14,6 +14,7 @@ export async function GET() {
     availabilityDays: num("availability_days", 90),
     primaryStay: num("primary_stay", 30),
     bgFeePct: num("bg_fee_pct", 6),
+    airbnbFeePct: num("airbnb_fee_pct", 0),
     defaultUtilities: num("default_utilities", 1000),
     defaultCleaning: num("default_cleaning", 500),
     weeklyDiscountPct: num("los_weekly_pct", 0),
@@ -28,6 +29,7 @@ export async function POST(req: Request) {
     availabilityDays?: number;
     primaryStay?: number;
     bgFeePct?: number;
+    airbnbFeePct?: number;
     defaultUtilities?: number;
     defaultCleaning?: number;
     weeklyDiscountPct?: number;
@@ -42,6 +44,8 @@ export async function POST(req: Request) {
     setSetting("primary_stay", String(Math.max(1, Math.round(body.primaryStay))));
   if (body.bgFeePct !== undefined)
     setSetting("bg_fee_pct", String(Math.max(0, Math.min(100, body.bgFeePct))));
+  if (body.airbnbFeePct !== undefined)
+    setSetting("airbnb_fee_pct", String(Math.max(0, Math.min(100, body.airbnbFeePct))));
   if (body.defaultUtilities !== undefined)
     setSetting("default_utilities", String(Math.max(0, Math.round(body.defaultUtilities))));
   if (body.defaultCleaning !== undefined)

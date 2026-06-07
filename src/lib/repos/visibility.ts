@@ -642,6 +642,7 @@ export function getDashboard() {
     primaryStay: num("primary_stay", 30),
     costDefaults: {
       bgFeePct: num("bg_fee_pct", 6),
+      airbnbFeePct: num("airbnb_fee_pct", 0),
       defaultUtilities: num("default_utilities", 1000),
       defaultCleaning: num("default_cleaning", 500),
       weeklyDiscountPct: num("los_weekly_pct", 0),
