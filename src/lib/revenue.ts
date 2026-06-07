@@ -26,6 +26,7 @@ export interface DashListing {
   monthlyRent: number | null;
   utilities: number | null;
   cleaningFee: number | null;
+  address: string | null;
   active: boolean;
   latest: DashSnapshot[];
 }

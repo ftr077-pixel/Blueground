@@ -49,6 +49,7 @@ interface Listing {
   profileId: string;
   guests: number | null;
   minNights: number | null;
+  address: string | null;
   active: boolean;
   latest: Snapshot[];
 }
@@ -549,6 +550,7 @@ function ListingRows({
             {l.airbnbId}
             {l.guests != null && ` · ${l.guests} guests`}
           </div>
+          {l.address && <div className="text-[10px] text-muted-foreground">{l.address}</div>}
         </td>
         {stayCols.map((c) => (
           <td key={c} className="px-3 py-2 text-center font-mono">

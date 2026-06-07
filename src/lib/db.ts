@@ -194,6 +194,7 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "monthly_rent", "REAL");
   ensureColumn(db, "tracked_listings", "utilities", "REAL");
   ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
+  ensureColumn(db, "tracked_listings", "address", "TEXT");
 }
 
 function seed(db: Database.Database) {
