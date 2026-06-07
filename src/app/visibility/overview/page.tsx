@@ -1,5 +1,5 @@
-import { TrendingUp } from "lucide-react";
-import { AnalyticsPanel } from "@/components/visibility/analytics-panel";
+import { LayoutDashboard } from "lucide-react";
+import { OverviewPanel } from "@/components/visibility/overview-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -8,16 +8,16 @@ export default function Page() {
     <div className="space-y-6">
       <header className="flex items-start gap-4">
         <div className="grid h-12 w-12 place-items-center rounded-xl border border-border bg-card">
-          <TrendingUp className="h-5 w-5" />
+          <LayoutDashboard className="h-5 w-5" />
         </div>
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Position Trends</h1>
+          <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Overview</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Visibility over time and the biggest rank movers between scans.
+            Revenue, profit and visibility across your portfolio — at a glance.
           </p>
         </div>
       </header>
-      <AnalyticsPanel />
+      <OverviewPanel />
     </div>
   );
 }
