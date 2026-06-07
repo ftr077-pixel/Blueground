@@ -11,6 +11,18 @@ export interface Unit {
   occupancy30d: number;
   platform: string;
   lastRateChangeAt: string | null;
+  /** Price floor — the agent never recommends below this (PriceLabs "min price"). */
+  minRate: number;
+  /** Price ceiling — caps surge/far-out premiums (PriceLabs "max price"). */
+  maxRate: number;
+  /** LOS discount for 7+ night stays (0..1). */
+  weeklyDiscountPct: number;
+  /** LOS discount for ~30 night stays (0..1) — the headline MTR lever. */
+  monthlyDiscountPct: number;
+  /** Current recommended minimum stay in nights (flexes with demand). */
+  minStay: number;
+  /** Hard minimum-stay floor — what makes the unit mid-term (e.g. 30). */
+  lowestMinStay: number;
 }
 
 export interface PricingHistoryRow {
@@ -35,6 +47,12 @@ interface UnitSql {
   occupancy_30d: number;
   platform: string;
   last_rate_change_at: string | null;
+  min_rate: number | null;
+  max_rate: number | null;
+  weekly_discount_pct: number | null;
+  monthly_discount_pct: number | null;
+  min_stay: number | null;
+  lowest_min_stay: number | null;
 }
 
 interface HistorySql {
@@ -50,6 +68,7 @@ interface HistorySql {
 }
 
 function rowToUnit(r: UnitSql): Unit {
+  // Coalesce defaults so reads are safe even if a migration backfill hasn't run.
   return {
     id: r.id,
     name: r.name,
@@ -60,6 +79,12 @@ function rowToUnit(r: UnitSql): Unit {
     occupancy30d: r.occupancy_30d,
     platform: r.platform,
     lastRateChangeAt: r.last_rate_change_at,
+    minRate: r.min_rate ?? Math.round((r.base_rate * 0.8) / 5) * 5,
+    maxRate: r.max_rate ?? Math.round((r.base_rate * 1.2) / 5) * 5,
+    weeklyDiscountPct: r.weekly_discount_pct ?? 0.1,
+    monthlyDiscountPct: r.monthly_discount_pct ?? 0.2,
+    minStay: r.min_stay ?? 30,
+    lowestMinStay: r.lowest_min_stay ?? 30,
   };
 }
 
@@ -73,6 +98,11 @@ export function setUnitRate(unitId: string, newRate: number, ts: string) {
   db.prepare(
     "UPDATE units SET current_rate = ?, last_rate_change_at = ? WHERE id = ?",
   ).run(newRate, ts, unitId);
+}
+
+export function setUnitMinStay(unitId: string, minStay: number) {
+  const db = getDb();
+  db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);
 }
 
 export function recordPricing(
