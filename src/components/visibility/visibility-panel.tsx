@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  BarChart3,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -114,6 +113,20 @@ function cellRank(c: ReturnType<typeof stayCell>) {
   return 4000;
 }
 
+// Comparators with nulls sorted last (under ascending).
+function cmpNum(a: number | null, b: number | null) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return a - b;
+}
+function cmpStr(a: string | null, b: string | null) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export function VisibilityPanel() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [listings, setListings] = useState<Listing[]>([]);
@@ -127,6 +140,7 @@ export function VisibilityPanel() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [primaryStay, setPrimaryStay] = useState(30);
   const [showAllStays, setShowAllStays] = useState(false);
+  const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "primary", dir: 1 });
 
   async function refresh() {
     try {
@@ -231,6 +245,12 @@ export function VisibilityPanel() {
     }
   }
 
+  // Click a header to sort by it; click again to flip direction.
+  function onSort(key: string) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
+  }
+  const arrow = (key: string) => (sort.key === key ? (sort.dir === 1 ? " ↑" : " ↓") : "");
+
   const topBar = (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -263,12 +283,6 @@ export function VisibilityPanel() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <Link
-            href="/visibility/analytics"
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
-          >
-            <BarChart3 className="h-3.5 w-3.5" /> Analytics
-          </Link>
           <Link
             href="/visibility/manage"
             className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
@@ -364,9 +378,26 @@ export function VisibilityPanel() {
           showAllStays || !allCols.includes(primaryLabel) ? allCols : [primaryLabel];
         const rows = listings
           .filter((l) => l.profileId === p.id)
-          .map((l) => ({ l, pc: stayCell(l.latest, primaryLabel) }))
+          .map((l) => ({
+            l,
+            pc: stayCell(l.latest, primaryLabel),
+            h: headline(l.latest, primaryLabel),
+          }))
           .filter(({ l, pc }) => matches(l, pc))
-          .sort((a, b) => cellRank(a.pc) - cellRank(b.pc));
+          .sort((a, b) => {
+            const { key, dir } = sort;
+            let d = 0;
+            if (key === "name") d = a.l.label.localeCompare(b.l.label);
+            else if (key === "checkin") d = cmpStr(a.h.checkIn, b.h.checkIn);
+            else if (key === "price") d = cmpNum(a.h.price, b.h.price);
+            else if (key.startsWith("stay:"))
+              d =
+                cellRank(stayCell(a.l.latest, key.slice(5))) -
+                cellRank(stayCell(b.l.latest, key.slice(5)));
+            else d = cellRank(a.pc) - cellRank(b.pc);
+            if (d === 0) d = a.l.label.localeCompare(b.l.label);
+            return d * dir;
+          });
         const colSpan = stayCols.length + 5;
         return (
           <Card key={p.id}>
@@ -388,19 +419,41 @@ export function VisibilityPanel() {
                   <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                     <tr>
                       <th className="px-2 py-2" />
-                      <th className="px-3 py-2 text-left">Listing</th>
-                      {stayCols.map((c) => (
-                        <th
-                          key={c}
-                          className={`px-3 py-2 text-center ${
-                            c === primaryLabel ? "text-foreground font-semibold" : ""
-                          }`}
-                        >
-                          {c === primaryLabel ? `★ ${c}` : c}
-                        </th>
-                      ))}
-                      <th className="px-3 py-2 text-left">Check-in</th>
-                      <th className="px-3 py-2 text-right">Price</th>
+                      <th
+                        className="cursor-pointer select-none px-3 py-2 text-left hover:text-foreground"
+                        onClick={() => onSort("name")}
+                      >
+                        Listing{arrow("name")}
+                      </th>
+                      {stayCols.map((c) => {
+                        const key = `stay:${c}`;
+                        const isPrimary = c === primaryLabel;
+                        const active = sort.key === key || (isPrimary && sort.key === "primary");
+                        return (
+                          <th
+                            key={c}
+                            onClick={() => onSort(key)}
+                            className={`cursor-pointer select-none px-3 py-2 text-center hover:text-foreground ${
+                              isPrimary ? "font-semibold text-foreground" : ""
+                            }`}
+                          >
+                            {isPrimary ? `★ ${c}` : c}
+                            {active ? (sort.dir === 1 ? " ↑" : " ↓") : ""}
+                          </th>
+                        );
+                      })}
+                      <th
+                        className="cursor-pointer select-none px-3 py-2 text-left hover:text-foreground"
+                        onClick={() => onSort("checkin")}
+                      >
+                        Check-in{arrow("checkin")}
+                      </th>
+                      <th
+                        className="cursor-pointer select-none px-3 py-2 text-right hover:text-foreground"
+                        onClick={() => onSort("price")}
+                      >
+                        Price{arrow("price")}
+                      </th>
                       <th className="px-2 py-2" />
                     </tr>
                   </thead>
@@ -412,12 +465,12 @@ export function VisibilityPanel() {
                         </td>
                       </tr>
                     ) : (
-                      rows.map(({ l }) => (
+                      rows.map(({ l, h }) => (
                         <ListingRows
                           key={l.id}
                           l={l}
+                          h={h}
                           stayCols={stayCols}
-                          primaryLabel={primaryLabel}
                           colSpan={colSpan}
                           isOpen={open.has(l.id)}
                           onToggle={() => toggle(l.id)}
@@ -461,8 +514,8 @@ function StayCell({ cell }: { cell: ReturnType<typeof stayCell> }) {
 
 function ListingRows({
   l,
+  h,
   stayCols,
-  primaryLabel,
   colSpan,
   isOpen,
   onToggle,
@@ -470,15 +523,14 @@ function ListingRows({
   onSelect,
 }: {
   l: Listing;
+  h: ReturnType<typeof headline>;
   stayCols: string[];
-  primaryLabel: string;
   colSpan: number;
   isOpen: boolean;
   onToggle: () => void;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const h = headline(l.latest, primaryLabel);
   return (
     <>
       <tr className="border-t border-border/60 cursor-pointer hover:bg-muted/30" onClick={onToggle}>

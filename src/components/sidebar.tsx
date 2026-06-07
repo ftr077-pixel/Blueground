@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Activity,
   Banknote,
+  BarChart3,
   Boxes,
   ConciergeBell,
   GitBranch,
@@ -19,6 +20,7 @@ const NAV_PRIMARY = [
   { href: "/", label: "Mission Control", icon: LayoutDashboard },
   { href: "/synthesis", label: "Synthesis View", icon: GitBranch },
   { href: "/visibility", label: "Search Visibility", icon: Radar },
+  { href: "/visibility/analytics", label: "Visibility Analytics", icon: BarChart3 },
   { href: "/action-center", label: "Action Center", icon: ShieldAlert },
 ];
 
@@ -31,6 +33,13 @@ const NAV_DEPARTMENTS = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  // Highlight the single best (longest) matching route, so a parent like
+  // /visibility doesn't stay lit when you're on /visibility/analytics.
+  const allItems = [...NAV_PRIMARY, ...NAV_DEPARTMENTS];
+  const activeHref =
+    allItems
+      .filter((i) => pathname === i.href || (i.href !== "/" && pathname.startsWith(i.href)))
+      .sort((a, b) => b.href.length - a.href.length)[0]?.href ?? "";
   return (
     <aside className="hidden md:flex md:w-64 lg:w-72 shrink-0 flex-col border-r border-border bg-card/40">
       <div className="flex items-center gap-2 px-5 py-5 border-b border-border">
@@ -47,11 +56,11 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-6 text-sm">
-        <NavSection label="Operations" items={NAV_PRIMARY} pathname={pathname} />
+        <NavSection label="Operations" items={NAV_PRIMARY} activeHref={activeHref} />
         <NavSection
           label="Digital Middle Managers"
           items={NAV_DEPARTMENTS}
-          pathname={pathname}
+          activeHref={activeHref}
         />
       </nav>
 
@@ -78,11 +87,11 @@ export function Sidebar() {
 function NavSection({
   label,
   items,
-  pathname,
+  activeHref,
 }: {
   label: string;
   items: { href: string; label: string; icon: typeof Activity }[];
-  pathname: string;
+  activeHref: string;
 }) {
   return (
     <div>
@@ -91,9 +100,7 @@ function NavSection({
       </div>
       <ul className="space-y-1">
         {items.map((item) => {
-          const active =
-            pathname === item.href ||
-            (item.href !== "/" && pathname.startsWith(item.href));
+          const active = item.href === activeHref;
           const Icon = item.icon;
           return (
             <li key={item.href}>

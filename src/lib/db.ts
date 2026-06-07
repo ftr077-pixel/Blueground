@@ -225,6 +225,9 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
   ensureColumn(db, "listing_snapshots", "available", "INTEGER");
   ensureColumn(db, "search_profiles", "date_mode", "TEXT");
+  ensureColumn(db, "tracked_listings", "monthly_rent", "REAL");
+  ensureColumn(db, "tracked_listings", "utilities", "REAL");
+  ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
 }
 
 function seed(db: Database.Database) {
