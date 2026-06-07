@@ -14,6 +14,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatRelative } from "@/lib/utils";
+import { applyLos } from "@/lib/revenue";
 
 interface Snapshot {
   id: string;
@@ -142,6 +143,8 @@ export function VisibilityPanel() {
   const [primaryStay, setPrimaryStay] = useState(30);
   const [showAllStays, setShowAllStays] = useState(false);
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "primary", dir: 1 });
+  const [losWeekly, setLosWeekly] = useState(0);
+  const [losMonthly, setLosMonthly] = useState(0);
 
   async function refresh() {
     try {
@@ -151,10 +154,13 @@ export function VisibilityPanel() {
         profiles: Profile[];
         listings: Listing[];
         primaryStay?: number;
+        costDefaults?: { weeklyDiscountPct?: number; monthlyDiscountPct?: number };
       };
       setProfiles(body.profiles);
       setListings(body.listings);
       if (body.primaryStay) setPrimaryStay(body.primaryStay);
+      setLosWeekly(body.costDefaults?.weeklyDiscountPct ?? 0);
+      setLosMonthly(body.costDefaults?.monthlyDiscountPct ?? 0);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
     } finally {
@@ -379,11 +385,14 @@ export function VisibilityPanel() {
           showAllStays || !allCols.includes(primaryLabel) ? allCols : [primaryLabel];
         const rows = listings
           .filter((l) => l.profileId === p.id)
-          .map((l) => ({
-            l,
-            pc: stayCell(l.latest, primaryLabel),
-            h: headline(l.latest, primaryLabel),
-          }))
+          .map((l) => {
+            const h = headline(l.latest, primaryLabel);
+            return {
+              l,
+              pc: stayCell(l.latest, primaryLabel),
+              h: { ...h, price: applyLos(h.price, primaryStay, losWeekly, losMonthly) },
+            };
+          })
           .filter(({ l, pc }) => matches(l, pc))
           .sort((a, b) => {
             const { key, dir } = sort;
@@ -473,6 +482,8 @@ export function VisibilityPanel() {
                           h={h}
                           stayCols={stayCols}
                           colSpan={colSpan}
+                          losWeekly={losWeekly}
+                          losMonthly={losMonthly}
                           isOpen={open.has(l.id)}
                           onToggle={() => toggle(l.id)}
                           selected={selected.has(l.id)}
@@ -518,6 +529,8 @@ function ListingRows({
   h,
   stayCols,
   colSpan,
+  losWeekly,
+  losMonthly,
   isOpen,
   onToggle,
   selected,
@@ -527,6 +540,8 @@ function ListingRows({
   h: ReturnType<typeof headline>;
   stayCols: string[];
   colSpan: number;
+  losWeekly: number;
+  losMonthly: number;
   isOpen: boolean;
   onToggle: () => void;
   selected: boolean;
@@ -607,7 +622,9 @@ function ListingRows({
                             ? "not in top 280"
                             : "—"}
                       </td>
-                      <td className="px-2 py-1 text-right font-mono">{money(s.price)}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {money(applyLos(s.price, s.nights, losWeekly, losMonthly))}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

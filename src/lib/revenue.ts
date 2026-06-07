@@ -44,6 +44,8 @@ export interface CostDefaults {
   bgFeePct: number;
   defaultUtilities: number;
   defaultCleaning: number;
+  weeklyDiscountPct: number;
+  monthlyDiscountPct: number;
 }
 
 export interface Dashboard {
@@ -84,13 +86,35 @@ export function availableForStay(l: DashListing, nights: number): boolean {
   return l.latest.some((s) => s.nights === nights && (s.available === true || s.found));
 }
 
-// Monthly (30-night) price — our revenue proxy for a one-month booking.
-export function monthlyPrice(l: DashListing): number | null {
+// The scraped list price (gross, before length-of-stay discount) for 30 nights.
+export function rawMonthlyPrice(l: DashListing): number | null {
   const rows = l.latest.filter((s) => s.nights === 30);
   const found = rows.filter((s) => s.found && s.price != null && s.page != null);
   if (found.length)
     return found.reduce((b, s) => ((s.page as number) < (b.page as number) ? s : b)).price;
   return rows.find((s) => s.price != null)?.price ?? null;
+}
+
+// Fixed length-of-stay discount that applies to a stay of `nights`: monthly for
+// 28+, weekly for 7-27, none below a week (Airbnb's standard buckets).
+export function losDiscountPct(nights: number, weeklyPct: number, monthlyPct: number): number {
+  if (nights >= 28) return monthlyPct;
+  if (nights >= 7) return weeklyPct;
+  return 0;
+}
+export function applyLos(
+  raw: number | null,
+  nights: number,
+  weeklyPct: number,
+  monthlyPct: number,
+): number | null {
+  if (raw == null) return null;
+  return raw * (1 - losDiscountPct(nights, weeklyPct, monthlyPct) / 100);
+}
+
+// Monthly revenue = the 1-month list price with your fixed monthly discount applied.
+export function monthlyPrice(l: DashListing, d: CostDefaults): number | null {
+  return applyLos(rawMonthlyPrice(l), 30, d.weeklyDiscountPct, d.monthlyDiscountPct);
 }
 
 export interface Economics {
@@ -109,7 +133,7 @@ export interface Economics {
 // gross revenue) + utilities + cleaning + rent. Utilities and cleaning fall back
 // to the configured defaults; rent has no default (set per property).
 export function economics(l: DashListing, d: CostDefaults): Economics {
-  const revenue = monthlyPrice(l);
+  const revenue = monthlyPrice(l, d);
   const bgFee = revenue != null ? (revenue * d.bgFeePct) / 100 : null;
   const utilities = l.utilities ?? d.defaultUtilities;
   const cleaning = l.cleaningFee ?? d.defaultCleaning;

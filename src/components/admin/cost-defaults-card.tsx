@@ -13,17 +13,29 @@ export function CostDefaultsCard() {
   const [bgFee, setBgFee] = useState("6");
   const [util, setUtil] = useState("1000");
   const [clean, setClean] = useState("500");
+  const [losWk, setLosWk] = useState("0");
+  const [losMo, setLosMo] = useState("0");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     fetch("/api/visibility/settings", { cache: "no-store" })
       .then((r) => r.json())
-      .then((s: { bgFeePct?: number; defaultUtilities?: number; defaultCleaning?: number }) => {
-        if (s.bgFeePct != null) setBgFee(String(s.bgFeePct));
-        if (s.defaultUtilities != null) setUtil(String(s.defaultUtilities));
-        if (s.defaultCleaning != null) setClean(String(s.defaultCleaning));
-      })
+      .then(
+        (s: {
+          bgFeePct?: number;
+          defaultUtilities?: number;
+          defaultCleaning?: number;
+          weeklyDiscountPct?: number;
+          monthlyDiscountPct?: number;
+        }) => {
+          if (s.bgFeePct != null) setBgFee(String(s.bgFeePct));
+          if (s.defaultUtilities != null) setUtil(String(s.defaultUtilities));
+          if (s.defaultCleaning != null) setClean(String(s.defaultCleaning));
+          if (s.weeklyDiscountPct != null) setLosWk(String(s.weeklyDiscountPct));
+          if (s.monthlyDiscountPct != null) setLosMo(String(s.monthlyDiscountPct));
+        },
+      )
       .catch(() => undefined);
   }, []);
 
@@ -37,6 +49,8 @@ export function CostDefaultsCard() {
           bgFeePct: parseFloat(bgFee) || 0,
           defaultUtilities: parseInt(util, 10) || 0,
           defaultCleaning: parseInt(clean, 10) || 0,
+          weeklyDiscountPct: parseFloat(losWk) || 0,
+          monthlyDiscountPct: parseFloat(losMo) || 0,
         }),
       });
       setSaved(true);
@@ -57,7 +71,8 @@ export function CostDefaultsCard() {
           <Link href="/visibility/manage" className="text-primary hover:underline">
             Manage → Import rent &amp; address
           </Link>
-          .
+          . Length-of-stay discounts (weekly for 7–27 nights, monthly for 28+) are applied to the
+          scraped list price wherever prices show.
         </p>
       </CardHeader>
       <CardContent>
@@ -73,6 +88,14 @@ export function CostDefaultsCard() {
           <label className="flex flex-col gap-1">
             Cleaning (per stay)
             <input className={`${input} w-28`} value={clean} onChange={(e) => setClean(e.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            Weekly discount %
+            <input className={`${input} w-24`} value={losWk} onChange={(e) => setLosWk(e.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            Monthly discount %
+            <input className={`${input} w-24`} value={losMo} onChange={(e) => setLosMo(e.target.value)} />
           </label>
           <button type="button" disabled={busy} onClick={save} className={btn}>
             {saved ? "Saved ✓" : "Save"}
