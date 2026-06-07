@@ -200,6 +200,23 @@ function init(db: Database.Database) {
       sort           INTEGER NOT NULL DEFAULT 0,
       created_at     TEXT NOT NULL
     );
+
+    -- Per-listing, per-night rate overrides. The Rates Calendar computes a
+    -- deterministic baseline (rate + occupancy) on read; this table stores only
+    -- *overrides*: operator edits (source='manual') and ingested actuals from
+    -- MiniHotel Bulk ARI (source='minihotel'). NULL columns mean "not overridden".
+    CREATE TABLE IF NOT EXISTS rate_calendar (
+      unit_id     TEXT NOT NULL REFERENCES units(id),
+      date        TEXT NOT NULL,
+      price       INTEGER,
+      available   INTEGER,
+      min_nights  INTEGER,
+      closed      INTEGER,
+      booked      INTEGER,
+      source      TEXT NOT NULL DEFAULT 'manual',
+      updated_at  TEXT,
+      PRIMARY KEY (unit_id, date)
+    );
   `);
 
   // Migrations for DBs created before these columns existed.
@@ -210,6 +227,23 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "monthly_rent", "REAL");
   ensureColumn(db, "tracked_listings", "utilities", "REAL");
   ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
+  ensureColumn(db, "tracked_listings", "address", "TEXT");
+
+  // One-time backfill: give every apartment the default utilities/cleaning the
+  // operator asked for, so the costs are filled in and visible (not just applied
+  // implicitly in the profit math). Runs once, guarded by a meta flag.
+  const costsBackfilled = db
+    .prepare("SELECT value FROM meta WHERE key = 'cost_defaults_backfilled'")
+    .get();
+  if (!costsBackfilled) {
+    db.exec(`
+      UPDATE tracked_listings SET utilities = 1000 WHERE utilities IS NULL;
+      UPDATE tracked_listings SET cleaning_fee = 500 WHERE cleaning_fee IS NULL;
+    `);
+    db.prepare(
+      "INSERT OR REPLACE INTO meta (key, value) VALUES ('cost_defaults_backfilled', 'v1')",
+    ).run();
+  }
 
   // Pricing v2 (PriceLabs-inspired): per-unit price floor/ceiling, weekly/monthly
   // LOS discounts, and a minimum-stay policy (recommended + hard floor).
@@ -220,6 +254,10 @@ function init(db: Database.Database) {
   ensureColumn(db, "units", "monthly_discount_pct", `REAL NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.monthlyDiscountPct}`);
   ensureColumn(db, "units", "min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.minStay}`);
   ensureColumn(db, "units", "lowest_min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.lowestMinStay}`);
+
+  // MiniHotel connection: each unit maps to a MiniHotel room-type code (names
+  // differ between this app and MiniHotel, so we store the link explicitly).
+  ensureColumn(db, "units", "minihotel_room_type", "TEXT");
   // Floors/ceilings derive from the base rate; backfill any rows still missing
   // them (covers both pre-existing DBs and freshly-seeded rows, which insert
   // only the original columns), ₪-step rounded.

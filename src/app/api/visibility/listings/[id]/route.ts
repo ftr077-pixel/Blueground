@@ -12,6 +12,7 @@ interface ListingPatch {
   monthlyRent?: number | null;
   utilities?: number | null;
   cleaningFee?: number | null;
+  address?: string | null;
 }
 
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {

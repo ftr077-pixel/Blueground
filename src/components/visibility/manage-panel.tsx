@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Download, Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -31,6 +31,7 @@ interface Listing {
   monthlyRent: number | null;
   utilities: number | null;
   cleaningFee: number | null;
+  address: string | null;
   active: boolean;
 }
 
@@ -43,18 +44,23 @@ function ListingRow({
   l,
   profile,
   busy,
+  defaultUtilities,
+  defaultCleaning,
   onPatch,
   onDelete,
 }: {
   l: Listing;
   profile: Profile | undefined;
   busy: boolean;
+  defaultUtilities: number;
+  defaultCleaning: number;
   onPatch: (id: string, body: Record<string, unknown>) => void;
   onDelete: (l: Listing) => void;
 }) {
   const [name, setName] = useState(l.label);
   const [guests, setGuests] = useState(l.guests != null ? String(l.guests) : "");
   const [dates, setDates] = useState(l.startDates ? l.startDates.join(", ") : "");
+  const [address, setAddress] = useState(l.address ?? "");
   const [rent, setRent] = useState(l.monthlyRent != null ? String(l.monthlyRent) : "");
   const [util, setUtil] = useState(l.utilities != null ? String(l.utilities) : "");
   const [clean, setClean] = useState(l.cleaningFee != null ? String(l.cleaningFee) : "");
@@ -79,6 +85,14 @@ function ListingRow({
         title="Name"
       />
       <span className="text-[10px] font-mono text-muted-foreground">{l.airbnbId}</span>
+      <input
+        className={`${input} w-44`}
+        value={address}
+        placeholder="Address"
+        title="Address"
+        onChange={(e) => setAddress(e.target.value)}
+        onBlur={() => onPatch(l.id, { address: address.trim() || null })}
+      />
       <input
         className={`${input} w-14`}
         value={guests}
@@ -112,16 +126,16 @@ function ListingRow({
       <input
         className={`${input} w-20`}
         value={util}
-        placeholder="Utils/mo"
-        title="Monthly utilities (your cost)"
+        placeholder={`${defaultUtilities}`}
+        title="Monthly utilities (blank = default)"
         onChange={(e) => setUtil(e.target.value)}
         onBlur={() => onPatch(l.id, { utilities: parseNum(util) })}
       />
       <input
         className={`${input} w-20`}
         value={clean}
-        placeholder="Cleaning"
-        title="Cleaning fee per stay (your cost)"
+        placeholder={`${defaultCleaning}`}
+        title="Cleaning fee per stay (blank = default)"
         onChange={(e) => setClean(e.target.value)}
         onBlur={() => onPatch(l.id, { cleaningFee: parseNum(clean) })}
       />
@@ -188,16 +202,28 @@ export function ManagePanel() {
   const [proxyUrl, setProxyUrl] = useState("");
   const [availabilityDays, setAvailabilityDays] = useState("90");
   const [primaryStay, setPrimaryStay] = useState("30");
+  const [defUtil, setDefUtil] = useState(1000);
+  const [defClean, setDefClean] = useState(500);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     fetch("/api/visibility/settings", { cache: "no-store" })
       .then((r) => r.json())
-      .then((s: { proxyUrl?: string; availabilityDays?: number; primaryStay?: number }) => {
-        setProxyUrl(s.proxyUrl || "");
-        if (s.availabilityDays) setAvailabilityDays(String(s.availabilityDays));
-        if (s.primaryStay) setPrimaryStay(String(s.primaryStay));
-      })
+      .then(
+        (s: {
+          proxyUrl?: string;
+          availabilityDays?: number;
+          primaryStay?: number;
+          defaultUtilities?: number;
+          defaultCleaning?: number;
+        }) => {
+          setProxyUrl(s.proxyUrl || "");
+          if (s.availabilityDays) setAvailabilityDays(String(s.availabilityDays));
+          if (s.primaryStay) setPrimaryStay(String(s.primaryStay));
+          if (s.defaultUtilities != null) setDefUtil(s.defaultUtilities);
+          if (s.defaultCleaning != null) setDefClean(s.defaultCleaning);
+        },
+      )
       .catch(() => undefined);
   }, []);
 
@@ -220,60 +246,6 @@ export function ManagePanel() {
       setError("could not save settings");
     } finally {
       setBusy(false);
-    }
-  }
-
-  // ---- app update (pull + rebuild + restart, no SSH) ----
-  const [updating, setUpdating] = useState(false);
-  const [updateMsg, setUpdateMsg] = useState<string | null>(null);
-
-  async function loadUpdate(): Promise<boolean> {
-    try {
-      const r = await fetch("/api/admin/update", { cache: "no-store" });
-      const s = (await r.json()) as { state: string; message?: string };
-      const isUpdating = s.state === "updating";
-      setUpdating(isUpdating);
-      if (s.state === "done") setUpdateMsg("updated ✓ — reload the page to see changes");
-      else if (s.state === "error") setUpdateMsg(`update failed: ${s.message ?? ""}`);
-      else if (s.state === "updating") setUpdateMsg(s.message ?? "updating…");
-      else setUpdateMsg(null);
-      return isUpdating;
-    } catch {
-      return true; // app is probably restarting — keep polling
-    }
-  }
-
-  useEffect(() => {
-    loadUpdate();
-  }, []);
-
-  useEffect(() => {
-    if (!updating) return;
-    const t = setInterval(async () => {
-      const u = await loadUpdate();
-      if (!u) clearInterval(t);
-    }, 4000);
-    return () => clearInterval(t);
-  }, [updating]);
-
-  async function runUpdate() {
-    if (
-      !confirm(
-        "Pull the latest version from GitHub, rebuild, and restart the app? The dashboard will blink for a minute.",
-      )
-    )
-      return;
-    setUpdateMsg("starting…");
-    try {
-      const r = await fetch("/api/admin/update", { method: "POST" });
-      if (!r.ok) {
-        const e = (await r.json().catch(() => ({}))) as { error?: string };
-        setUpdateMsg(e.error || "could not start update");
-        return;
-      }
-      setUpdating(true);
-    } catch {
-      setUpdateMsg("could not start update");
     }
   }
 
@@ -316,6 +288,13 @@ export function ManagePanel() {
   const [lLabel, setLLabel] = useState("");
   const [lGuests, setLGuests] = useState("");
   const [bulk, setBulk] = useState("");
+  const [importText, setImportText] = useState("");
+  const [importResult, setImportResult] = useState<{
+    updated: number;
+    unmatched: string[];
+    sampleListings: string[];
+    listingCount: number;
+  } | null>(null);
 
   useEffect(() => {
     if (!lProfile && profiles.length) setLProfile(profiles[0].id);
@@ -326,6 +305,38 @@ export function ManagePanel() {
   }
   function removeListing(l: Listing) {
     if (confirm(`Remove "${l.label}"?`)) call(`/api/visibility/listings/${l.id}`, "DELETE");
+  }
+
+  async function runImport() {
+    setBusy(true);
+    setError(null);
+    setImportResult(null);
+    try {
+      const res = await fetch("/api/visibility/listings/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: importText }),
+      });
+      const r = (await res.json()) as {
+        updated?: number;
+        unmatched?: string[];
+        sampleListings?: string[];
+        listingCount?: number;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(r.error || "import failed");
+      setImportResult({
+        updated: r.updated ?? 0,
+        unmatched: r.unmatched ?? [],
+        sampleListings: r.sampleListings ?? [],
+        listingCount: r.listingCount ?? 0,
+      });
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "import failed");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -376,35 +387,6 @@ export function ManagePanel() {
               {saved ? "Saved ✓" : "Save settings"}
             </button>
           </div>
-        </CardContent>
-      </Card>
-
-      {/* ---------------------------------------------------------- updates */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle>App updates</CardTitle>
-          <p className="text-[11px] text-muted-foreground">
-            Pull the newest version from GitHub, rebuild, and restart — no SSH needed.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="button" disabled={updating} onClick={runUpdate} className={btn}>
-              {updating ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              {updating ? "Updating…" : "Update from GitHub"}
-            </button>
-            {updateMsg && <span className="text-[11px] text-muted-foreground">{updateMsg}</span>}
-          </div>
-          {updating && (
-            <p className="mt-2 text-[11px] text-muted-foreground">
-              Takes ~1–3 min; the app restarts, so the page may briefly disconnect — it&apos;ll come
-              back on the new version (reload it).
-            </p>
-          )}
         </CardContent>
       </Card>
 
@@ -491,7 +473,9 @@ export function ManagePanel() {
           <CardTitle>Tracked listings</CardTitle>
           <p className="text-[11px] text-muted-foreground">
             Each apartment. Guests &amp; dates default to the profile — leave them blank to inherit,
-            or set per-apartment. Bulk box accepts Airbnb IDs, room URLs, or rows from your sheet.
+            or set per-apartment. Rent / utilities / cleaning are your monthly costs — utilities and
+            cleaning fall back to the Settings defaults, and the BG fee is applied automatically.
+            Bulk box accepts Airbnb IDs, room URLs, or rows from your sheet.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -553,6 +537,62 @@ export function ManagePanel() {
                 </button>
               </div>
 
+              <div className="rounded-lg border border-dashed border-border p-3 space-y-2">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Import rent &amp; address (bulk)
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Paste rows of <span className="font-mono">address &lt;tab&gt; rent</span> (a leading
+                  row-number is fine). Each address is matched to a listing&apos;s name; you can also
+                  use the Airbnb ID as the key. Unmatched rows are listed so you can fix them.
+                </p>
+                <textarea
+                  className={`${input} w-full font-mono`}
+                  rows={5}
+                  placeholder={"Florentin 7, 23\t7500\nHerzel 114, 32\t9400"}
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                />
+                <button
+                  type="button"
+                  disabled={busy || !importText.trim()}
+                  onClick={runImport}
+                  className={btn}
+                >
+                  {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                  Import rent &amp; address
+                </button>
+                {importResult && (
+                  <div className="text-[11px]">
+                    <p className="text-[hsl(var(--success))]">
+                      Updated {importResult.updated} listing(s).
+                    </p>
+                    {importResult.updated === 0 && importResult.sampleListings.length > 0 && (
+                      <p className="mt-2 text-muted-foreground">
+                        For reference, your {importResult.listingCount} listings are named like:{" "}
+                        <span className="text-foreground">
+                          {importResult.sampleListings.join(", ")}
+                        </span>
+                        . Send me a few of these and I&apos;ll map them to your rent table.
+                      </p>
+                    )}
+                    {importResult.unmatched.length > 0 && (
+                      <div className="mt-1">
+                        <p className="text-[hsl(var(--warning))]">
+                          {importResult.unmatched.length} not matched (no listing with that
+                          name/ID):
+                        </p>
+                        <ul className="mt-1 max-h-32 overflow-y-auto font-mono text-muted-foreground">
+                          {importResult.unmatched.map((u, i) => (
+                            <li key={i}>{u}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div className="space-y-2">
                 {listings.length === 0 && (
                   <p className="text-[11px] text-muted-foreground">No listings yet.</p>
@@ -563,6 +603,8 @@ export function ManagePanel() {
                     l={l}
                     profile={profiles.find((p) => p.id === l.profileId)}
                     busy={busy}
+                    defaultUtilities={defUtil}
+                    defaultCleaning={defClean}
                     onPatch={patchListing}
                     onDelete={removeListing}
                   />

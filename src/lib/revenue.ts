@@ -26,6 +26,7 @@ export interface DashListing {
   monthlyRent: number | null;
   utilities: number | null;
   cleaningFee: number | null;
+  address: string | null;
   active: boolean;
   latest: DashSnapshot[];
 }
@@ -39,10 +40,17 @@ export interface DashProfile {
   active: boolean;
 }
 
+export interface CostDefaults {
+  bgFeePct: number;
+  defaultUtilities: number;
+  defaultCleaning: number;
+}
+
 export interface Dashboard {
   profiles: DashProfile[];
   listings: DashListing[];
   primaryStay: number;
+  costDefaults: CostDefaults;
 }
 
 export const STAY_LABELS: Record<number, string> = {
@@ -87,21 +95,30 @@ export function monthlyPrice(l: DashListing): number | null {
 
 export interface Economics {
   revenue: number | null;
+  bgFee: number | null;
+  utilities: number;
+  cleaning: number;
+  rent: number | null;
+  rentKnown: boolean;
   cost: number | null;
   profit: number | null;
   margin: number | null;
-  costsKnown: boolean;
 }
 
-// Monthly economics: revenue (1-month price) minus rent + utilities + cleaning.
-export function economics(l: DashListing): Economics {
+// Monthly economics. Revenue = 1-month price. Costs = BG franchise fee (% of
+// gross revenue) + utilities + cleaning + rent. Utilities and cleaning fall back
+// to the configured defaults; rent has no default (set per property).
+export function economics(l: DashListing, d: CostDefaults): Economics {
   const revenue = monthlyPrice(l);
-  const parts = [l.monthlyRent, l.utilities, l.cleaningFee];
-  const costsKnown = parts.some((c) => c != null);
-  const cost = costsKnown ? parts.reduce<number>((s, c) => s + (c ?? 0), 0) : null;
+  const bgFee = revenue != null ? (revenue * d.bgFeePct) / 100 : null;
+  const utilities = l.utilities ?? d.defaultUtilities;
+  const cleaning = l.cleaningFee ?? d.defaultCleaning;
+  const rent = l.monthlyRent;
+  const rentKnown = rent != null;
+  const cost = revenue != null ? (bgFee ?? 0) + utilities + cleaning + (rent ?? 0) : null;
   const profit = revenue != null && cost != null ? revenue - cost : null;
   const margin = profit != null && revenue ? profit / revenue : null;
-  return { revenue, cost, profit, margin, costsKnown };
+  return { revenue, bgFee, utilities, cleaning, rent, rentKnown, cost, profit, margin };
 }
 
 export const CHART = {

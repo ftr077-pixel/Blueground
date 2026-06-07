@@ -24,6 +24,8 @@ export interface Unit {
   minStay: number;
   /** Hard minimum-stay floor — what makes the unit mid-term (e.g. 30). */
   lowestMinStay: number;
+  /** MiniHotel room-type code this unit maps to (names differ between systems). */
+  minihotelRoomType: string | null;
 }
 
 export interface PricingHistoryRow {
@@ -54,6 +56,7 @@ interface UnitSql {
   monthly_discount_pct: number | null;
   min_stay: number | null;
   lowest_min_stay: number | null;
+  minihotel_room_type: string | null;
 }
 
 interface HistorySql {
@@ -86,6 +89,7 @@ function rowToUnit(r: UnitSql): Unit {
     monthlyDiscountPct: r.monthly_discount_pct ?? UNIT_PRICING_DEFAULTS.monthlyDiscountPct,
     minStay: r.min_stay ?? UNIT_PRICING_DEFAULTS.minStay,
     lowestMinStay: r.lowest_min_stay ?? UNIT_PRICING_DEFAULTS.lowestMinStay,
+    minihotelRoomType: r.minihotel_room_type ?? null,
   };
 }
 
@@ -104,6 +108,11 @@ export function setUnitRate(unitId: string, newRate: number, ts: string) {
 export function setUnitMinStay(unitId: string, minStay: number) {
   const db = getDb();
   db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);
+}
+
+export function setUnitMiniHotelRoomType(unitId: string, code: string | null) {
+  const db = getDb();
+  db.prepare("UPDATE units SET minihotel_room_type = ? WHERE id = ?").run(code, unitId);
 }
 
 export function recordPricing(
