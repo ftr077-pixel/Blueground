@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Download, Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -223,60 +223,6 @@ export function ManagePanel() {
     }
   }
 
-  // ---- app update (pull + rebuild + restart, no SSH) ----
-  const [updating, setUpdating] = useState(false);
-  const [updateMsg, setUpdateMsg] = useState<string | null>(null);
-
-  async function loadUpdate(): Promise<boolean> {
-    try {
-      const r = await fetch("/api/admin/update", { cache: "no-store" });
-      const s = (await r.json()) as { state: string; message?: string };
-      const isUpdating = s.state === "updating";
-      setUpdating(isUpdating);
-      if (s.state === "done") setUpdateMsg("updated ✓ — reload the page to see changes");
-      else if (s.state === "error") setUpdateMsg(`update failed: ${s.message ?? ""}`);
-      else if (s.state === "updating") setUpdateMsg(s.message ?? "updating…");
-      else setUpdateMsg(null);
-      return isUpdating;
-    } catch {
-      return true; // app is probably restarting — keep polling
-    }
-  }
-
-  useEffect(() => {
-    loadUpdate();
-  }, []);
-
-  useEffect(() => {
-    if (!updating) return;
-    const t = setInterval(async () => {
-      const u = await loadUpdate();
-      if (!u) clearInterval(t);
-    }, 4000);
-    return () => clearInterval(t);
-  }, [updating]);
-
-  async function runUpdate() {
-    if (
-      !confirm(
-        "Pull the latest version from GitHub, rebuild, and restart the app? The dashboard will blink for a minute.",
-      )
-    )
-      return;
-    setUpdateMsg("starting…");
-    try {
-      const r = await fetch("/api/admin/update", { method: "POST" });
-      if (!r.ok) {
-        const e = (await r.json().catch(() => ({}))) as { error?: string };
-        setUpdateMsg(e.error || "could not start update");
-        return;
-      }
-      setUpdating(true);
-    } catch {
-      setUpdateMsg("could not start update");
-    }
-  }
-
   // ---- new profile form ----
   const [pLabel, setPLabel] = useState("");
   const [pGuests, setPGuests] = useState("2");
@@ -376,35 +322,6 @@ export function ManagePanel() {
               {saved ? "Saved ✓" : "Save settings"}
             </button>
           </div>
-        </CardContent>
-      </Card>
-
-      {/* ---------------------------------------------------------- updates */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle>App updates</CardTitle>
-          <p className="text-[11px] text-muted-foreground">
-            Pull the newest version from GitHub, rebuild, and restart — no SSH needed.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="button" disabled={updating} onClick={runUpdate} className={btn}>
-              {updating ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              {updating ? "Updating…" : "Update from GitHub"}
-            </button>
-            {updateMsg && <span className="text-[11px] text-muted-foreground">{updateMsg}</span>}
-          </div>
-          {updating && (
-            <p className="mt-2 text-[11px] text-muted-foreground">
-              Takes ~1–3 min; the app restarts, so the page may briefly disconnect — it&apos;ll come
-              back on the new version (reload it).
-            </p>
-          )}
         </CardContent>
       </Card>
 
