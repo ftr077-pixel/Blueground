@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const input =
@@ -52,7 +53,11 @@ export function CostDefaultsCard() {
         <p className="text-[11px] text-muted-foreground">
           Used to compute profit in Revenue &amp; Yield. The BG fee is a percentage of gross revenue;
           utilities and cleaning are monthly defaults you can override per listing in Manage. Rent is
-          set per property.
+          set per property in{" "}
+          <Link href="/visibility/manage" className="text-primary hover:underline">
+            Manage → Import rent &amp; address
+          </Link>
+          .
         </p>
       </CardHeader>
       <CardContent>
