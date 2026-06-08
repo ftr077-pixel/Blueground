@@ -21,7 +21,7 @@ export function ProfitabilityPanel() {
   if (!data) return null;
 
   const primary = data.primaryStay;
-  const { bgFeePct } = data.costDefaults;
+  const { bgFeePct, airbnbFeePct } = data.costDefaults;
   const rows = data.listings
     .map((l) => ({ l, e: economics(l, data.costDefaults), page: bestPage(l, primary) }))
     .sort((a, b) => (b.e.profit ?? -Infinity) - (a.e.profit ?? -Infinity));
@@ -51,8 +51,9 @@ export function ProfitabilityPanel() {
       </Card>
 
       <p className="text-[11px] text-muted-foreground">
-        Costs = <span className="text-foreground">BG fee {bgFeePct}%</span> of revenue + utilities +
-        cleaning + rent. Utilities ({fmtMoney(data.costDefaults.defaultUtilities)}) and cleaning (
+        Costs = <span className="text-foreground">BG fee {bgFeePct}% + Airbnb fee {airbnbFeePct}%</span>{" "}
+        of revenue + utilities + cleaning + rent. Utilities (
+        {fmtMoney(data.costDefaults.defaultUtilities)}) and cleaning (
         {fmtMoney(data.costDefaults.defaultCleaning)}) use the{" "}
         <Link href="/settings" className="text-primary hover:underline">
           Settings
@@ -87,7 +88,10 @@ export function ProfitabilityPanel() {
               </thead>
               <tbody>
                 {rows.map(({ l, e, page }) => {
-                  const feesBills = e.revenue != null ? (e.bgFee ?? 0) + e.utilities + e.cleaning : null;
+                  const feesBills =
+                    e.revenue != null
+                      ? (e.bgFee ?? 0) + (e.airbnbFee ?? 0) + e.utilities + e.cleaning
+                      : null;
                   return (
                     <tr key={l.id} className="border-t border-border/60 hover:bg-muted/30">
                       <td className="px-3 py-2">
@@ -110,9 +114,9 @@ export function ProfitabilityPanel() {
                       </td>
                       <td
                         className="px-3 py-2 text-right font-mono text-muted-foreground"
-                        title={`BG fee ${fmtMoney(e.bgFee)} · utilities ${fmtMoney(
-                          e.utilities,
-                        )} · cleaning ${fmtMoney(e.cleaning)}`}
+                        title={`BG fee ${fmtMoney(e.bgFee)} · Airbnb fee ${fmtMoney(
+                          e.airbnbFee,
+                        )} · utilities ${fmtMoney(e.utilities)} · cleaning ${fmtMoney(e.cleaning)}`}
                       >
                         {fmtMoney(feesBills)}
                       </td>

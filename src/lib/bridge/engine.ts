@@ -23,6 +23,8 @@ const seed = seedJson as {
   drivers: Record<DriverKey, number[]>;
   inputs: Record<InputKey, number[]>;
   baseline: Record<string, number[]>;
+  actuals?: Record<string, number[]>;
+  actualMonths?: number;
 };
 
 export const BRIDGE_MONTHS = seed.months;
@@ -41,6 +43,7 @@ export interface BridgeLine {
   kind: LineKind;
   monthly: number[];
   total: number;
+  actual: number[]; // real data per period (0 where none reported)
 }
 
 export interface BridgeResult {
@@ -68,6 +71,7 @@ export interface BridgeResult {
   };
   drivers: BridgeDriverInfo[];
   maxBaselineErrorPct: number;
+  actualMonths: number;
 }
 
 export interface BridgeDriverInfo {
@@ -226,6 +230,7 @@ export function computeBridge(overrides: BridgeOverrides = {}): BridgeResult {
     netIncome[i] = ebit[i] + finExp[i] + finInc[i] + incomeTax[i];
   }
 
+  const sAct = seed.actuals ?? {};
   const line = (id: string, label: string, level: number, kind: LineKind, monthly: number[]): BridgeLine => ({
     id,
     label,
@@ -233,6 +238,7 @@ export function computeBridge(overrides: BridgeOverrides = {}): BridgeResult {
     kind,
     monthly,
     total: sum(monthly),
+    actual: sAct[id] ?? zeros(),
   });
 
   const lines: BridgeLine[] = [
@@ -318,6 +324,7 @@ export function computeBridge(overrides: BridgeOverrides = {}): BridgeResult {
     },
     drivers: driverCatalog(overrides),
     maxBaselineErrorPct: maxErr,
+    actualMonths: seed.actualMonths ?? 0,
   };
 }
 
@@ -384,10 +391,11 @@ export function aggregate(result: BridgeResult, period: "month" | "quarter" | "y
       // flow, sum per period, then divide by aggregated revenue.
       const flow = idxByPeriod.map((idxs) => idxs.reduce((s, i) => s + ln.monthly[i] * result.series.revenue[i], 0));
       const monthly = flow.map((f, p) => (revByPeriod[p] ? f / revByPeriod[p] : 0));
-      return { ...ln, monthly, total: ln.total };
+      return { ...ln, monthly, total: ln.total, actual: periodKeys.map(() => 0) };
     }
     const monthly = idxByPeriod.map((idxs) => idxs.reduce((s, i) => s + ln.monthly[i], 0));
-    return { ...ln, monthly, total: sum(monthly) };
+    const actual = idxByPeriod.map((idxs) => idxs.reduce((s, i) => s + (ln.actual[i] ?? 0), 0));
+    return { ...ln, monthly, total: sum(monthly), actual };
   });
   return { periods: periodKeys, lines };
 }

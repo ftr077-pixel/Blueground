@@ -41,6 +41,13 @@ interface MarketDto {
   minNights: { median: number | null; n: number };
 }
 
+interface RuleDto {
+  key: string;
+  label: string;
+  enabled: boolean;
+  note: string;
+}
+
 interface HistoryDto {
   id: string;
   unitId: string;
@@ -73,6 +80,7 @@ export function PricingPanel() {
   const [units, setUnits] = useState<UnitDto[]>([]);
   const [history, setHistory] = useState<HistoryDto[]>([]);
   const [market, setMarket] = useState<MarketDto | null>(null);
+  const [rules, setRules] = useState<RuleDto[]>([]);
   const [running, setRunning] = useState(false);
   const [lastRun, setLastRun] = useState<RunSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -85,10 +93,12 @@ export function PricingPanel() {
         units: UnitDto[];
         history: HistoryDto[];
         market?: MarketDto;
+        rules?: RuleDto[];
       };
       setUnits(body.units);
       setHistory(body.history);
       setMarket(body.market ?? null);
+      setRules(body.rules ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
     }
@@ -154,6 +164,30 @@ export function PricingPanel() {
       </CardHeader>
 
       <CardContent className="space-y-5">
+        {rules.length > 0 && (
+          <div>
+            <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Pricing rule engine · {rules.filter((r) => r.enabled).length}/{rules.length} active
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {rules.map((r) => (
+                <span
+                  key={r.key}
+                  title={r.note}
+                  className={cn(
+                    "inline-flex items-center rounded-md border px-2 py-1 text-[10px]",
+                    r.enabled
+                      ? "border-[hsl(var(--success))]/30 bg-[hsl(var(--success))]/10 text-foreground"
+                      : "border-border bg-muted/30 text-muted-foreground line-through",
+                  )}
+                >
+                  {r.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div>
           <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
             Portfolio · {units.length} units

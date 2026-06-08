@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
+import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
 export interface SearchProfile {
@@ -403,20 +404,18 @@ export function deleteListing(id: string): void {
 // "[index] <key> <rent>" (tab- or space-separated). The key is an Airbnb ID
 // (matched exactly) or a listing name/address (matched against the label,
 // ignoring case/punctuation). Unmatched rows are returned for review.
-function parseImportRow(line: string): { key: string; rent: number } | null {
-  const cells = (line.includes("\t") ? line.split("\t") : line.split(/\s+/))
+function importTokens(line: string): string[] {
+  return (line.includes("\t") ? line.split("\t") : line.split(/\s{2,}/))
     .map((c) => c.trim())
     .filter(Boolean);
-  if (cells.length < 2) return null;
-  const rent = parseFloat(cells[cells.length - 1].replace(/[^0-9.]/g, ""));
-  if (!Number.isFinite(rent)) return null;
-  let rest = cells.slice(0, -1);
-  if (rest.length >= 2 && /^\d{1,4}$/.test(rest[0])) rest = rest.slice(1); // drop leading row index
-  const key = (line.includes("\t") ? rest[rest.length - 1] : rest.join(" ")).trim();
-  return key ? { key, rent } : null;
 }
 
-export function bulkSetRentAddress(text: string): { updated: number; unmatched: string[] } {
+export function bulkSetRentAddress(text: string): {
+  updated: number;
+  unmatched: string[];
+  sampleListings: string[];
+  listingCount: number;
+} {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const listings = listListings();
   const byAirbnb = new Map<string, TrackedListing>();
@@ -428,34 +427,63 @@ export function bulkSetRentAddress(text: string): { updated: number; unmatched: 
     arr.push(l);
     byName.set(k, arr);
   }
+  const findByKey = (key: string): TrackedListing | undefined => {
+    if (/^\d{7,}$/.test(key)) return byAirbnb.get(key);
+    const n = norm(key);
+    if (!n) return undefined;
+    const m = byName.get(n);
+    return m && m.length === 1 ? m[0] : undefined;
+  };
 
   let updated = 0;
   const unmatched: string[] = [];
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
-    const row = parseImportRow(line);
-    if (!row) {
+    const cells = importTokens(line);
+    if (cells.length < 2) {
       unmatched.push(line);
       continue;
     }
+    const rent = parseFloat(cells[cells.length - 1].replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(rent)) {
+      unmatched.push(line);
+      continue;
+    }
+
+    // Try several keys per row: each leading cell as-is, plus the bare number
+    // from a tag like "#TLV12" — so listings named by address, by "TLV12", or by
+    // plain index all match.
+    const idCells = cells.slice(0, -1);
+    const candidates: string[] = [];
+    for (const c of idCells) {
+      if (norm(c)) candidates.push(c);
+      if (/tlv/i.test(c) || /^#?\d{1,4}$/.test(c)) {
+        const d = c.replace(/\D/g, "");
+        if (d) candidates.push(d);
+      }
+    }
+    // The address is the cell that reads like one (a letter plus a space/comma).
+    const address = idCells.find((c) => /[a-z]/i.test(c) && /[\s,]/.test(c)) ?? null;
+
     let target: TrackedListing | undefined;
-    let address: string | null = row.key;
-    if (/^\d{7,}$/.test(row.key)) {
-      target = byAirbnb.get(row.key);
-      address = null; // key is an id, not an address
-    } else {
-      const m = byName.get(norm(row.key));
-      if (m && m.length === 1) target = m[0];
+    for (const cand of candidates) {
+      target = findByKey(cand);
+      if (target) break;
     }
     if (!target) {
       unmatched.push(line);
       continue;
     }
-    updateListing(target.id, { monthlyRent: row.rent, ...(address ? { address } : {}) });
+    updateListing(target.id, { monthlyRent: rent, ...(address ? { address } : {}) });
     updated++;
   }
-  return { updated, unmatched };
+  return {
+    updated,
+    unmatched,
+    sampleListings: listings.slice(0, 12).map((l) => l.label),
+    listingCount: listings.length,
+  };
 }
 
 // Parse pasted listings — one per line. Handles plain Airbnb IDs, room URLs, and
@@ -529,6 +557,9 @@ export interface RecordRunInput {
     currency?: string | null;
   }>;
   listingMinNights?: Record<string, number | null>;
+  // Full competitor price ladder per search, captured alongside our listings'
+  // snapshots in the same run (optional — older scrapers omit it).
+  searchResults?: SearchResultsInput[];
 }
 
 export function recordRun(input: RecordRunInput): number {
@@ -571,6 +602,15 @@ export function recordRun(input: RecordRunInput): number {
         "UPDATE tracked_listings SET min_nights = ?, min_nights_checked_at = ? WHERE id = ?",
       );
       for (const [lid, mn] of Object.entries(input.listingMinNights)) upd.run(mn ?? null, ts, lid);
+    }
+    // Ladder shares the run's id + ts so it lines up with the snapshots above.
+    if (input.searchResults?.length) {
+      insertSearchResults(db, {
+        profileId: input.profileId,
+        runId: input.runId,
+        ts,
+        searches: input.searchResults,
+      });
     }
   });
   tx();
@@ -615,8 +655,22 @@ export function getDashboard() {
     primaryStay: num("primary_stay", 30),
     costDefaults: {
       bgFeePct: num("bg_fee_pct", 6),
+      airbnbFeePct: num("airbnb_fee_pct", 0),
       defaultUtilities: num("default_utilities", 1000),
       defaultCleaning: num("default_cleaning", 500),
+      weeklyDiscountPct: num("los_weekly_pct", 0),
+      biWeeklyDiscountPct: num("los_biweekly_pct", 0),
+      monthlyDiscountPct: num("los_monthly_pct", 0),
+    },
+    pricingRules: {
+      marginLow: num("pr_margin_low", 25),
+      marginHigh: num("pr_margin_high", 45),
+      rankWellPage: num("pr_rank_well_page", 1),
+      buriedPage: num("pr_buried_page", 5),
+      urgentDays: num("pr_urgent_days", 14),
+      relaxedDays: num("pr_relaxed_days", 45),
+      stepPct: num("pr_step_pct", 5),
+      floorMargin: num("pr_floor_margin", 10),
     },
   };
 }

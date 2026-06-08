@@ -203,6 +203,35 @@ def build_rankmap(results):
     return out
 
 
+def build_ladder(results, check_in, check_out, nights, guests, currency):
+    """Full competitor price ladder for one search: every result's (rank, price).
+
+    Built from the SAME result set build_rankmap() walks, so this adds no extra
+    Airbnb requests -- only payload + storage. This is the price->position curve
+    the learning system fits on.
+    """
+    out = []
+    for i, r in enumerate(results):
+        if not isinstance(r, dict):
+            continue
+        out.append({
+            "rank": i + 1,
+            "page": i // WEB_PAGE_SIZE + 1,
+            "position": i % WEB_PAGE_SIZE + 1,
+            "roomId": str(r["room_id"]) if r.get("room_id") is not None else None,
+            "price": result_price(r),
+        })
+    return {
+        "checkIn": check_in,
+        "checkOut": check_out,
+        "nights": nights,
+        "guests": guests,
+        "total": len(results),
+        "currency": currency,
+        "results": out,
+    }
+
+
 def run_search(box, check_in, check_out, guests, currency):
     results = pyairbnb.search_all(
         check_in=check_in, check_out=check_out,
@@ -268,6 +297,7 @@ def scan_profile(profile, availability_days=90):
     # 2) Build searches for eligible windows; record ineligible directly. A search
     #    = (guests, check-in, nights); listings sharing one are batched together.
     snapshots = []
+    search_results = []  # one full competitor ladder per executed search
     searches = {}  # (guests, date, nights) -> [eligible listings]
     skipped = 0
     for l in listings:
@@ -344,6 +374,8 @@ def scan_profile(profile, availability_days=90):
             results = []
         rankmap = build_rankmap(results)
         total = len(results)
+        if results:
+            search_results.append(build_ladder(results, d, check_out, n, g, currency))
         hits = sum(1 for l in ls if str(l["airbnbId"]) in rankmap)
         found_total += hits
         print(f"  g{g} {stay_label(n):<8} {d}: {total} results, {hits}/{len(ls)} found")
@@ -370,7 +402,7 @@ def scan_profile(profile, availability_days=90):
         time.sleep(PAUSE)
     if skipped:
         print(f"  skipped {skipped} listing(s) with no availability in {availability_days}d")
-    return snapshots, posted_min, {
+    return snapshots, posted_min, search_results, {
         "found": found_total,
         "errors": error_count,
         "searches": len(searches),
@@ -400,7 +432,7 @@ def main():
             continue
         run_id = uuid.uuid4().hex
         try:
-            snapshots, posted_min, stats = scan_profile(profile, availability_days)
+            snapshots, posted_min, search_results, stats = scan_profile(profile, availability_days)
         except Exception as e:
             print(f"[error] profile {profile.get('id')}: {e}")
             continue
@@ -413,6 +445,7 @@ def main():
             "runId": run_id,
             "snapshots": snapshots,
             "listingMinNights": posted_min,
+            "searchResults": search_results,
         }
         try:
             res = http_post_json(f"{APP_URL}/api/visibility/snapshot", payload, headers)

@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { ACTIVITY_FEED, DEPARTMENTS } from "@/lib/mock-data";
 import { APPROVAL_QUEUE } from "@/lib/action-center-data";
+import { UNIT_PRICING_DEFAULTS, PRICING_AGENT } from "@/lib/config/pricing";
 import { randomUUID } from "node:crypto";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -180,6 +181,32 @@ function init(db: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_lsnap_listing_ts ON listing_snapshots(listing_id, ts DESC);
 
+    -- Full competitor price ladder per search (every result's price at its
+    -- position), captured from the same result set the scraper already fetches.
+    -- One row per (search, rank); a "search" = profile × run × check-in × nights
+    -- × guests. This is the substrate for the price→position learner: a single
+    -- scan yields the whole market price-vs-rank curve for that exact query.
+    CREATE TABLE IF NOT EXISTS search_results (
+      id            TEXT PRIMARY KEY,
+      profile_id    TEXT NOT NULL REFERENCES search_profiles(id),
+      run_id        TEXT NOT NULL,
+      ts            TEXT NOT NULL,
+      check_in      TEXT NOT NULL,
+      check_out     TEXT NOT NULL,
+      nights        INTEGER NOT NULL,
+      guests        INTEGER NOT NULL,
+      total         INTEGER NOT NULL,
+      room_id       TEXT,
+      rank          INTEGER NOT NULL,
+      page          INTEGER NOT NULL,
+      position      INTEGER NOT NULL,
+      price         REAL,
+      price_nightly REAL,
+      currency      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_results_segment ON search_results(profile_id, nights, check_in, run_id);
+    CREATE INDEX IF NOT EXISTS idx_results_ts ON search_results(ts);
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
@@ -228,25 +255,44 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
   ensureColumn(db, "tracked_listings", "address", "TEXT");
 
+  // One-time backfill: give every apartment the default utilities/cleaning the
+  // operator asked for, so the costs are filled in and visible (not just applied
+  // implicitly in the profit math). Runs once, guarded by a meta flag.
+  const costsBackfilled = db
+    .prepare("SELECT value FROM meta WHERE key = 'cost_defaults_backfilled'")
+    .get();
+  if (!costsBackfilled) {
+    db.exec(`
+      UPDATE tracked_listings SET utilities = 1000 WHERE utilities IS NULL;
+      UPDATE tracked_listings SET cleaning_fee = 500 WHERE cleaning_fee IS NULL;
+    `);
+    db.prepare(
+      "INSERT OR REPLACE INTO meta (key, value) VALUES ('cost_defaults_backfilled', 'v1')",
+    ).run();
+  }
+
   // Pricing v2 (PriceLabs-inspired): per-unit price floor/ceiling, weekly/monthly
   // LOS discounts, and a minimum-stay policy (recommended + hard floor).
+  // Defaults come from src/lib/config/pricing.ts (single source of truth).
   ensureColumn(db, "units", "min_rate", "INTEGER");
   ensureColumn(db, "units", "max_rate", "INTEGER");
-  ensureColumn(db, "units", "weekly_discount_pct", "REAL NOT NULL DEFAULT 0.10");
-  ensureColumn(db, "units", "monthly_discount_pct", "REAL NOT NULL DEFAULT 0.20");
-  ensureColumn(db, "units", "min_stay", "INTEGER NOT NULL DEFAULT 30");
-  ensureColumn(db, "units", "lowest_min_stay", "INTEGER NOT NULL DEFAULT 30");
+  ensureColumn(db, "units", "weekly_discount_pct", `REAL NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.weeklyDiscountPct}`);
+  ensureColumn(db, "units", "monthly_discount_pct", `REAL NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.monthlyDiscountPct}`);
+  ensureColumn(db, "units", "min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.minStay}`);
+  ensureColumn(db, "units", "lowest_min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.lowestMinStay}`);
 
   // MiniHotel connection: each unit maps to a MiniHotel room-type code (names
   // differ between this app and MiniHotel, so we store the link explicitly).
   ensureColumn(db, "units", "minihotel_room_type", "TEXT");
   // Floors/ceilings derive from the base rate; backfill any rows still missing
   // them (covers both pre-existing DBs and freshly-seeded rows, which insert
-  // only the original columns). Floor = 80% of base, ceiling = 120% (a surge cap
-  // that can actually bind given the ±25% single-pass tilt), ₪5-rounded.
+  // only the original columns), ₪-step rounded.
+  const floorPct = UNIT_PRICING_DEFAULTS.floorPctOfBase;
+  const ceilPct = UNIT_PRICING_DEFAULTS.ceilingPctOfBase;
+  const step = PRICING_AGENT.roundingStep;
   db.exec(`
-    UPDATE units SET min_rate = CAST(ROUND(base_rate * 0.80 / 5) * 5 AS INTEGER) WHERE min_rate IS NULL;
-    UPDATE units SET max_rate = CAST(ROUND(base_rate * 1.20 / 5) * 5 AS INTEGER) WHERE max_rate IS NULL;
+    UPDATE units SET min_rate = CAST(ROUND(base_rate * ${floorPct} / ${step}) * ${step} AS INTEGER) WHERE min_rate IS NULL;
+    UPDATE units SET max_rate = CAST(ROUND(base_rate * ${ceilPct} / ${step}) * ${step} AS INTEGER) WHERE max_rate IS NULL;
   `);
 }
 
