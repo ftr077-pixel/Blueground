@@ -1,33 +1,51 @@
 import { getDb } from "@/lib/db";
-import { getMiniHotelMapping } from "@/lib/repos/integrations";
+import {
+  getMiniHotelMapping,
+  getVatRate,
+  getExcludedRoomCodes,
+  isLocalVatCountry,
+} from "@/lib/repos/integrations";
 
 /**
  * Reservations repo — the source of *real* revenue actuals.
  *
- * MiniHotel's Content & Data API gives us the actual bookings (room revenue per
- * reservation). We store each one and recognize its revenue per night across the
- * stay, so a booking that spans a month boundary lands the right amount in each
- * month. Cancelled / no-show reservations are kept (for audit) but never counted.
+ * MiniHotel's GetReservationKey gives us the actual bookings, but only as a
+ * tax-INCLUSIVE total (`AmountAfterTaxes`) plus the guest's country. We store each
+ * booking, recognize its revenue per night across the stay, and report NET of VAT:
+ * Israeli guests pay 18% VAT, tourists are zero-rated, so we strip VAT only from
+ * local guests (by country) and keep gross/vat for audit. Cancelled / no-show
+ * reservations and configured test apartments are kept but never counted.
  *
- * There are no costs in MiniHotel — only revenue — so this feeds the rental-revenue
+ * There are no costs in MiniHotel — only revenue — so this feeds rental-revenue
  * actuals only; cost lines keep coming from the workbook.
  */
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const CANCELLED_RE = /cancel|no.?show|void|declin/i;
+// MiniHotel status codes: OK confirmed, WL pending, IN checked-in, OUT checked-out,
+// CL cancelled, BL blacklist. We only drop cancellations / no-shows from revenue.
+const CANCELLED_RE = /^(cl|cxl|ns)$|cancel|no.?show|void|declin|reject/i;
 
 export interface ReservationInput {
   id: string;
   roomType?: string | null;
+  roomNumber?: string | null;
   unitId?: string | null;
   checkIn: string; // YYYY-MM-DD
   checkOut: string; // YYYY-MM-DD, exclusive (the morning the guest leaves)
-  revenue: number; // room revenue over the whole stay, ILS
+  // Money — provide whichever the source has (precedence: net > vat > country/flag):
+  net?: number; // ex-VAT room revenue (preferred, if already computed)
+  gross?: number; // VAT-inclusive (MiniHotel AmountAfterTaxes)
+  vat?: number; // VAT amount, if known
+  vatLiable?: boolean; // override: true = local (18%), false = tourist (0%)
+  revenue?: number; // legacy alias for gross
+  country?: string | null; // guest country (iso2/iso3/name) — drives VAT when liable unknown
   currency?: string | null;
   status?: string | null;
 }
 
 interface ReservationSql {
+  room_type: string | null;
+  room_number: string | null;
   check_in: string;
   check_out: string;
   nights: number;
@@ -57,10 +75,46 @@ function roomTypeToUnit(): Map<string, string> {
   return m;
 }
 
+/** Is this booking a test apartment (room type OR room number on the excluded list)? */
+function isExcludedRoom(roomType: string | null, roomNumber: string | null, excluded: Set<string>): boolean {
+  if (excluded.size === 0) return false;
+  if (roomType && excluded.has(roomType.trim().toUpperCase())) return true;
+  if (roomNumber && excluded.has(roomNumber.trim().toUpperCase())) return true;
+  return false;
+}
+
+interface NetParts {
+  gross: number | null;
+  vat: number | null;
+  net: number; // NaN => no usable amount, caller skips
+}
+
+/** Resolve net (ex-VAT) revenue from whatever the source provided. */
+function computeNet(input: ReservationInput): NetParts {
+  if (input.net != null && Number.isFinite(input.net)) {
+    const net = input.net;
+    const gross = input.gross ?? (input.vat != null ? net + input.vat : null);
+    const vat = input.vat ?? (gross != null ? gross - net : null);
+    return { gross, vat, net };
+  }
+  const gross = input.gross ?? input.revenue ?? null; // legacy `revenue` == gross
+  if (gross == null || !Number.isFinite(gross)) return { gross: null, vat: null, net: NaN };
+  if (input.vat != null && Number.isFinite(input.vat)) {
+    return { gross, vat: input.vat, net: gross - input.vat };
+  }
+  const liable =
+    typeof input.vatLiable === "boolean" ? input.vatLiable : isLocalVatCountry(input.country);
+  if (liable) {
+    const net = gross / (1 + getVatRate());
+    return { gross, vat: gross - net, net };
+  }
+  return { gross, vat: 0, net: gross }; // tourist — zero-rated, gross == net
+}
+
 /**
  * Upsert reservations from a pull (idempotent by id — a re-pull of an overlapping
  * window just refreshes existing rows, and cancellations arrive as status updates).
- * Validates dates/revenue and resolves each RoomTypeCode to a Hub unit via the map.
+ * Computes net-of-VAT revenue and resolves each RoomTypeCode to a Hub unit.
  */
 export function upsertReservations(rows: ReservationInput[]): { recorded: number; skipped: number } {
   const db = getDb();
@@ -68,11 +122,15 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
   const now = new Date().toISOString();
 
   const upsert = db.prepare(
-    `INSERT INTO reservation (id, unit_id, room_type, check_in, check_out, nights, revenue, currency, status, source, updated_at)
-     VALUES (@id, @unit_id, @room_type, @check_in, @check_out, @nights, @revenue, @currency, @status, 'minihotel', @updated_at)
+    `INSERT INTO reservation
+       (id, unit_id, room_type, room_number, check_in, check_out, nights, revenue, gross, vat, currency, country, status, source, updated_at)
+     VALUES
+       (@id, @unit_id, @room_type, @room_number, @check_in, @check_out, @nights, @revenue, @gross, @vat, @currency, @country, @status, 'minihotel', @updated_at)
      ON CONFLICT(id) DO UPDATE SET
-       unit_id = @unit_id, room_type = @room_type, check_in = @check_in, check_out = @check_out,
-       nights = @nights, revenue = @revenue, currency = @currency, status = @status, updated_at = @updated_at`,
+       unit_id = @unit_id, room_type = @room_type, room_number = @room_number,
+       check_in = @check_in, check_out = @check_out, nights = @nights, revenue = @revenue,
+       gross = @gross, vat = @vat, currency = @currency, country = @country, status = @status,
+       updated_at = @updated_at`,
   );
 
   let recorded = 0;
@@ -81,8 +139,8 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
     for (const r of list) {
       const checkIn = (r.checkIn ?? "").slice(0, 10);
       const checkOut = (r.checkOut ?? "").slice(0, 10);
-      const revenue = Math.round(Number(r.revenue));
-      if (!r.id || !DATE_RE.test(checkIn) || !DATE_RE.test(checkOut) || !Number.isFinite(revenue)) {
+      const { gross, vat, net } = computeNet(r);
+      if (!r.id || !DATE_RE.test(checkIn) || !DATE_RE.test(checkOut) || !Number.isFinite(net)) {
         skipped++;
         continue;
       }
@@ -92,11 +150,15 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
         id: String(r.id),
         unit_id: unitId,
         room_type: room || null,
+        room_number: (r.roomNumber ?? "").trim() || null,
         check_in: checkIn,
         check_out: checkOut,
         nights: nightsBetween(checkIn, checkOut),
-        revenue,
+        revenue: Math.round(net),
+        gross: gross != null ? Math.round(gross) : null,
+        vat: vat != null ? Math.round(vat) : null,
         currency: r.currency ?? null,
+        country: r.country ?? null,
         status: r.status ?? null,
         updated_at: now,
       });
@@ -108,17 +170,19 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
 }
 
 /**
- * Actual room revenue per calendar month (YYYY-MM), recognized per night across
- * each stay. Cancelled / no-show reservations are excluded.
+ * Actual NET room revenue per calendar month (YYYY-MM), recognized per night across
+ * each stay. Cancelled / no-show reservations and test apartments are excluded.
  */
 export function monthlyReservationRevenue(): Record<string, number> {
+  const excluded = getExcludedRoomCodes();
   const rows = getDb()
-    .prepare("SELECT check_in, check_out, nights, revenue, status FROM reservation")
+    .prepare("SELECT room_type, room_number, check_in, check_out, nights, revenue, status FROM reservation")
     .all() as ReservationSql[];
 
   const acc: Record<string, number> = {};
   for (const r of rows) {
     if (r.status && CANCELLED_RE.test(r.status)) continue;
+    if (isExcludedRoom(r.room_type, r.room_number, excluded)) continue;
     const nights = r.nights > 0 ? r.nights : nightsBetween(r.check_in, r.check_out);
     if (nights <= 0 || !DATE_RE.test(r.check_in)) continue;
     const perNight = r.revenue / nights;
@@ -132,26 +196,54 @@ export function monthlyReservationRevenue(): Record<string, number> {
 }
 
 export interface ReservationStats {
-  count: number; // counted (non-cancelled) reservations
+  count: number; // counted (non-cancelled, non-test) reservations
   cancelled: number;
+  test: number; // excluded as test apartments
+  testRevenue: number; // gross revenue parked in test apartments (for sanity)
   months: number; // distinct months with revenue
-  revenue: number; // total counted revenue
+  revenue: number; // total counted NET revenue
+  vat: number; // total VAT stripped out
 }
 
 export function reservationStats(): ReservationStats {
+  const excluded = getExcludedRoomCodes();
   const rows = getDb()
-    .prepare("SELECT revenue, status FROM reservation")
-    .all() as Array<{ revenue: number; status: string | null }>;
+    .prepare("SELECT revenue, gross, vat, room_type, room_number, status FROM reservation")
+    .all() as Array<{
+    revenue: number;
+    gross: number | null;
+    vat: number | null;
+    room_type: string | null;
+    room_number: string | null;
+    status: string | null;
+  }>;
   let count = 0;
   let cancelled = 0;
+  let test = 0;
+  let testRevenue = 0;
   let revenue = 0;
+  let vat = 0;
   for (const r of rows) {
     if (r.status && CANCELLED_RE.test(r.status)) {
       cancelled++;
       continue;
     }
+    if (isExcludedRoom(r.room_type, r.room_number, excluded)) {
+      test++;
+      testRevenue += r.gross ?? r.revenue;
+      continue;
+    }
     count++;
     revenue += r.revenue;
+    vat += r.vat ?? 0;
   }
-  return { count, cancelled, months: Object.keys(monthlyReservationRevenue()).length, revenue };
+  return {
+    count,
+    cancelled,
+    test,
+    testRevenue,
+    months: Object.keys(monthlyReservationRevenue()).length,
+    revenue,
+    vat,
+  };
 }
