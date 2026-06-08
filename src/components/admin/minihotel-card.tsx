@@ -24,6 +24,17 @@ interface View {
   endpoints: { ari: string; reverse: string; content: string };
 }
 
+interface ProbeRow {
+  ok: boolean;
+  detail: string;
+}
+interface TestResult {
+  ok: boolean;
+  message?: string;
+  ari?: ProbeRow;
+  content?: ProbeRow;
+}
+
 export function MiniHotelCard() {
   const [env, setEnv] = useState<"sandbox" | "production">("sandbox");
   const [username, setUsername] = useState("");
@@ -37,7 +48,7 @@ export function MiniHotelCard() {
   const [endpoints, setEndpoints] = useState<View["endpoints"] | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [test, setTest] = useState<{ ok: boolean; message: string } | null>(null);
+  const [test, setTest] = useState<TestResult | null>(null);
 
   const apply = useCallback((v: View) => {
     setEnv(v.env);
@@ -102,7 +113,7 @@ export function MiniHotelCard() {
     setTest(null);
     try {
       const r = await fetch("/api/integrations/minihotel/test", { method: "POST" });
-      setTest((await r.json()) as { ok: boolean; message: string });
+      setTest((await r.json()) as TestResult);
     } catch (e) {
       setTest({ ok: false, message: e instanceof Error ? e.message : "test failed" });
     } finally {
@@ -222,15 +233,23 @@ export function MiniHotelCard() {
         )}
 
         {test && (
-          <div
-            className={`flex items-start gap-2 rounded-md border px-3 py-2 text-[11px] ${
-              test.ok
-                ? "border-success/20 bg-success/10 text-[hsl(var(--success))]"
-                : "border-warning/20 bg-warning/10 text-muted-foreground"
-            }`}
-          >
-            {test.ok ? <ShieldCheck className="h-4 w-4 shrink-0" /> : <ShieldAlert className="h-4 w-4 shrink-0" />}
-            <span>{test.message}</span>
+          <div className="space-y-1.5">
+            {test.ari ? <ProbeLine label="ARI API — rates, availability, price push" row={test.ari} /> : null}
+            {test.content ? (
+              <ProbeLine label="Content & Data API — bookings, room types, folio" row={test.content} />
+            ) : null}
+            {!test.ari && !test.content && (
+              <div
+                className={`flex items-start gap-2 rounded-md border px-3 py-2 text-[11px] ${
+                  test.ok
+                    ? "border-success/20 bg-success/10 text-[hsl(var(--success))]"
+                    : "border-warning/20 bg-warning/10 text-muted-foreground"
+                }`}
+              >
+                {test.ok ? <ShieldCheck className="h-4 w-4 shrink-0" /> : <ShieldAlert className="h-4 w-4 shrink-0" />}
+                <span>{test.message}</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -240,5 +259,23 @@ export function MiniHotelCard() {
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+function ProbeLine({ label, row }: { label: string; row: { ok: boolean; detail: string } }) {
+  return (
+    <div
+      className={`flex items-start gap-2 rounded-md border px-3 py-2 text-[11px] ${
+        row.ok
+          ? "border-success/20 bg-success/10 text-[hsl(var(--success))]"
+          : "border-warning/20 bg-warning/10 text-muted-foreground"
+      }`}
+    >
+      {row.ok ? <ShieldCheck className="h-4 w-4 shrink-0" /> : <ShieldAlert className="h-4 w-4 shrink-0" />}
+      <span>
+        <span className="font-medium">{label}:</span> {row.ok ? "OK" : "not available"}
+        {row.detail ? ` — ${row.detail}` : ""}
+      </span>
+    </div>
   );
 }
