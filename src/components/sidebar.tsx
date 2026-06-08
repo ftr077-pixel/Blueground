@@ -33,8 +33,7 @@ const REVENUE_HUB = {
   children: [
     { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
-    { href: "/visibility", label: "Search Visibility", icon: Radar },
-    { href: "/visibility/profitability", label: "Profitability", icon: Banknote },
+    { href: "/visibility", label: "Search & Profit", icon: Radar },
     { href: "/visibility/analytics", label: "Position Trends", icon: TrendingUp },
     { href: "/visibility/pricing", label: "Pricing vs Rank", icon: BarChart3 },
     { href: "/visibility/portfolio", label: "Portfolio", icon: Boxes },
