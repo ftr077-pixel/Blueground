@@ -502,6 +502,7 @@ export interface MiniReservation {
   gross: number; // AmountAfterTaxes — tax-INCLUSIVE; the repo strips VAT to net
   currency?: string;
   country?: string; // guest country (iso2/iso3/name) — drives VAT-net
+  vatFlag?: string; // MiniHotel's Vat flag ("Yes" incl / "Not" excl), when present
   status?: string;
 }
 
@@ -623,6 +624,7 @@ function parseBookingsXml(xml: string): MiniReservation[] {
       roomType: attr(stay, "roomTypeId") || attr(stay, "roomTypeID") || undefined,
       roomNumber: attr(stay, "roomNumber") || undefined,
       country: attr(country, "iso2") || attr(country, "iso3") || attr(country, "CountryName") || undefined,
+      vatFlag: attr(country, "Vat") || attr(head, "Vat") || undefined,
       currency: attr(total, "CurrencyCode") || undefined,
       status: attr(head, "Status") || undefined,
     });
@@ -762,8 +764,9 @@ export async function syncReservationsFromMiniHotel(opts: {
       roomNumber: r.roomNumber,
       checkIn: r.checkIn,
       checkOut: r.checkOut,
-      gross: r.gross, // tax-inclusive — upsertReservations derives net from country
+      gross: r.gross, // tax-inclusive — upsertReservations derives net from flag/country
       country: r.country,
+      vatFlag: r.vatFlag,
       currency: r.currency,
       status: r.status,
     })),

@@ -261,6 +261,7 @@ function init(db: Database.Database) {
       revenue     INTEGER NOT NULL,
       gross       INTEGER,
       vat         INTEGER,
+      vat_basis   TEXT,
       currency    TEXT,
       country     TEXT,
       status      TEXT,
@@ -273,6 +274,7 @@ function init(db: Database.Database) {
   ensureColumn(db, "reservation", "room_number", "TEXT");
   ensureColumn(db, "reservation", "gross", "INTEGER");
   ensureColumn(db, "reservation", "vat", "INTEGER");
+  ensureColumn(db, "reservation", "vat_basis", "TEXT");
   ensureColumn(db, "reservation", "country", "TEXT");
 
   // Migrations for DBs created before these columns existed.
