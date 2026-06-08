@@ -1,5 +1,5 @@
 import { getSetting, setSetting } from "@/lib/repos/visibility";
-import { listUnits, setUnitMiniHotelRoomType } from "@/lib/repos/units";
+import { listUnits, setUnitMiniHotelRoomType, deleteUnit } from "@/lib/repos/units";
 
 /**
  * MiniHotel integration settings.
@@ -179,4 +179,23 @@ export function setMiniHotelMapping(pairs: { unitId: string; roomType: string }[
     updated++;
   }
   return updated;
+}
+
+/** Add a room-type code to the excluded set (kept out of import + P&L). */
+export function addExcludedRoomCode(code: string): void {
+  const c = (code ?? "").trim().toUpperCase();
+  if (!c) return;
+  const cur = splitCodes(getSetting(K.excludedRoomTypes));
+  if (!cur.includes(c)) {
+    cur.push(c);
+    setSetting(K.excludedRoomTypes, cur.join(","));
+  }
+}
+
+/** Delete a Hub apartment and (by default) remember its code so re-import skips it. */
+export function deleteMappedUnit(unitId: string, exclude = true): boolean {
+  const row = getMiniHotelMapping().find((r) => r.unitId === unitId);
+  const ok = deleteUnit(unitId);
+  if (ok && exclude && row?.roomType) addExcludedRoomCode(row.roomType);
+  return ok;
 }

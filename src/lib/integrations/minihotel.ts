@@ -1,6 +1,7 @@
 import {
   getMiniHotelConnection,
   getMiniHotelMapping,
+  getExcludedRoomCodes,
   miniHotelEndpoints,
   type MiniHotelConnection,
 } from "@/lib/repos/integrations";
@@ -453,6 +454,10 @@ export async function importApartmentsFromMiniHotel(opts: {
     }
   }
   const errors = [...errorSet];
+
+  // Drop apartments the operator has deleted/excluded so they don't reappear.
+  const excluded = getExcludedRoomCodes();
+  if (excluded.size > 0) types = types.filter((t) => !excluded.has(t.code.trim().toUpperCase()));
 
   if (types.length === 0) {
     return {
