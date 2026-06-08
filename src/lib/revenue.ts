@@ -89,12 +89,25 @@ export function availableForStay(l: DashListing, nights: number): boolean {
 }
 
 // The scraped list price (gross, before length-of-stay discount) for 30 nights.
+// A snapshot's price as a whole-stay total. Search results already give the stay
+// total; a not-found listing only carries its nightly calendar rate, so scale it
+// by the number of nights to get a comparable monthly figure.
+export function snapStayPrice(s: {
+  found: boolean;
+  nights: number;
+  price: number | null;
+}): number | null {
+  if (s.price == null) return null;
+  return s.found ? s.price : s.price * s.nights;
+}
+
 export function rawMonthlyPrice(l: DashListing): number | null {
   const rows = l.latest.filter((s) => s.nights === 30);
   const found = rows.filter((s) => s.found && s.price != null && s.page != null);
   if (found.length)
     return found.reduce((b, s) => ((s.page as number) < (b.page as number) ? s : b)).price;
-  return rows.find((s) => s.price != null)?.price ?? null;
+  const priced = rows.find((s) => s.price != null);
+  return priced ? snapStayPrice(priced) : null;
 }
 
 export type LosDiscounts = {
@@ -196,55 +209,75 @@ export function recommend(
   r: PricingRules,
   primaryStay: number,
 ): Rec {
-  const e = economics(l, d);
-  if (e.revenue == null)
-    return { action: "none", urgency: null, reason: "no price scanned yet", suggested: null };
-  if (!e.rentKnown)
+  if (l.monthlyRent == null)
     return { action: "none", urgency: null, reason: "set rent for a recommendation", suggested: null };
+  if (!availableForStay(l, primaryStay))
+    return { action: "none", urgency: null, reason: "not available — nothing to price", suggested: null };
 
+  const e = economics(l, d);
   const page = bestPage(l, primaryStay);
-  const marginPct = Math.round((e.margin ?? 0) * 100);
-  const rankingWell = page != null && page <= r.rankWellPage;
+  const marginPct = e.margin != null ? Math.round(e.margin * 100) : null;
   const buried = page == null || page >= r.buriedPage;
+  const rankingWell = page != null && page <= r.rankWellPage;
+
   const lead = leadDays(primaryCheckIn(l, primaryStay));
   const urgency: Rec["urgency"] =
     lead == null ? "later" : lead <= r.urgentDays ? "now" : lead >= r.relaxedDays ? "later" : "soon";
+  const wait = urgency === "later" && lead != null ? `; ${lead}d out, watch for now` : "";
 
-  let action: RecAction = "hold";
-  let reason = `priced about right (${marginPct}% margin${page != null ? `, page ${page}` : ""})`;
-  if (rankingWell && marginPct < r.marginLow) {
-    action = "raise";
-    reason = `page ${page} but only ${marginPct}% margin — room to charge more`;
-  } else if (buried && marginPct > r.marginHigh) {
-    action = "lower";
-    reason = `${page == null ? "not in search" : `page ${page}`} at ${marginPct}% margin — likely overpriced`;
-  } else if (buried && marginPct <= r.marginLow) {
-    action = "review";
-    reason = `buried and thin (${marginPct}%) — can't fix on price alone`;
-  }
-
-  let suggested: number | null = null;
-  if (action === "raise") {
-    suggested = roundTo(e.revenue * (1 + r.stepPct / 100), 50);
-  } else if (action === "lower") {
-    const feePct = (d.bgFeePct + d.airbnbFeePct) / 100;
-    const fixed =
-      (l.utilities ?? d.defaultUtilities) +
-      (l.cleaningFee ?? d.defaultCleaning) +
-      (l.monthlyRent ?? 0);
-    const denom = 1 - feePct - r.floorMargin / 100;
-    const minRev = denom > 0 ? fixed / denom : Infinity;
-    const target = Math.max(e.revenue * (1 - r.stepPct / 100), minRev);
-    suggested = target < e.revenue ? roundTo(target, 50) : null;
-    if (suggested == null) {
-      action = "review";
-      reason = "overpriced but already near your floor margin — needs a non-price fix";
+  // Available but invisible (not found, or ranked deep) — price is the lever.
+  if (buried) {
+    const pos = page == null ? "not in search" : `page ${page}`;
+    let suggested: number | null = null;
+    if (e.revenue != null) {
+      const feePct = (d.bgFeePct + d.airbnbFeePct) / 100;
+      const fixed =
+        (l.utilities ?? d.defaultUtilities) +
+        (l.cleaningFee ?? d.defaultCleaning) +
+        (l.monthlyRent ?? 0);
+      const denom = 1 - feePct - r.floorMargin / 100;
+      const minRev = denom > 0 ? fixed / denom : Infinity;
+      const stepRev = e.revenue * (1 - r.stepPct / 100);
+      if (stepRev > minRev) suggested = roundTo(Math.max(stepRev, minRev), 50);
     }
+    if (suggested != null) {
+      const room = marginPct != null && marginPct > r.marginHigh ? "lots of room" : "room";
+      return {
+        action: "lower",
+        urgency,
+        suggested,
+        reason: `${pos} but available${marginPct != null ? ` at ${marginPct}% margin` : ""} — ${room} to drop the price and compete${wait}`,
+      };
+    }
+    return {
+      action: "review",
+      urgency,
+      suggested: null,
+      reason:
+        e.revenue == null
+          ? `${pos} but available — no price captured, review manually`
+          : `${pos} but available — margin too thin to cut on price; needs a non-price fix`,
+    };
   }
-  if (action === "lower" && urgency === "later" && lead != null) {
-    reason = `${reason}; ${lead}d out, watch for now`;
+
+  // Ranking well but underpriced — raise.
+  if (rankingWell && marginPct != null && marginPct < r.marginLow) {
+    return {
+      action: "raise",
+      urgency,
+      suggested: e.revenue != null ? roundTo(e.revenue * (1 + r.stepPct / 100), 50) : null,
+      reason: `page ${page} but only ${marginPct}% margin — room to charge more`,
+    };
   }
-  return { action, urgency, reason, suggested };
+
+  return {
+    action: "hold",
+    urgency,
+    suggested: null,
+    reason: `priced about right${marginPct != null ? ` (${marginPct}% margin)` : ""}${
+      page != null ? `, page ${page}` : ""
+    }`,
+  };
 }
 
 export const CHART = {
