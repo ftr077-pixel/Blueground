@@ -35,6 +35,7 @@ export interface SyncResult {
   cells: number; // day-rows parsed
   written: number; // overrides written
   unmappedTypes: string[];
+  errors: string[]; // ERR codes MiniHotel reported (non-fatal — skipped, not thrown)
   message?: string;
 }
 
@@ -108,6 +109,19 @@ export function parseBulkAri(xml: string): AriCell[] {
   return cells;
 }
 
+/**
+ * Extract any ERR codes MiniHotel embeds in a response. These are collected and
+ * reported, never thrown — one misconfigured room type (e.g. "ERR 310: Basic
+ * occupancy is missing…") shouldn't block the rest of the sync.
+ */
+export function parseAriErrors(xml: string): string[] {
+  const out: string[] = [];
+  const re = /ERR\s?\d+[^<\n]*/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) out.push(m[0].trim());
+  return out;
+}
+
 export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
@@ -121,8 +135,8 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
-    const err = text.match(/ERR\s?\d+[^<\n]*/i);
-    if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
+    // Embedded ERR codes are returned (not thrown) so the caller can keep any
+    // valid data and collect the issues, instead of hard-failing the whole sync.
     return text;
   } finally {
     clearTimeout(timer);
@@ -151,6 +165,7 @@ export async function syncFromMiniHotel(opts: {
         cells: 0,
         written: 0,
         unmappedTypes: [],
+        errors: [],
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
@@ -158,6 +173,7 @@ export async function syncFromMiniHotel(opts: {
   }
 
   const parsed = parseBulkAri(xml);
+  const errors = parseAriErrors(xml);
 
   // RoomTypeCode -> unit id(s); case-insensitive so codes match regardless of casing.
   const byType = new Map<string, string[]>();
@@ -202,5 +218,6 @@ export async function syncFromMiniHotel(opts: {
     cells: parsed.length,
     written,
     unmappedTypes: [...unmapped].sort(),
+    errors,
   };
 }
