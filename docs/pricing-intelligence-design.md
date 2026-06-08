@@ -269,28 +269,63 @@ approval) so it never acts beyond mandate.
 
 ---
 
-## 8. Market demand (your future data)
+## 8. Market demand & booking pace (your future data)
 
-Designed to slot in with **no rearchitecting**: a per-`(area, date)` demand index
-becomes another feature that **shifts the curve** (high demand → a given price
-ranks better / books faster). Until then, ladder-derived **supply tightness**
-(`total` and its run-over-run trend) is the proxy. Interface stub:
+Designed to slot in with **no rearchitecting**. Two planned signals:
+
+**Demand index** — a per-`(area, date)` value that **shifts the curve** (high
+demand → a given price ranks better / books faster). Until then, ladder-derived
+**supply tightness** (`total` and its run-over-run trend) is the proxy. Stub:
 
 ```ts
 interface DemandSignal { area: string; date: string; index: number; /* -1..+1 */ }
 ```
 
+**Market booking lead time (pacing)** — *planned: you'll provide the market's
+booking-lead-time distribution.* This answers **"how aligned are we to the
+market's pace?"** If the market for this area/stay-length typically books ~45 days
+out and our comparable units are still unbooked at 20 days, we're **behind pace** —
+a strong, demand-aware reason to cut *now*, independent of position. Conversely, if
+we're booking *earlier* than the market, we may be leaving rate on the table.
+
+Pacing pairs naturally with realized bookings (§9): market lead times set the
+**benchmark**, MiniHotel gives **our** realized lead times, and the gap becomes
+both a model feature and a headline metric in the Pricing Intelligence panel
+("**pace vs market: −18 days**"). Stub:
+
+```ts
+interface MarketPace {
+  area: string;
+  nights: number;
+  medianLeadDays: number;
+  leadCdf: Array<{ leadDays: number; bookedPct: number }>; // share booked by N days out
+}
+```
+
 ---
 
-## 9. North-star caveat: position is a proxy
+## 9. North-star: position is a proxy; realized bookings are the truth
 
 What you ultimately want to maximize is **expected profit = P(book | price, lead,
-position) × profit(price)** — not position for its own sake. Position is the
-available proxy because we don't yet capture **booking outcomes**. If we can get
-"did this listing book, when, at what price" (e.g., from MiniHotel, already
-integrated under `src/lib/integrations/minihotel.ts`), the target upgrades from
-*position* to *booking probability / expected revenue*, and the recommender
-optimizes profit directly. **Flagged as an open question (§13).**
+position) × profit(price)** — not position for its own sake. Position is the proxy
+we model first because it's what we can observe today.
+
+**Planned (once MiniHotel is connected in production):** real **booked prices and
+dates** become available via `src/lib/integrations/minihotel.ts`. That unlocks the
+real objective and, more importantly, lets us score **strategy success rate** — the
+closed loop:
+
+1. The model recommends a strategy (e.g. *"at 30d lead, drop to page 1"*).
+2. We act and log it (`listing_price_changes`, §4.2).
+3. MiniHotel tells us whether it **booked**, **when**, and at what **realized price**.
+4. We attribute the outcome to the strategy → *"this policy converts X% of the
+   time, at Y% of asking, and saves Z days on the shelf."*
+
+At that point the target upgrades from *position* to *booking probability /
+expected revenue*, the recommender optimizes profit directly, and §6's
+position-curve becomes one **input** to a booking-conversion model rather than the
+final answer. The design deliberately keeps `listing_price_changes` and the
+experiment loop (§7) in place so this outcome data has somewhere to land.
 
 ---
 
@@ -368,7 +403,8 @@ GET /api/learning/curve?profileId=prof-xxx&nights=30&leadBucket=15-30
 | **M2 Model A + read UI** | `elasticity.ts` (cross-sectional) + `/api/learning/*` + Pricing Intelligence panel (read-only insight) | curve renders; "price for page 1" matches a manual read of the ladder |
 | **M3 Wire-in** | learned `suggested` in `recommend()` + confidence gating + fallback | Search & Profit "▼ Lower → ₪X" reflects the curve, not 5% |
 | **M4 Model B + experiments** | `listing_price_changes` + longitudinal fit + backtest harness | predicted vs realized Δrank tracked |
-| **M5 Demand** | demand features when data arrives | curve shifts with demand index |
+| **M5 Demand & pace** | demand index + market booking-lead-time (pace) features | curve shifts with demand; "pace vs market" shown |
+| **M6 Outcomes** | MiniHotel realized bookings → strategy success-rate & expected-profit target | recommend→act→book attributed; policy conversion tracked |
 
 ---
 
@@ -382,12 +418,15 @@ GET /api/learning/curve?profileId=prof-xxx&nights=30&leadBucket=15-30
   language; API results are effectively de-personalized — keep it that way.
 - *Confounding market drift* → controlled via competitor median (`γ` term in B).
 
-**Open questions for you**
-1. **Booking outcomes** — can we get "did it book, when, at what price" (MiniHotel)?
-   That upgrades the target from *position* to *expected profit* (§9). Biggest lever after the ladder.
-2. **Demand data shape** — per area? per date? what index range/cadence? (§8)
-3. **Retention window** — is 120 days of raw ladder + percentile summaries acceptable, or do you want longer raw history?
-4. **Segment granularity** — confirm the lead-time buckets (`0–7 / 8–14 / 15–30 / 31–60 / 61+`) match how you think about booking windows.
+**Planned inputs (confirmed — the model is built to receive these)**
+- **Realized bookings** via MiniHotel in production → strategy success-rate &
+  expected-profit target (§9). Biggest lever after the ladder.
+- **Market booking lead times** → pace-vs-market benchmark and a demand feature (§8).
+
+**Still open for you**
+1. **Demand index shape** — per area? per date? what index range/cadence? (§8)
+2. **Retention window** — is 120 days of raw ladder + percentile summaries acceptable, or do you want longer raw history?
+3. **Segment granularity** — confirm the lead-time buckets (`0–7 / 8–14 / 15–30 / 31–60 / 61+`) match how you think about booking windows.
 
 ---
 
