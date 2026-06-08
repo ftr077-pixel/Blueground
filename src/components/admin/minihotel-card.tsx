@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plug, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Loader2, Plug, ShieldAlert, ShieldCheck, DownloadCloud } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -34,6 +34,16 @@ interface TestResult {
   ari?: ProbeRow;
   content?: ProbeRow;
 }
+interface Pull {
+  ok: boolean;
+  message?: string;
+  parsed?: number;
+  month?: string;
+  net?: number;
+  count?: number;
+  vat?: number;
+  test?: number;
+}
 
 export function MiniHotelCard() {
   const [env, setEnv] = useState<"sandbox" | "production">("sandbox");
@@ -49,6 +59,7 @@ export function MiniHotelCard() {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [test, setTest] = useState<TestResult | null>(null);
+  const [pull, setPull] = useState<Pull | null>(null);
 
   const apply = useCallback((v: View) => {
     setEnv(v.env);
@@ -116,6 +127,39 @@ export function MiniHotelCard() {
       setTest((await r.json()) as TestResult);
     } catch (e) {
       setTest({ ok: false, message: e instanceof Error ? e.message : "test failed" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Pull reservations from MiniHotel into the P&L. Uses a wide arrival window so
+  // stays already in-house this month are caught, then reads back this month's net.
+  async function pullReservations() {
+    setBusy(true);
+    setPull(null);
+    try {
+      const from = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+      const sync = await fetch("/api/reservations/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from, days: 150 }),
+      }).then((r) => r.json());
+      if (!sync.ok) {
+        setPull({ ok: false, message: sync.message || "sync failed" });
+        return;
+      }
+      const rep = await fetch("/api/reservations", { cache: "no-store" }).then((r) => r.json());
+      setPull({
+        ok: true,
+        parsed: sync.parsed,
+        test: sync.test,
+        month: rep.thisMonth,
+        net: rep.current?.net ?? 0,
+        count: rep.current?.count ?? 0,
+        vat: rep.current?.vat ?? 0,
+      });
+    } catch (e) {
+      setPull({ ok: false, message: e instanceof Error ? e.message : "pull failed" });
     } finally {
       setBusy(false);
     }
@@ -219,6 +263,32 @@ export function MiniHotelCard() {
             Revenue is recorded net of VAT — Israeli guests pay {vatRate || "18"}% (stripped out),
             tourists are zero-rated. Reservations on test room codes/numbers stay out of the P&amp;L.
           </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+          <button type="button" disabled={busy} onClick={pullReservations} className={btn}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
+            Pull reservations → P&amp;L
+          </button>
+          {pull ? (
+            pull.ok ? (
+              <span className="text-[11px] text-foreground">
+                ✓ {pull.parsed} pulled ·{" "}
+                <span className="font-medium">
+                  {pull.month}: ₪{(pull.net ?? 0).toLocaleString()} net
+                </span>{" "}
+                from {pull.count} bookings · ₪{(pull.vat ?? 0).toLocaleString()} VAT removed
+                {pull.test ? ` · ${pull.test} test excluded` : ""}
+              </span>
+            ) : (
+              <span className="text-[11px] text-[hsl(var(--warning))]">Pull failed: {pull.message}</span>
+            )
+          ) : (
+            <span className="text-[10px] text-muted-foreground">
+              Pulls actual reservations and drops this month&apos;s net revenue into the P&amp;L. Run from
+              the box (whitelisted with MiniHotel).
+            </span>
+          )}
         </div>
 
         {endpoints && (

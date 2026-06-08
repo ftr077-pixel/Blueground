@@ -48,6 +48,24 @@ interface RuleDto {
   note: string;
 }
 
+interface MarketSnapshotDto {
+  neighborhood: string;
+  marketName: string | null;
+  fetchedAt: string;
+  currency: string | null;
+  occupancy: number | null;
+  adr: number | null;
+  revpar: number | null;
+  minNights: number | null;
+  pacingDays: number;
+}
+
+interface MarketDataDto {
+  source: "airroi" | "mock";
+  configured: boolean;
+  snapshots: MarketSnapshotDto[];
+}
+
 interface HistoryDto {
   id: string;
   unitId: string;
@@ -81,6 +99,7 @@ export function PricingPanel() {
   const [history, setHistory] = useState<HistoryDto[]>([]);
   const [market, setMarket] = useState<MarketDto | null>(null);
   const [rules, setRules] = useState<RuleDto[]>([]);
+  const [marketData, setMarketData] = useState<MarketDataDto | null>(null);
   const [running, setRunning] = useState(false);
   const [lastRun, setLastRun] = useState<RunSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,11 +113,13 @@ export function PricingPanel() {
         history: HistoryDto[];
         market?: MarketDto;
         rules?: RuleDto[];
+        marketData?: MarketDataDto;
       };
       setUnits(body.units);
       setHistory(body.history);
       setMarket(body.market ?? null);
       setRules(body.rules ?? []);
+      setMarketData(body.marketData ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
     }
@@ -185,6 +206,69 @@ export function PricingPanel() {
                 </span>
               ))}
             </div>
+          </div>
+        )}
+
+        {marketData && (
+          <div>
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Market data · feeding the engine
+              </span>
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px]",
+                  marketData.source === "airroi"
+                    ? "bg-[hsl(var(--success))]/15 text-[hsl(var(--success))]"
+                    : "bg-muted text-muted-foreground",
+                )}
+              >
+                {marketData.source === "airroi" ? "live · AirROI" : "sample data"}
+              </span>
+            </div>
+            {marketData.snapshots.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">
+                Using built-in sample signals. Set <code>AIRROI_API_KEY</code> and run the market
+                sync (<code>POST /api/market/sync</code>) to pull live AirROI data into the engine.
+              </p>
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-border">
+                <table className="w-full text-xs">
+                  <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left">Area</th>
+                      <th className="px-3 py-2 text-right">Occ</th>
+                      <th className="px-3 py-2 text-right">ADR</th>
+                      <th className="px-3 py-2 text-right">RevPAR</th>
+                      <th className="px-3 py-2 text-right">Min-nights</th>
+                      <th className="px-3 py-2 text-right">Pacing</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {marketData.snapshots.map((s) => (
+                      <tr key={s.neighborhood} className="border-t border-border/60">
+                        <td className="px-3 py-2">{s.neighborhood}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {s.occupancy != null ? `${(s.occupancy * 100).toFixed(0)}%` : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {s.adr != null ? `₪${Math.round(s.adr)}` : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {s.revpar != null ? `₪${Math.round(s.revpar)}` : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {s.minNights != null ? `${s.minNights.toFixed(1)}n` : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                          {s.pacingDays}d
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 

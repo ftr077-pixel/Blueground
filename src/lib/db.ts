@@ -261,6 +261,7 @@ function init(db: Database.Database) {
       revenue     INTEGER NOT NULL,
       gross       INTEGER,
       vat         INTEGER,
+      vat_basis   TEXT,
       currency    TEXT,
       country     TEXT,
       status      TEXT,
@@ -273,6 +274,7 @@ function init(db: Database.Database) {
   ensureColumn(db, "reservation", "room_number", "TEXT");
   ensureColumn(db, "reservation", "gross", "INTEGER");
   ensureColumn(db, "reservation", "vat", "INTEGER");
+  ensureColumn(db, "reservation", "vat_basis", "TEXT");
   ensureColumn(db, "reservation", "country", "TEXT");
 
   // Migrations for DBs created before these columns existed.
@@ -323,6 +325,22 @@ function init(db: Database.Database) {
   db.exec(`
     UPDATE units SET min_rate = CAST(ROUND(base_rate * ${floorPct} / ${step}) * ${step} AS INTEGER) WHERE min_rate IS NULL;
     UPDATE units SET max_rate = CAST(ROUND(base_rate * ${ceilPct} / ${step}) * ${step} AS INTEGER) WHERE max_rate IS NULL;
+  `);
+
+  // Cached market data from the external provider (AirROI). One row per
+  // neighborhood; refreshed by the daily market sync. JSON blobs hold the raw
+  // metric payloads so the providers/Market view can read without re-fetching
+  // (the API is pay-per-call).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS market_snapshots (
+      neighborhood  TEXT PRIMARY KEY,
+      market_name   TEXT,
+      fetched_at    TEXT NOT NULL,
+      currency      TEXT,
+      summary       TEXT,
+      pacing        TEXT,
+      min_nights    TEXT
+    );
   `);
 }
 
