@@ -528,6 +528,75 @@ function seedProfiles(db: Database.Database) {
   tx();
 }
 
+// Synthetic competitor ladder for the seeded proof run, so Pricing Intelligence
+// renders on a fresh DB before any real scan posts ladder rows. Deterministic and
+// clearly demo data: our listing keeps its real captured point (rank 51 @
+// ₪29,783); the rest are a plausible Tel-Aviv price ladder where cheaper listings
+// tend to rank better (with noise standing in for the non-price factors).
+function seedLadder(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_ladder'").get();
+  if (seeded) return;
+
+  const profileId = "prof-telaviv-2g";
+  const airbnbId = "1602229503214826484";
+  const runId = "seed-proof-run";
+  const ts = "2026-06-06T09:00:00.000Z";
+  const checkIn = "2026-08-01";
+  const checkOut = "2026-08-31";
+  const nights = 30;
+  const guests = 2;
+  const total = 280;
+  const currency = "ILS";
+
+  const noise = (k: number) => {
+    const x = Math.sin(k * 9301 + 49297) * 233280;
+    return x - Math.floor(x); // 0..1, deterministic
+  };
+
+  const ins = db.prepare(`
+    INSERT INTO search_results
+      (id, profile_id, run_id, ts, check_in, check_out, nights, guests, total,
+       room_id, rank, page, position, price, price_nightly, currency)
+    VALUES
+      (@id, @profile_id, @run_id, @ts, @check_in, @check_out, @nights, @guests, @total,
+       @room_id, @rank, @page, @position, @price, @price_nightly, @currency)
+  `);
+
+  const tx = db.transaction(() => {
+    for (let rank = 1; rank <= total; rank++) {
+      let priceTotal: number;
+      let roomId: string | null = null;
+      if (rank === 51) {
+        priceTotal = 29783; // our listing's real captured point
+        roomId = airbnbId;
+      } else {
+        const nightly = 620 + 3.4 * rank + (noise(rank) - 0.5) * 520;
+        priceTotal = Math.max(9000, Math.round((nightly * nights) / 10) * 10);
+      }
+      ins.run({
+        id: randomUUID(),
+        profile_id: profileId,
+        run_id: runId,
+        ts,
+        check_in: checkIn,
+        check_out: checkOut,
+        nights,
+        guests,
+        total,
+        room_id: roomId,
+        rank,
+        page: Math.floor((rank - 1) / 18) + 1,
+        position: ((rank - 1) % 18) + 1,
+        price: priceTotal,
+        price_nightly: priceTotal / nights,
+        currency,
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_ladder', 'v1')").run();
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (global.__rohubDb) return global.__rohubDb;
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -535,6 +604,7 @@ export function getDb(): Database.Database {
   init(db);
   seed(db);
   seedProfiles(db);
+  seedLadder(db);
   global.__rohubDb = db;
   return db;
 }
