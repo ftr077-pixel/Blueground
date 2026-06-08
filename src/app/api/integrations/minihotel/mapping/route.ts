@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { getMiniHotelMapping, setMiniHotelMapping } from "@/lib/repos/integrations";
+import {
+  getMiniHotelMapping,
+  setMiniHotelMapping,
+  deleteMappedUnit,
+} from "@/lib/repos/integrations";
 
 export const dynamic = "force-dynamic";
 
@@ -24,4 +28,21 @@ export async function POST(req: Request) {
   }
   const updated = setMiniHotelMapping(body.mappings);
   return NextResponse.json({ ok: true, updated, ...summary() });
+}
+
+// Remove an apartment from the Hub. By default also remembers its MiniHotel code
+// (excluded list) so a later Import won't bring it back.
+export async function DELETE(req: Request) {
+  let body: { unitId?: string; exclude?: boolean };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "invalid json" }, { status: 400 });
+  }
+  if (!body.unitId) {
+    return NextResponse.json({ error: "unitId required" }, { status: 400 });
+  }
+  const ok = deleteMappedUnit(body.unitId, body.exclude !== false);
+  if (!ok) return NextResponse.json({ error: "unknown unit" }, { status: 404 });
+  return NextResponse.json({ ok: true, ...summary() });
 }

@@ -1,6 +1,7 @@
 import {
   getMiniHotelConnection,
   getMiniHotelMapping,
+  getExcludedRoomCodes,
   miniHotelEndpoints,
   type MiniHotelConnection,
 } from "@/lib/repos/integrations";
@@ -54,6 +55,19 @@ function escXml(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+// MiniHotel responses are entity-encoded XML (their docs ship an UnEscapeXml
+// helper), and .asmx endpoints can wrap the payload in <string>…</string> with
+// the inner XML encoded. Decode before parsing so tags are real. Mirrors
+// MiniHotel's own decoder (the same five named entities); &amp; is done last.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, "&");
+}
+
 export function buildBulkAriRequest(conn: MiniHotelConnection, from: string, to: string): string {
   const rateCode = conn.rateCode || "USD";
   return (
@@ -82,9 +96,10 @@ const truthy = (v: string | null) => v != null && /^(yes|true|1|y)$/i.test(v.tri
 /** Parse a Bulk ARI <AvailRaters> response into flat per-room-type/day cells. */
 export function parseBulkAri(xml: string): AriCell[] {
   const cells: AriCell[] = [];
+  const x = decodeEntities(xml);
   const rtRe = /<RoomType\b([^>]*)>([\s\S]*?)<\/RoomType>/gi;
   let rt: RegExpExecArray | null;
-  while ((rt = rtRe.exec(xml))) {
+  while ((rt = rtRe.exec(x))) {
     const code = attr(rt[1], "id");
     if (!code) continue;
     const dayRe = /<Day\b([^>]*)>/gi;
@@ -121,6 +136,24 @@ export function parseAriErrors(xml: string): string[] {
   const re = /ERR\s?\d+[^<\n]*/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml))) out.push(m[0].trim());
+  return out;
+}
+
+/**
+ * Errors from any MiniHotel API — ARI "ERR 310 …" codes and Content/Data
+ * `<Error code="S009" description="…" />` tags. Decodes entities first.
+ */
+export function extractMiniHotelErrors(text: string): string[] {
+  const x = decodeEntities(text);
+  const out: string[] = [];
+  const errRe = /ERR\s?\d+[^<\n]*/gi;
+  let m: RegExpExecArray | null;
+  while ((m = errRe.exec(x))) out.push(m[0].trim());
+  const tagRe = /<Error\b[^>]*?code="([^"]*)"(?:[^>]*?description="([^"]*)")?[^>]*>/gi;
+  while ((m = tagRe.exec(x))) {
+    const desc = (m[2] ?? "").trim();
+    out.push(desc ? `${m[1]}: ${desc}` : m[1]);
+  }
   return out;
 }
 
@@ -251,17 +284,37 @@ export function buildRoomTypesRequest(conn: MiniHotelConnection): string {
 
 /** Parse a getRoomTypes response (<ArrayOfRoomTypes><RoomTypes><Type/><Description/>…). */
 export function parseRoomTypes(xml: string): RoomTypeInfo[] {
+  // Decode first (responses are entity-encoded / may be <string>-wrapped), scope
+  // to the ArrayOfRoomTypes block when present, then pull each Type + optional
+  // Description. Pairing on Type→Description is robust to the container's name.
+  const decoded = decodeEntities(xml);
+  const scope =
+    decoded.match(/<ArrayOfRoomTypes\b[^>]*>([\s\S]*?)<\/ArrayOfRoomTypes>/i)?.[1] ?? decoded;
   const out: RoomTypeInfo[] = [];
-  const re = /<RoomTypes\b[^>]*>([\s\S]*?)<\/RoomTypes>/gi;
+  const re = /<Type>([\s\S]*?)<\/Type>\s*(?:<Description>([\s\S]*?)<\/Description>)?/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml))) {
-    const block = m[1];
-    const code = (block.match(/<Type>([\s\S]*?)<\/Type>/i)?.[1] ?? "").trim();
+  while ((m = re.exec(scope))) {
+    const code = (m[1] ?? "").trim();
     if (!code) continue;
-    const desc = (block.match(/<Description>([\s\S]*?)<\/Description>/i)?.[1] ?? "").trim();
+    const desc = (m[2] ?? "").trim();
     out.push({ code, description: desc || code });
   }
   return out;
+}
+
+/** Discover room types (code + name) from an ARI Bulk response's <RoomType id RoomName>. */
+export function parseAriRoomTypes(xml: string): RoomTypeInfo[] {
+  const x = decodeEntities(xml);
+  const seen = new Map<string, string>();
+  const re = /<RoomType\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(x))) {
+    const code = (attr(m[1], "id") ?? "").trim();
+    if (!code || seen.has(code)) continue;
+    const name = (attr(m[1], "RoomName") ?? attr(m[1], "Name") ?? "").trim();
+    seen.set(code, name || code);
+  }
+  return [...seen].map(([code, description]) => ({ code, description }));
 }
 
 export async function fetchRoomTypes(conn: MiniHotelConnection): Promise<string> {
@@ -284,6 +337,64 @@ export async function fetchRoomTypes(conn: MiniHotelConnection): Promise<string>
   }
 }
 
+function buildRoomStatusRequest(conn: MiniHotelConnection, from: string, to: string): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8" ?>' +
+    '<AvailRaters xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="03" />` +
+    `<Hotel id="${escXml(conn.hotelId)}" />` +
+    `<DateRange from="${from}" to="${to}" />` +
+    "</AvailRaters>"
+  );
+}
+
+/** Real-Time Room Status (ResponseType 03): lists ALL rooms/types, ignoring occupancy/price config. */
+export async function fetchRoomStatus(conn: MiniHotelConnection): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.ari, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildRoomStatusRequest(conn, todayUTC(), plusDays(todayUTC(), 1)),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Room types from a Room Status response (<RoomsTypes><RoomType Code Description/>). */
+export function parseStatusRoomTypes(xml: string): RoomTypeInfo[] {
+  const x = decodeEntities(xml);
+  const scope = x.match(/<RoomsTypes\b[^>]*>([\s\S]*?)<\/RoomsTypes>/i)?.[1] ?? x;
+  const out: RoomTypeInfo[] = [];
+  const seen = new Set<string>();
+  const re = /<RoomType\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(scope))) {
+    const code = (attr(m[1], "Code") ?? attr(m[1], "id") ?? "").trim();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    const desc = (attr(m[1], "Description") ?? attr(m[1], "RoomName") ?? "").trim();
+    out.push({ code, description: desc || code });
+  }
+  return out;
+}
+
+/** Try every room-type response shape (getRoomTypes / room-status / ARI rate feed). */
+function anyRoomTypes(text: string): RoomTypeInfo[] {
+  const a = parseRoomTypes(text);
+  if (a.length) return a;
+  const b = parseStatusRoomTypes(text);
+  if (b.length) return b;
+  return parseAriRoomTypes(text);
+}
+
 /**
  * Import the hotel's room types from MiniHotel as real Hub apartments, each
  * auto-mapped to its MiniHotel code. Optionally removes the demo seed units
@@ -294,23 +405,60 @@ export async function importApartmentsFromMiniHotel(opts: {
   replaceDemo?: boolean;
 }): Promise<ImportResult> {
   const conn = getMiniHotelConnection();
-  let xml = opts.xml;
-  if (!xml) {
-    if (!conn.username || !conn.password || !conn.hotelId) {
-      return {
-        ok: false,
-        imported: 0,
-        removedDemo: 0,
-        apartments: [],
-        errors: [],
-        message: "MiniHotel connection isn't configured — set it in Settings first.",
-      };
-    }
-    xml = await fetchRoomTypes(conn);
+  if (!opts.xml && (!conn.username || !conn.password || !conn.hotelId)) {
+    return {
+      ok: false,
+      imported: 0,
+      removedDemo: 0,
+      apartments: [],
+      errors: [],
+      message: "MiniHotel connection isn't configured — set it in Settings first.",
+    };
   }
 
-  const errors = parseAriErrors(xml);
-  const types = parseRoomTypes(xml);
+  const snip = (s: string) => decodeEntities(s).replace(/\s+/g, " ").trim().slice(0, 200);
+  const errorSet = new Set<string>();
+  let types: RoomTypeInfo[] = [];
+  let snippet = "";
+
+  if (opts.xml) {
+    snippet = snip(opts.xml);
+    extractMiniHotelErrors(opts.xml).forEach((e) => errorSet.add(e));
+    types = anyRoomTypes(opts.xml);
+  } else {
+    // Try each source until one yields room types. Accounts differ in which APIs
+    // they expose, and the Bulk ARI feed can be blocked entirely by a single
+    // misconfigured room type (ERR 310) — so fall through:
+    //   1) getRoomTypes  (Content & Data API — richest, needs Content access)
+    //   2) Room Status   (ARI — lists every room/type, ignores occupancy/price)
+    //   3) Bulk ARI feed (ARI — room types embedded in the rate response)
+    const sources: { label: string; run: () => Promise<string> }[] = [
+      { label: "getRoomTypes", run: () => fetchRoomTypes(conn) },
+      { label: "roomStatus", run: () => fetchRoomStatus(conn) },
+      { label: "bulkAri", run: () => fetchBulkAri(conn, todayUTC(), plusDays(todayUTC(), 1)) },
+    ];
+    for (const src of sources) {
+      try {
+        const text = await src.run();
+        const found = anyRoomTypes(text);
+        if (found.length > 0) {
+          types = found;
+          errorSet.clear(); // a source succeeded; earlier errors are moot
+          break;
+        }
+        snippet = snip(text);
+        extractMiniHotelErrors(text).forEach((e) => errorSet.add(e));
+      } catch (e) {
+        errorSet.add(e instanceof Error ? e.message : `${src.label} failed`);
+      }
+    }
+  }
+  const errors = [...errorSet];
+
+  // Drop apartments the operator has deleted/excluded so they don't reappear.
+  const excluded = getExcludedRoomCodes();
+  if (excluded.size > 0) types = types.filter((t) => !excluded.has(t.code.trim().toUpperCase()));
+
   if (types.length === 0) {
     return {
       ok: false,
@@ -319,8 +467,8 @@ export async function importApartmentsFromMiniHotel(opts: {
       apartments: [],
       errors,
       message: errors.length
-        ? `MiniHotel returned: ${errors.join(" | ")}`
-        : "No room types returned by MiniHotel.",
+        ? `Couldn't read apartments — MiniHotel said: ${errors.join(" | ")}`
+        : `No room types found. Response began: ${snippet}`,
     };
   }
 
@@ -487,9 +635,10 @@ function parseBookingsXml(xml: string): MiniReservation[] {
 /** Generic <Reservation>/<Booking>/<Res> fallback for non-standard XML shapes. */
 function parseReservationsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
+  const x = decodeEntities(xml);
   const re = /<(Reservation|Booking|Res)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml))) {
+  while ((m = re.exec(x))) {
     const block = m[2] + m[3]; // attributes + inner elements
     const checkIn = normDate(xmlField(block, RF.checkIn));
     const checkOut = normDate(xmlField(block, RF.checkOut));

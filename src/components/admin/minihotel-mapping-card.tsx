@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { DownloadCloud, Link2, Loader2 } from "lucide-react";
+import { DownloadCloud, Link2, Loader2, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -28,6 +28,7 @@ export function MiniHotelMappingCard() {
   const [loaded, setLoaded] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch("/api/integrations/minihotel/mapping", { cache: "no-store" })
@@ -92,6 +93,21 @@ export function MiniHotelMappingCard() {
     }
   }
 
+  async function deleteApartment(unitId: string, name: string) {
+    if (!window.confirm(`Remove "${name}" from the Hub? It won't be re-added on the next Import.`)) return;
+    setDeletingId(unitId);
+    try {
+      const r = await fetch("/api/integrations/minihotel/mapping", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unitId }),
+      });
+      if (r.ok) load();
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   const mapped = Object.values(draft).filter((v) => v.trim()).length;
 
   return (
@@ -108,7 +124,8 @@ export function MiniHotelMappingCard() {
         <p className="text-[11px] text-muted-foreground">
           Connect each apartment in this app to its MiniHotel room-type code. The two systems use
           different names, so this link is how MiniHotel knows which listing is which when we read rates
-          or push prices.
+          or push prices. Remove ones you don&apos;t use (e.g. test apartments) with the trash icon —
+          they won&apos;t come back on the next import.
         </p>
       </CardHeader>
       <CardContent>
@@ -122,6 +139,7 @@ export function MiniHotelMappingCard() {
                   <th className="py-2 pr-3 font-medium">Apartment (this app)</th>
                   <th className="py-2 pr-3 font-medium">Neighborhood</th>
                   <th className="py-2 pr-3 font-medium">MiniHotel room-type code</th>
+                  <th className="py-2 font-medium text-right">Remove</th>
                 </tr>
               </thead>
               <tbody>
@@ -141,6 +159,21 @@ export function MiniHotelMappingCard() {
                         placeholder="e.g. DBL, 2BEDAPT"
                         onChange={(e) => setDraft((d) => ({ ...d, [r.unitId]: e.target.value }))}
                       />
+                    </td>
+                    <td className="py-1.5 text-right">
+                      <button
+                        type="button"
+                        title="Remove this apartment"
+                        disabled={deletingId === r.unitId}
+                        onClick={() => deleteApartment(r.unitId, r.name)}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:border-danger/30 hover:text-[hsl(var(--danger))] disabled:opacity-50"
+                      >
+                        {deletingId === r.unitId ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                      </button>
                     </td>
                   </tr>
                 ))}
