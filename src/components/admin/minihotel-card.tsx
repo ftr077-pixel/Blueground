@@ -21,6 +21,8 @@ interface View {
   vatRate: number; // fraction, e.g. 0.18
   vatCountries: string;
   excludedRoomTypes: string;
+  contentUsername: string;
+  hasContentPassword: boolean;
   endpoints: { ari: string; reverse: string; content: string };
 }
 
@@ -55,6 +57,9 @@ export function MiniHotelCard() {
   const [vatRate, setVatRate] = useState("18");
   const [vatCountries, setVatCountries] = useState("");
   const [excludedRoomTypes, setExcludedRoomTypes] = useState("");
+  const [contentUsername, setContentUsername] = useState("");
+  const [contentPassword, setContentPassword] = useState("");
+  const [hasContentPassword, setHasContentPassword] = useState(false);
   const [endpoints, setEndpoints] = useState<View["endpoints"] | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -70,8 +75,11 @@ export function MiniHotelCard() {
     setVatRate(String(Math.round((v.vatRate ?? 0.18) * 100)));
     setVatCountries(v.vatCountries ?? "");
     setExcludedRoomTypes(v.excludedRoomTypes ?? "");
+    setContentUsername(v.contentUsername ?? "");
+    setHasContentPassword(!!v.hasContentPassword);
     setEndpoints(v.endpoints);
     setPassword("");
+    setContentPassword("");
   }, []);
 
   const load = useCallback(() => {
@@ -95,7 +103,9 @@ export function MiniHotelCard() {
         vatRate: string;
         vatCountries: string;
         excludedRoomTypes: string;
+        contentUsername: string;
         password?: string;
+        contentPassword?: string;
       } = {
         env,
         username,
@@ -104,8 +114,10 @@ export function MiniHotelCard() {
         vatRate,
         vatCountries,
         excludedRoomTypes,
+        contentUsername,
       };
       if (password) body.password = password;
+      if (contentPassword) body.contentPassword = contentPassword;
       const r = await fetch("/api/integrations/minihotel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -225,6 +237,36 @@ export function MiniHotelCard() {
           <button type="button" disabled={busy} onClick={runTest} className={btnGhost}>
             Test connection
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-md border border-dashed border-border bg-muted/10 px-3 py-2.5 text-[11px] text-muted-foreground">
+          <div className="w-full text-[10px] font-medium uppercase tracking-wide text-foreground/70">
+            Content API login — only if MiniHotel gave you separate booking credentials
+          </div>
+          <label className="flex flex-col gap-1">
+            Content username
+            <input
+              className={`${input} w-40`}
+              value={contentUsername}
+              onChange={(e) => setContentUsername(e.target.value)}
+              placeholder="(same as above)"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            Content password
+            <input
+              type="password"
+              className={`${input} w-40`}
+              value={contentPassword}
+              onChange={(e) => setContentPassword(e.target.value)}
+              placeholder={hasContentPassword ? "•••••• (unchanged)" : "(same as above)"}
+              autoComplete="new-password"
+            />
+          </label>
+          <p className="w-full text-[10px] text-muted-foreground">
+            Reservations come from MiniHotel&apos;s Content &amp; Data API, which some accounts authorize
+            with a different login than ARI. Leave blank to reuse the main username/password above.
+          </p>
         </div>
 
         <div className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5 text-[11px] text-muted-foreground">

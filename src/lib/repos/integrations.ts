@@ -18,6 +18,10 @@ export interface MiniHotelConnection {
   password: string;
   hotelId: string;
   rateCode: string;
+  // Some accounts get separate credentials for the Content & Data API (bookings).
+  // Blank => reuse the main username/password.
+  contentUsername: string;
+  contentPassword: string;
 }
 
 export interface MiniHotelEndpoints {
@@ -35,6 +39,8 @@ const K = {
   vatRate: "minihotel_vat_rate",
   vatCountries: "minihotel_vat_countries",
   excludedRoomTypes: "minihotel_excluded_room_types",
+  contentUsername: "minihotel_content_username",
+  contentPassword: "minihotel_content_password",
 } as const;
 
 const DEFAULT_VAT_RATE = 0.18; // Israeli standard VAT (locals only; tourists are zero-rated)
@@ -96,7 +102,21 @@ export function getMiniHotelConnection(): MiniHotelConnection {
     password: getSetting(K.password) ?? "",
     hotelId: getSetting(K.hotelId) ?? "",
     rateCode: getSetting(K.rateCode) ?? "",
+    contentUsername: getSetting(K.contentUsername) ?? "",
+    contentPassword: getSetting(K.contentPassword) ?? "",
   };
+}
+
+/**
+ * Credentials for the Content & Data API (bookings/room-types/folio). Uses the
+ * dedicated Content login if one was entered, otherwise the main login. MiniHotel
+ * authorizes ARI and Content & Data separately, so these can differ per account.
+ */
+export function miniHotelContentAuth(c: MiniHotelConnection): { username: string; password: string } {
+  if (c.contentUsername && c.contentPassword) {
+    return { username: c.contentUsername, password: c.contentPassword };
+  }
+  return { username: c.username, password: c.password };
 }
 
 export interface MiniHotelConnectionPatch {
@@ -108,6 +128,8 @@ export interface MiniHotelConnectionPatch {
   vatRate?: string; // e.g. "18" or "0.18"
   vatCountries?: string; // comma-separated country tokens that pay VAT
   excludedRoomTypes?: string; // comma-separated test room-type codes / room numbers
+  contentUsername?: string; // separate Content & Data API login (optional)
+  contentPassword?: string; // empty/omitted => keep existing
 }
 
 export function saveMiniHotelConnection(p: MiniHotelConnectionPatch): void {
@@ -118,8 +140,11 @@ export function saveMiniHotelConnection(p: MiniHotelConnectionPatch): void {
   if (p.vatRate !== undefined) setSetting(K.vatRate, p.vatRate.trim());
   if (p.vatCountries !== undefined) setSetting(K.vatCountries, p.vatCountries.trim());
   if (p.excludedRoomTypes !== undefined) setSetting(K.excludedRoomTypes, p.excludedRoomTypes.trim());
-  // Only overwrite the password when a non-empty value is supplied.
+  if (p.contentUsername !== undefined) setSetting(K.contentUsername, p.contentUsername.trim());
+  // Passwords are write-only — only overwrite when a non-empty value is supplied.
   if (typeof p.password === "string" && p.password.length > 0) setSetting(K.password, p.password);
+  if (typeof p.contentPassword === "string" && p.contentPassword.length > 0)
+    setSetting(K.contentPassword, p.contentPassword);
 }
 
 export interface MiniHotelConnectionView {
@@ -131,6 +156,8 @@ export interface MiniHotelConnectionView {
   vatRate: number; // fraction, e.g. 0.18
   vatCountries: string;
   excludedRoomTypes: string;
+  contentUsername: string;
+  hasContentPassword: boolean;
   endpoints: MiniHotelEndpoints;
 }
 
@@ -146,6 +173,8 @@ export function getMiniHotelConnectionView(): MiniHotelConnectionView {
     vatRate: getVatRate(),
     vatCountries: getSetting(K.vatCountries) ?? DEFAULT_VAT_COUNTRIES,
     excludedRoomTypes: getSetting(K.excludedRoomTypes) ?? "",
+    contentUsername: c.contentUsername,
+    hasContentPassword: c.contentPassword.length > 0,
     endpoints: miniHotelEndpoints(c.env),
   };
 }
