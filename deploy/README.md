@@ -16,6 +16,9 @@ login. `setup-box.sh` does all of it.
 4. **A domain** (optional but needed for the login-from-anywhere part). Point its
    DNS **A record** at the box's public IP. Skip it and the app is reachable at
    `http://<box-ip>:3000` with **no login** (fine for a quick look, not for leaving up).
+5. **An AirROI API key** (optional) — get one at
+   [airroi.com/developer](https://www.airroi.com/developer). When set, the pricing
+   engine uses live market data and a daily market-sync cron is enabled.
 
 ## Run it
 
@@ -26,6 +29,7 @@ DOMAIN="visibility.yourdomain.com" \
 BASIC_AUTH_USER="you" \
 BASIC_AUTH_PASS="a-good-password" \
 PROXY_URL="http://user:pass@proxy-host:port" \
+AIRROI_API_KEY="your-airroi-key" \
 bash setup-box.sh
 ```
 
@@ -38,6 +42,7 @@ bash setup-box.sh
 | Dashboard | systemd service `rohub` → `next start` on port 3000 |
 | Data | SQLite at `<app>/data/orchestrator.db` (persists on the box disk) |
 | Scraper | `/etc/cron.d/visibility-scan` runs `run_agent.py` daily |
+| Market data | `/etc/cron.d/market-sync` POSTs `/api/market/sync` daily (only if `AIRROI_API_KEY` set) |
 | Auth between them | `SCRAPER_API_KEY` (auto-generated into `.env.local`) |
 | HTTPS + login | Caddy reverse-proxy with `basic_auth` (only if `DOMAIN` set) |
 
