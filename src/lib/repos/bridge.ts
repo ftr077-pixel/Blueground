@@ -57,5 +57,6 @@ export function getBridgeView(period: Period, base = false) {
     drivers: result.drivers,
     overrides,
     maxBaselineErrorPct: result.maxBaselineErrorPct,
+    actualMonths: result.actualMonths,
   };
 }
