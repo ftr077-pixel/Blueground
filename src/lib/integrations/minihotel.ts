@@ -138,6 +138,24 @@ export function parseAriErrors(xml: string): string[] {
   return out;
 }
 
+/**
+ * Errors from any MiniHotel API — ARI "ERR 310 …" codes and Content/Data
+ * `<Error code="S009" description="…" />` tags. Decodes entities first.
+ */
+export function extractMiniHotelErrors(text: string): string[] {
+  const x = decodeEntities(text);
+  const out: string[] = [];
+  const errRe = /ERR\s?\d+[^<\n]*/gi;
+  let m: RegExpExecArray | null;
+  while ((m = errRe.exec(x))) out.push(m[0].trim());
+  const tagRe = /<Error\b[^>]*?code="([^"]*)"(?:[^>]*?description="([^"]*)")?[^>]*>/gi;
+  while ((m = tagRe.exec(x))) {
+    const desc = (m[2] ?? "").trim();
+    out.push(desc ? `${m[1]}: ${desc}` : m[1]);
+  }
+  return out;
+}
+
 export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
