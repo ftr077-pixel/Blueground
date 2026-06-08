@@ -217,6 +217,24 @@ function init(db: Database.Database) {
       updated_at  TEXT,
       PRIMARY KEY (unit_id, date)
     );
+
+    -- Actual reservations pulled from MiniHotel (Content & Data API). This is the
+    -- source of *real* revenue actuals: room revenue per booking, recognized per
+    -- night across the stay (see repos/reservations). Cancelled / no-show rows are
+    -- kept but excluded from revenue. unit_id is the mapped Hub unit (nullable).
+    CREATE TABLE IF NOT EXISTS reservation (
+      id          TEXT PRIMARY KEY,
+      unit_id     TEXT,
+      room_type   TEXT,
+      check_in    TEXT NOT NULL,
+      check_out   TEXT NOT NULL,
+      nights      INTEGER NOT NULL,
+      revenue     INTEGER NOT NULL,
+      currency    TEXT,
+      status      TEXT,
+      source      TEXT NOT NULL DEFAULT 'minihotel',
+      updated_at  TEXT
+    );
   `);
 
   // Migrations for DBs created before these columns existed.
