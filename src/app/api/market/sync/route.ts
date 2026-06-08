@@ -20,8 +20,26 @@ export async function GET() {
 }
 
 // Trigger a market-data refresh (run daily on the box; safe to call manually).
-export async function POST() {
+// AirROI bills per call, so we skip if we synced recently unless ?force=1.
+export async function POST(req: Request) {
+  const force = new URL(req.url).searchParams.get("force") === "1";
+  const minHours = Number(process.env.MARKET_SYNC_MIN_HOURS || 6);
+  const last = listMarketSnapshots().reduce<string | null>(
+    (max, s) => (max && max > s.fetchedAt ? max : s.fetchedAt),
+    null,
+  );
+  if (!force && last) {
+    const ageHours = (Date.now() - new Date(last).getTime()) / 3_600_000;
+    if (ageHours < minHours) {
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        reason: `synced ${ageHours.toFixed(1)}h ago (< ${minHours}h); pass ?force=1 to override`,
+        synced: [],
+        failed: [],
+      });
+    }
+  }
   const result = await syncMarketData();
-  const status = result.ok ? 200 : 400;
-  return NextResponse.json(result, { status });
+  return NextResponse.json(result, { status: result.ok ? 200 : 400 });
 }
