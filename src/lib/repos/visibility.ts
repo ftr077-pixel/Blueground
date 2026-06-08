@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
+import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
 export interface SearchProfile {
@@ -556,6 +557,9 @@ export interface RecordRunInput {
     currency?: string | null;
   }>;
   listingMinNights?: Record<string, number | null>;
+  // Full competitor price ladder per search, captured alongside our listings'
+  // snapshots in the same run (optional — older scrapers omit it).
+  searchResults?: SearchResultsInput[];
 }
 
 export function recordRun(input: RecordRunInput): number {
@@ -598,6 +602,15 @@ export function recordRun(input: RecordRunInput): number {
         "UPDATE tracked_listings SET min_nights = ?, min_nights_checked_at = ? WHERE id = ?",
       );
       for (const [lid, mn] of Object.entries(input.listingMinNights)) upd.run(mn ?? null, ts, lid);
+    }
+    // Ladder shares the run's id + ts so it lines up with the snapshots above.
+    if (input.searchResults?.length) {
+      insertSearchResults(db, {
+        profileId: input.profileId,
+        runId: input.runId,
+        ts,
+        searches: input.searchResults,
+      });
     }
   });
   tx();
@@ -648,6 +661,16 @@ export function getDashboard() {
       weeklyDiscountPct: num("los_weekly_pct", 0),
       biWeeklyDiscountPct: num("los_biweekly_pct", 0),
       monthlyDiscountPct: num("los_monthly_pct", 0),
+    },
+    pricingRules: {
+      marginLow: num("pr_margin_low", 25),
+      marginHigh: num("pr_margin_high", 45),
+      rankWellPage: num("pr_rank_well_page", 1),
+      buriedPage: num("pr_buried_page", 5),
+      urgentDays: num("pr_urgent_days", 14),
+      relaxedDays: num("pr_relaxed_days", 45),
+      stepPct: num("pr_step_pct", 5),
+      floorMargin: num("pr_floor_margin", 10),
     },
   };
 }

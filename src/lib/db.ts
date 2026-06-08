@@ -181,6 +181,32 @@ function init(db: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_lsnap_listing_ts ON listing_snapshots(listing_id, ts DESC);
 
+    -- Full competitor price ladder per search (every result's price at its
+    -- position), captured from the same result set the scraper already fetches.
+    -- One row per (search, rank); a "search" = profile × run × check-in × nights
+    -- × guests. This is the substrate for the price→position learner: a single
+    -- scan yields the whole market price-vs-rank curve for that exact query.
+    CREATE TABLE IF NOT EXISTS search_results (
+      id            TEXT PRIMARY KEY,
+      profile_id    TEXT NOT NULL REFERENCES search_profiles(id),
+      run_id        TEXT NOT NULL,
+      ts            TEXT NOT NULL,
+      check_in      TEXT NOT NULL,
+      check_out     TEXT NOT NULL,
+      nights        INTEGER NOT NULL,
+      guests        INTEGER NOT NULL,
+      total         INTEGER NOT NULL,
+      room_id       TEXT,
+      rank          INTEGER NOT NULL,
+      page          INTEGER NOT NULL,
+      position      INTEGER NOT NULL,
+      price         REAL,
+      price_nightly REAL,
+      currency      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_results_segment ON search_results(profile_id, nights, check_in, run_id);
+    CREATE INDEX IF NOT EXISTS idx_results_ts ON search_results(ts);
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
