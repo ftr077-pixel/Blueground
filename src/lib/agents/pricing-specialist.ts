@@ -9,9 +9,14 @@ import {
   type Unit,
 } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
+import { PRICING_AGENT, roundRate } from "@/lib/config/pricing";
 
-const HUMAN_GATE_PCT = 15;
-const MAX_MIN_STAY = 90;
+const {
+  humanGatePct: HUMAN_GATE_PCT,
+  maxMinStay: MAX_MIN_STAY,
+  noOpThresholdPct: NO_OP_PCT,
+  highBlastRadiusPct: HIGH_BLAST_PCT,
+} = PRICING_AGENT;
 
 export interface MarketSignal {
   neighborhood: string;
@@ -87,17 +92,19 @@ function recommendMinStay(
   marketMedian: number | null,
 ): { minStay: number; note: string } {
   const floor = unit.lowestMinStay;
+  const tiers = PRICING_AGENT.minStayDemandTiers;
   let rec = floor;
   let note = `floor ${floor}n`;
-  if (demand >= 0.2) {
-    rec = floor + 30;
-    note = `hot demand → ${rec}n`;
-  } else if (demand >= 0.12) {
-    rec = floor + 15;
-    note = `firm demand → ${rec}n`;
+  for (const tier of tiers) {
+    // tiers are ordered highest-threshold first, so the first match wins
+    if (demand >= tier.threshold) {
+      rec = floor + tier.bump;
+      note = `${tier.label} → ${rec}n`;
+      break;
+    }
   }
   if (marketMedian && marketMedian > rec) {
-    rec = Math.min(marketMedian, floor + 30);
+    rec = Math.min(marketMedian, floor + tiers[0].bump);
     note = `matching market median ${marketMedian}n → ${rec}n`;
   }
   rec = Math.max(floor, Math.min(rec, MAX_MIN_STAY));
@@ -113,13 +120,17 @@ function computeProposal(
   const occ = unit.occupancy30d;
   const demand = signal?.demandIndex ?? 0;
 
-  // Tilt: demand carries 70%, occupancy gap (vs 0.85 target) carries 30%.
-  const occTilt = Math.max(-0.2, Math.min(0.2, (occ - 0.85) * 1.5));
-  const tilt = 0.7 * demand + 0.3 * occTilt;
-  // Clamp single-pass move at ±25% before the §5 gate; the gate then pulls
-  // anything > ±15% out for human review.
-  const clamped = Math.max(-0.25, Math.min(0.25, tilt));
-  const rawNewRate = Math.round((unit.baseRate * (1 + clamped)) / 5) * 5;
+  // Tilt: demand and the occupancy gap (vs target) are blended by configured
+  // weights. Constants live in src/lib/config/pricing.ts.
+  const occGap = (occ - PRICING_AGENT.targetOccupancy) * PRICING_AGENT.occupancyTiltSlope;
+  const occCap = PRICING_AGENT.occupancyTiltCap;
+  const occTilt = Math.max(-occCap, Math.min(occCap, occGap));
+  const tilt = PRICING_AGENT.demandWeight * demand + PRICING_AGENT.occupancyWeight * occTilt;
+  // Clamp the single-pass move before the §5 gate; the gate then pulls anything
+  // beyond ±humanGatePct out for human review.
+  const cap = PRICING_AGENT.singlePassClamp;
+  const clamped = Math.max(-cap, Math.min(cap, tilt));
+  const rawNewRate = roundRate(unit.baseRate * (1 + clamped));
 
   // #1 — pin to the unit's price floor/ceiling (PriceLabs min/max price). The
   // floor is the key MTR guardrail: dynamic discounting can never undercut it.
@@ -174,7 +185,7 @@ function computeProposal(
   };
 
   let status: PricingDecision["status"] = "applied";
-  if (absDelta < 0.5) status = "applied"; // no-op-ish; we'll skip writes below
+  if (absDelta < NO_OP_PCT) status = "applied"; // no-op-ish; we'll skip writes below
   else if (absDelta > HUMAN_GATE_PCT) status = "pending_approval";
 
   // Persist history + (sometimes) update the unit
@@ -232,7 +243,7 @@ export function runPricingPass(
     }
 
     const absDelta = Math.abs(decision.deltaPct);
-    if (decision.status === "applied" && absDelta >= 0.5) {
+    if (decision.status === "applied" && absDelta >= NO_OP_PCT) {
       setUnitRate(unit.id, decision.newRate, ranAt);
       logActivity({
         department: "revenue",
@@ -246,9 +257,9 @@ export function runPricingPass(
         worker: "Pricing Specialist",
         proposedAction: `Move ${unit.name} from ${decision.oldRate} to ${decision.newRate} ILS (${decision.deltaPct >= 0 ? "+" : ""}${decision.deltaPct.toFixed(1)}%).`,
         rationale: decision.reason,
-        blastRadius: absDelta >= 20 ? "high" : "medium",
+        blastRadius: absDelta >= HIGH_BLAST_PCT ? "high" : "medium",
         amount: `${decision.deltaPct >= 0 ? "+" : ""}${decision.deltaPct.toFixed(1)}% (above ${HUMAN_GATE_PCT}% ceiling)`,
-        rule: "spec.md §5 — pricing move > ±15%",
+        rule: `spec.md §5 — pricing move > ±${HUMAN_GATE_PCT}%`,
       });
       logActivity({
         department: "revenue",
@@ -265,7 +276,7 @@ export function runPricingPass(
     ranAt,
     decisions,
     flagged: decisions.filter((d) => d.status === "pending_approval"),
-    applied: decisions.filter((d) => d.status === "applied" && Math.abs(d.deltaPct) >= 0.5),
-    noOps: decisions.filter((d) => Math.abs(d.deltaPct) < 0.5),
+    applied: decisions.filter((d) => d.status === "applied" && Math.abs(d.deltaPct) >= NO_OP_PCT),
+    noOps: decisions.filter((d) => Math.abs(d.deltaPct) < NO_OP_PCT),
   };
 }

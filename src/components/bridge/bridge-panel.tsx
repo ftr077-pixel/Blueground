@@ -24,6 +24,7 @@ interface Line {
   kind: Kind;
   monthly: number[];
   total: number;
+  actual: number[];
 }
 interface Driver {
   key: string;
@@ -52,6 +53,8 @@ interface View {
   drivers: Driver[];
   overrides: Record<string, number>;
   maxBaselineErrorPct: number;
+  actualMonths: number;
+  liveActualMonths: number;
 }
 
 const fmtC = (v: number) => {
@@ -62,21 +65,27 @@ const fmtC = (v: number) => {
   return `${s}₪${a.toFixed(0)}`;
 };
 const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`;
+const tone = (v: number) => (v >= 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--danger))]");
 const inputCls =
   "rounded-md border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50";
 
-export function BridgePanel() {
+export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" }) {
   const [period, setPeriod] = useState<"month" | "quarter" | "year">("year");
+  const [tableMode, setTableMode] = useState<"plan" | "actual" | "variance">("plan");
   const [data, setData] = useState<View | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (p: string) => {
-    const r = await fetch(`/api/bridge?period=${p}`, { cache: "no-store" });
-    if (!r.ok) throw new Error(`failed (${r.status})`);
-    setData((await r.json()) as View);
-  }, []);
+  const load = useCallback(
+    async (p: string) => {
+      const baseParam = mode === "plan" ? "&base=1" : "";
+      const r = await fetch(`/api/bridge?period=${p}${baseParam}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`failed (${r.status})`);
+      setData((await r.json()) as View);
+    },
+    [mode],
+  );
 
   useEffect(() => {
     setLoading(true);
@@ -129,6 +138,7 @@ export function BridgePanel() {
         <span>
           {data.scenario} · {summary.months} months
         </span>
+        {mode === "plan" && <Badge variant="muted">plan of record · read-only</Badge>}
         {hasOverrides && (
           <Badge variant="info">what-if active · {Object.keys(data.overrides).length} driver(s)</Badge>
         )}
@@ -183,37 +193,69 @@ export function BridgePanel() {
         </CardContent>
       </Card>
 
-      {/* driver what-if editor */}
-      <DriverEditor
-        drivers={data.drivers}
-        busy={busy}
-        hasOverrides={hasOverrides}
-        onSet={(key, value) => postOverride({ key, value })}
-        onReset={() => postOverride({ reset: true })}
-      />
+      {/* driver what-if editor + actuals slot (forecast only) */}
+      {mode === "forecast" && (
+        <>
+          <DriverEditor
+            drivers={data.drivers}
+            busy={busy}
+            hasOverrides={hasOverrides}
+            onSet={(key, value) => postOverride({ key, value })}
+            onReset={() => postOverride({ reset: true })}
+          />
+          <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">Actuals &amp; variance:</span> rental-revenue
+            actuals are wired live from MiniHotel — booked nights × rate from the ARI sync, summed per
+            month — and drop into the Actual column beside the plan. Other lines fill as more
+            production data lands.
+          </p>
+        </>
+      )}
 
       {/* P&L table */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <CardTitle>P&amp;L — {data.scenario}</CardTitle>
-            <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-[11px]">
-              {(["year", "quarter", "month"] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setPeriod(p)}
-                  className={`rounded px-2 py-0.5 capitalize ${
-                    period === p ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {p}
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center gap-2">
+              {mode === "forecast" && (
+                <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-[11px]">
+                  {(["plan", "actual", "variance"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setTableMode(m)}
+                      className={`rounded px-2 py-0.5 capitalize ${
+                        tableMode === m ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {m === "variance" ? "Δ vs plan" : m}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-[11px]">
+                {(["year", "quarter", "month"] as const).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setPeriod(p)}
+                    className={`rounded px-2 py-0.5 capitalize ${
+                      period === p ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Driver-derived, recomputed live. Costs are negative; margins recompute per period.
+            {mode === "forecast"
+              ? `Plan vs Actual vs variance in one structure — actuals for ${data.actualMonths} month(s)${
+                  data.liveActualMonths ? `, incl. ${data.liveActualMonths} live from MiniHotel` : ""
+                }; the rest fill from production as it syncs. “·” = no actual yet.`
+              : "Driver-derived plan of record. Costs are negative; margins recompute per period."}
           </p>
         </CardHeader>
         <CardContent>
@@ -232,7 +274,7 @@ export function BridgePanel() {
               </thead>
               <tbody>
                 {data.lines.map((ln) => (
-                  <LineRow key={ln.id} ln={ln} />
+                  <LineRow key={ln.id} ln={ln} mode={mode === "forecast" ? tableMode : "plan"} />
                 ))}
               </tbody>
             </table>
@@ -243,14 +285,46 @@ export function BridgePanel() {
   );
 }
 
-function LineRow({ ln }: { ln: Line }) {
+function LineRow({ ln, mode }: { ln: Line; mode: "plan" | "actual" | "variance" }) {
   const bold = ln.kind === "total" || ln.kind === "subtotal";
   const isTotal = ln.kind === "total";
   const isRatio = ln.kind === "ratio";
   const pad = { paddingLeft: `${0.25 + ln.level * 0.9}rem` };
-  const fmt = isRatio ? fmtPct : fmtC;
-  const cellColor = (v: number) =>
-    isTotal ? (v >= 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--danger))]") : "";
+  const none = { text: "·", cls: "text-muted-foreground/40" };
+
+  // What each period cell shows, given the active Plan / Actual / Variance mode.
+  const cell = (i: number): { text: string; cls: string } => {
+    const plan = ln.monthly[i];
+    const act = ln.actual[i] ?? 0;
+    if (isRatio) return { text: mode === "plan" ? fmtPct(plan) : "", cls: "" };
+    if (mode === "plan") return { text: fmtC(plan), cls: isTotal ? tone(plan) : "" };
+    if (act === 0) return none; // no actual reported for this period
+    if (mode === "actual") return { text: fmtC(act), cls: isTotal ? tone(act) : "" };
+    const v = act - plan;
+    return { text: `${v >= 0 ? "+" : ""}${fmtC(v)}`, cls: tone(v) };
+  };
+
+  // Row total: for actual/variance, sum only over periods that have an actual.
+  const totalCell = (): { text: string; cls: string } => {
+    if (isRatio) return { text: "", cls: "" };
+    if (mode === "plan") return { text: fmtC(ln.total), cls: isTotal ? tone(ln.total) : "" };
+    let aSum = 0;
+    let pSum = 0;
+    let any = false;
+    ln.actual.forEach((a, i) => {
+      if (a !== 0) {
+        aSum += a;
+        pSum += ln.monthly[i];
+        any = true;
+      }
+    });
+    if (!any) return none;
+    if (mode === "actual") return { text: fmtC(aSum), cls: isTotal ? tone(aSum) : "" };
+    const v = aSum - pSum;
+    return { text: `${v >= 0 ? "+" : ""}${fmtC(v)}`, cls: tone(v) };
+  };
+
+  const t = totalCell();
   return (
     <tr
       className={`border-b border-border/40 ${isTotal ? "border-t border-border bg-muted/20" : ""} ${
@@ -260,14 +334,15 @@ function LineRow({ ln }: { ln: Line }) {
       <td className="sticky left-0 z-10 bg-card py-1.5 pr-3 text-left" style={pad}>
         {ln.label}
       </td>
-      {ln.monthly.map((v, i) => (
-        <td key={i} className={`px-2 py-1.5 text-right ${cellColor(v)}`}>
-          {fmt(v)}
-        </td>
-      ))}
-      <td className={`px-2 py-1.5 text-right ${bold ? "" : "text-muted-foreground"} ${cellColor(ln.total)}`}>
-        {isRatio ? "" : fmtC(ln.total)}
-      </td>
+      {ln.monthly.map((_, i) => {
+        const c = cell(i);
+        return (
+          <td key={i} className={`px-2 py-1.5 text-right ${c.cls}`}>
+            {c.text}
+          </td>
+        );
+      })}
+      <td className={`px-2 py-1.5 text-right ${bold ? "" : "text-muted-foreground"} ${t.cls}`}>{t.text}</td>
     </tr>
   );
 }

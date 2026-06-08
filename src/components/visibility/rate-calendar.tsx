@@ -6,6 +6,7 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  DownloadCloud,
   Loader2,
   Lock,
   Percent,
@@ -69,6 +70,8 @@ const btnCls =
   "inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50";
 const iconBtn =
   "inline-flex items-center justify-center rounded-md border border-border bg-card h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
+const btnGhost =
+  "inline-flex items-center gap-1.5 rounded-md border border-border bg-card h-8 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
 
 const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
 const todayUTC = () => new Date().toISOString().slice(0, 10);
@@ -88,6 +91,8 @@ export function RateCalendar() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState<{ unitId: string; date: string } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
     const r = await fetch(`/api/rates?from=${from}&days=${days}`, { cache: "no-store" });
@@ -137,6 +142,36 @@ export function RateCalendar() {
       setError(e instanceof Error ? e.message : "request failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function syncMiniHotel() {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const r = await fetch("/api/rates/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from, days }),
+      });
+      const d = (await r.json()) as {
+        ok: boolean;
+        written?: number;
+        mappedTypes?: number;
+        unmappedTypes?: string[];
+        message?: string;
+      };
+      if (d.ok) {
+        const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
+        setSyncMsg({ ok: true, text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}.` });
+        await refresh();
+      } else {
+        setSyncMsg({ ok: false, text: d.message || "Sync failed." });
+      }
+    } catch (e) {
+      setSyncMsg({ ok: false, text: e instanceof Error ? e.message : "sync failed" });
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -220,6 +255,15 @@ export function RateCalendar() {
           <button className={iconBtn} title="Refresh" disabled={busy} onClick={() => refresh().catch(() => undefined)}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           </button>
+          <button
+            className={btnGhost}
+            title="Pull live prices & availability from MiniHotel into this calendar"
+            disabled={syncing}
+            onClick={syncMiniHotel}
+          >
+            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadCloud className="h-4 w-4" />}
+            Sync MiniHotel
+          </button>
           <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
             <LegendSwatch className="bg-card border border-border" label="Open" />
             <LegendSwatch className="bg-success/15" label="Booked" />
@@ -228,6 +272,16 @@ export function RateCalendar() {
           </div>
         </CardContent>
       </Card>
+
+      {syncMsg && (
+        <p
+          className={`text-[11px] ${
+            syncMsg.ok ? "text-[hsl(var(--success))]" : "text-[hsl(var(--warning))]"
+          }`}
+        >
+          {syncMsg.text}
+        </p>
+      )}
 
       {/* edit bar */}
       {selCell && (

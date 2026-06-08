@@ -2,6 +2,8 @@ import { Settings as SettingsIcon } from "lucide-react";
 import { UpdateCard } from "@/components/admin/update-card";
 import { CostDefaultsCard } from "@/components/admin/cost-defaults-card";
 import { PricingRulesCard } from "@/components/admin/pricing-rules-card";
+import { MiniHotelCard } from "@/components/admin/minihotel-card";
+import { MiniHotelMappingCard } from "@/components/admin/minihotel-mapping-card";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +21,8 @@ export default function SettingsPage() {
           </p>
         </div>
       </header>
+      <MiniHotelCard />
+      <MiniHotelMappingCard />
       <CostDefaultsCard />
       <PricingRulesCard />
       <UpdateCard />
