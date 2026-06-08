@@ -336,6 +336,64 @@ export async function fetchRoomTypes(conn: MiniHotelConnection): Promise<string>
   }
 }
 
+function buildRoomStatusRequest(conn: MiniHotelConnection, from: string, to: string): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8" ?>' +
+    '<AvailRaters xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="03" />` +
+    `<Hotel id="${escXml(conn.hotelId)}" />` +
+    `<DateRange from="${from}" to="${to}" />` +
+    "</AvailRaters>"
+  );
+}
+
+/** Real-Time Room Status (ResponseType 03): lists ALL rooms/types, ignoring occupancy/price config. */
+export async function fetchRoomStatus(conn: MiniHotelConnection): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.ari, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildRoomStatusRequest(conn, todayUTC(), plusDays(todayUTC(), 1)),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Room types from a Room Status response (<RoomsTypes><RoomType Code Description/>). */
+export function parseStatusRoomTypes(xml: string): RoomTypeInfo[] {
+  const x = decodeEntities(xml);
+  const scope = x.match(/<RoomsTypes\b[^>]*>([\s\S]*?)<\/RoomsTypes>/i)?.[1] ?? x;
+  const out: RoomTypeInfo[] = [];
+  const seen = new Set<string>();
+  const re = /<RoomType\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(scope))) {
+    const code = (attr(m[1], "Code") ?? attr(m[1], "id") ?? "").trim();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    const desc = (attr(m[1], "Description") ?? attr(m[1], "RoomName") ?? "").trim();
+    out.push({ code, description: desc || code });
+  }
+  return out;
+}
+
+/** Try every room-type response shape (getRoomTypes / room-status / ARI rate feed). */
+function anyRoomTypes(text: string): RoomTypeInfo[] {
+  const a = parseRoomTypes(text);
+  if (a.length) return a;
+  const b = parseStatusRoomTypes(text);
+  if (b.length) return b;
+  return parseAriRoomTypes(text);
+}
+
 /**
  * Import the hotel's room types from MiniHotel as real Hub apartments, each
  * auto-mapped to its MiniHotel code. Optionally removes the demo seed units
@@ -358,46 +416,43 @@ export async function importApartmentsFromMiniHotel(opts: {
   }
 
   const snip = (s: string) => decodeEntities(s).replace(/\s+/g, " ").trim().slice(0, 200);
-  const errors: string[] = [];
+  const errorSet = new Set<string>();
   let types: RoomTypeInfo[] = [];
   let snippet = "";
 
   if (opts.xml) {
     snippet = snip(opts.xml);
-    errors.push(...parseAriErrors(opts.xml));
-    // Accept either a getRoomTypes response or an ARI feed.
-    types = parseRoomTypes(opts.xml);
-    if (types.length === 0) types = parseAriRoomTypes(opts.xml);
+    extractMiniHotelErrors(opts.xml).forEach((e) => errorSet.add(e));
+    types = anyRoomTypes(opts.xml);
   } else {
-    // 1) Content & Data API getRoomTypes — richest (has descriptions), but needs
-    //    Content-API access.
-    try {
-      const cx = await fetchRoomTypes(conn);
-      snippet = snip(cx);
-      types = parseRoomTypes(cx);
-      if (types.length === 0) errors.push(...parseAriErrors(cx));
-    } catch (e) {
-      errors.push(e instanceof Error ? e.message : "getRoomTypes failed");
-    }
-    // 2) Fall back to the room types embedded in the ARI feed. This works for
-    //    ARI-only accounts, where the Content API returns S009 (Invalid
-    //    credentials) — the same access that already powers the rate Sync.
-    if (types.length === 0) {
+    // Try each source until one yields room types. Accounts differ in which APIs
+    // they expose, and the Bulk ARI feed can be blocked entirely by a single
+    // misconfigured room type (ERR 310) — so fall through:
+    //   1) getRoomTypes  (Content & Data API — richest, needs Content access)
+    //   2) Room Status   (ARI — lists every room/type, ignores occupancy/price)
+    //   3) Bulk ARI feed (ARI — room types embedded in the rate response)
+    const sources: { label: string; run: () => Promise<string> }[] = [
+      { label: "getRoomTypes", run: () => fetchRoomTypes(conn) },
+      { label: "roomStatus", run: () => fetchRoomStatus(conn) },
+      { label: "bulkAri", run: () => fetchBulkAri(conn, todayUTC(), plusDays(todayUTC(), 1)) },
+    ];
+    for (const src of sources) {
       try {
-        const ax = await fetchBulkAri(conn, todayUTC(), plusDays(todayUTC(), 1));
-        const ariTypes = parseAriRoomTypes(ax);
-        if (ariTypes.length > 0) {
-          types = ariTypes;
-          errors.length = 0; // ARI succeeded; the Content-API error is moot
-        } else {
-          snippet = snip(ax);
-          errors.push(...parseAriErrors(ax));
+        const text = await src.run();
+        const found = anyRoomTypes(text);
+        if (found.length > 0) {
+          types = found;
+          errorSet.clear(); // a source succeeded; earlier errors are moot
+          break;
         }
+        snippet = snip(text);
+        extractMiniHotelErrors(text).forEach((e) => errorSet.add(e));
       } catch (e) {
-        errors.push(e instanceof Error ? e.message : "ARI fallback failed");
+        errorSet.add(e instanceof Error ? e.message : `${src.label} failed`);
       }
     }
   }
+  const errors = [...errorSet];
 
   if (types.length === 0) {
     return {
