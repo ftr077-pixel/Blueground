@@ -48,8 +48,7 @@ function Stat({ label, value, tone = "text-foreground" }: { label: string; value
 }
 
 const SUBTABS = [
-  { href: "/visibility", label: "Search Visibility" },
-  { href: "/visibility/profitability", label: "Profitability" },
+  { href: "/visibility", label: "Search & Profit" },
   { href: "/visibility/analytics", label: "Position Trends" },
   { href: "/visibility/pricing", label: "Pricing vs Rank" },
   { href: "/visibility/portfolio", label: "Portfolio" },
