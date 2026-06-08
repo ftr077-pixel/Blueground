@@ -246,22 +246,34 @@ function init(db: Database.Database) {
 
     -- Actual reservations pulled from MiniHotel (Content & Data API). This is the
     -- source of *real* revenue actuals: room revenue per booking, recognized per
-    -- night across the stay (see repos/reservations). Cancelled / no-show rows are
-    -- kept but excluded from revenue. unit_id is the mapped Hub unit (nullable).
+    -- night across the stay (see repos/reservations). Cancelled / no-show rows and
+    -- test apartments are kept but excluded from revenue. The revenue column is NET
+    -- of VAT (Israeli guests pay 18%, tourists are zero-rated); gross/vat keep the
+    -- breakdown for audit. unit_id is the mapped Hub unit (nullable).
     CREATE TABLE IF NOT EXISTS reservation (
       id          TEXT PRIMARY KEY,
       unit_id     TEXT,
       room_type   TEXT,
+      room_number TEXT,
       check_in    TEXT NOT NULL,
       check_out   TEXT NOT NULL,
       nights      INTEGER NOT NULL,
       revenue     INTEGER NOT NULL,
+      gross       INTEGER,
+      vat         INTEGER,
       currency    TEXT,
+      country     TEXT,
       status      TEXT,
       source      TEXT NOT NULL DEFAULT 'minihotel',
       updated_at  TEXT
     );
   `);
+
+  // Reservation columns added after the table first shipped.
+  ensureColumn(db, "reservation", "room_number", "TEXT");
+  ensureColumn(db, "reservation", "gross", "INTEGER");
+  ensureColumn(db, "reservation", "vat", "INTEGER");
+  ensureColumn(db, "reservation", "country", "TEXT");
 
   // Migrations for DBs created before these columns existed.
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");

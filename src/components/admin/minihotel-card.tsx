@@ -18,6 +18,9 @@ interface View {
   hotelId: string;
   rateCode: string;
   hasPassword: boolean;
+  vatRate: number; // fraction, e.g. 0.18
+  vatCountries: string;
+  excludedRoomTypes: string;
   endpoints: { ari: string; reverse: string; content: string };
 }
 
@@ -28,6 +31,9 @@ export function MiniHotelCard() {
   const [hotelId, setHotelId] = useState("");
   const [rateCode, setRateCode] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
+  const [vatRate, setVatRate] = useState("18");
+  const [vatCountries, setVatCountries] = useState("");
+  const [excludedRoomTypes, setExcludedRoomTypes] = useState("");
   const [endpoints, setEndpoints] = useState<View["endpoints"] | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -39,6 +45,9 @@ export function MiniHotelCard() {
     setHotelId(v.hotelId);
     setRateCode(v.rateCode);
     setHasPassword(v.hasPassword);
+    setVatRate(String(Math.round((v.vatRate ?? 0.18) * 100)));
+    setVatCountries(v.vatCountries ?? "");
+    setExcludedRoomTypes(v.excludedRoomTypes ?? "");
     setEndpoints(v.endpoints);
     setPassword("");
   }, []);
@@ -56,11 +65,23 @@ export function MiniHotelCard() {
     setBusy(true);
     setTest(null);
     try {
-      const body: { env: string; username: string; hotelId: string; rateCode: string; password?: string } = {
+      const body: {
+        env: string;
+        username: string;
+        hotelId: string;
+        rateCode: string;
+        vatRate: string;
+        vatCountries: string;
+        excludedRoomTypes: string;
+        password?: string;
+      } = {
         env,
         username,
         hotelId,
         rateCode,
+        vatRate,
+        vatCountries,
+        excludedRoomTypes,
       };
       if (password) body.password = password;
       const r = await fetch("/api/integrations/minihotel", {
@@ -149,6 +170,44 @@ export function MiniHotelCard() {
           <button type="button" disabled={busy} onClick={runTest} className={btnGhost}>
             Test connection
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5 text-[11px] text-muted-foreground">
+          <div className="w-full text-[10px] font-medium uppercase tracking-wide text-foreground/70">
+            Revenue actuals — VAT &amp; exclusions
+          </div>
+          <label className="flex flex-col gap-1">
+            VAT % (locals only)
+            <input
+              className={`${input} w-24`}
+              value={vatRate}
+              onChange={(e) => setVatRate(e.target.value)}
+              placeholder="18"
+              inputMode="decimal"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            VAT-liable countries
+            <input
+              className={`${input} w-44`}
+              value={vatCountries}
+              onChange={(e) => setVatCountries(e.target.value)}
+              placeholder="IL, ISR, ISRAEL"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            Test room codes / numbers (excluded)
+            <input
+              className={`${input} w-56`}
+              value={excludedRoomTypes}
+              onChange={(e) => setExcludedRoomTypes(e.target.value)}
+              placeholder="TEST, DEMO, 999"
+            />
+          </label>
+          <p className="w-full text-[10px] text-muted-foreground">
+            Revenue is recorded net of VAT — Israeli guests pay {vatRate || "18"}% (stripped out),
+            tourists are zero-rated. Reservations on test room codes/numbers stay out of the P&amp;L.
+          </p>
         </div>
 
         {endpoints && (

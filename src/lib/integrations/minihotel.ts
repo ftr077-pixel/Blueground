@@ -348,22 +348,26 @@ export async function importApartmentsFromMiniHotel(opts: {
 export interface MiniReservation {
   id: string;
   roomType?: string;
+  roomNumber?: string;
   checkIn: string; // YYYY-MM-DD
   checkOut: string; // YYYY-MM-DD, exclusive
-  revenue: number; // room revenue over the stay
+  gross: number; // AmountAfterTaxes — tax-INCLUSIVE; the repo strips VAT to net
   currency?: string;
+  country?: string; // guest country (iso2/iso3/name) — drives VAT-net
   status?: string;
 }
 
-// Field aliases, normalized to lowercase with separators stripped.
+// Field aliases for the generic JSON path, normalized to lowercase, separators stripped.
 const RF = {
-  id: ["id", "reservationid", "resid", "reservationkey", "key", "confirmation", "bookingid"],
+  id: ["minihotelreservationid", "reservationid", "resid", "id", "reservationkey", "key", "confirmation", "bookingid", "portalreservationid"],
   checkIn: ["checkin", "arrival", "arrivaldate", "from", "fromdate", "startdate", "datein"],
   checkOut: ["checkout", "departure", "departuredate", "to", "todate", "enddate", "dateout"],
-  revenue: ["roomrevenue", "totalroomprice", "totalprice", "total", "revenue", "price", "amount", "grandtotal"],
+  gross: ["amountaftertaxes", "roomrevenue", "totalroomprice", "totalprice", "total", "gross", "revenue", "price", "amount", "grandtotal"],
   status: ["status", "state", "reservationstatus"],
-  roomType: ["roomtype", "roomtypecode", "room", "roomcode", "unit"],
-  currency: ["currency", "currencycode", "cur"],
+  roomType: ["roomtypeid", "roomtype", "roomtypecode", "roomcode"],
+  roomNumber: ["roomnumber", "roomno", "room"],
+  country: ["country", "countryname", "countrycode", "iso2", "iso3", "nationality", "residency"],
+  currency: ["currencycode", "currency", "cur"],
 } as const;
 
 function normDate(s: string | null | undefined): string | null {
@@ -416,15 +420,17 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
     const o = item as Record<string, unknown>;
     const checkIn = normDate(pickCI(o, RF.checkIn) as string);
     const checkOut = normDate(pickCI(o, RF.checkOut) as string);
-    const revenue = normNum(pickCI(o, RF.revenue) as string | number);
-    if (!checkIn || !checkOut || revenue == null) continue;
+    const gross = normNum(pickCI(o, RF.gross) as string | number);
+    if (!checkIn || !checkOut || gross == null) continue;
     const id = pickCI(o, RF.id);
     out.push({
       id: id != null ? String(id) : `${checkIn}_${out.length}`,
       checkIn,
       checkOut,
-      revenue,
+      gross,
       roomType: (pickCI(o, RF.roomType) as string) || undefined,
+      roomNumber: (pickCI(o, RF.roomNumber) as string) || undefined,
+      country: (pickCI(o, RF.country) as string) || undefined,
       status: (pickCI(o, RF.status) as string) || undefined,
       currency: (pickCI(o, RF.currency) as string) || undefined,
     });
@@ -432,6 +438,51 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
   return out;
 }
 
+const firstBlock = (re: RegExp, s: string): string => re.exec(s)?.[1] ?? "";
+
+/**
+ * Parse MiniHotel's GetReservationKey response (§3.3): one <Booking> per reservation,
+ * with the whole-stay total in <ResGlobalInfo><Total AmountAfterTaxes>, dates in
+ * <Timespan arrival departure> (dd/mm/yyyy), the room in the first <RoomStay>, and the
+ * guest country in <PrimaryGuest><Country>. The total is tax-INCLUSIVE; VAT is derived
+ * downstream from the country.
+ */
+function parseBookingsXml(xml: string): MiniReservation[] {
+  const out: MiniReservation[] = [];
+  const re = /<Booking\b([^>]*)>([\s\S]*?)<\/Booking>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const head = m[1];
+    const inner = m[2];
+    const ts = firstBlock(/<Timespan\b([^>]*?)\/?>/i, inner) || firstBlock(/<StayDate\b([^>]*?)\/?>/i, inner);
+    const checkIn = normDate(attr(ts, "arrival"));
+    const checkOut = normDate(attr(ts, "departure"));
+    // Prefer the booking-level total (ResGlobalInfo); fall back to the first RoomStay total.
+    const totalScope = firstBlock(/<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i, inner) || inner;
+    const total = firstBlock(/<Total\b([^>]*?)\/?>/i, totalScope);
+    const gross = normNum(attr(total, "AmountAfterTaxes") ?? attr(total, "value"));
+    if (!checkIn || !checkOut || gross == null) continue;
+    const stay = firstBlock(/<RoomStay\b([^>]*?)\/?>/i, inner);
+    const country = firstBlock(/<Country\b([^>]*?)\/?>/i, inner);
+    out.push({
+      id:
+        attr(head, "Minihotel_reservation_id") ||
+        attr(head, "Portal_reservation_id") ||
+        `${checkIn}_${out.length}`,
+      checkIn,
+      checkOut,
+      gross,
+      roomType: attr(stay, "roomTypeId") || attr(stay, "roomTypeID") || undefined,
+      roomNumber: attr(stay, "roomNumber") || undefined,
+      country: attr(country, "iso2") || attr(country, "iso3") || attr(country, "CountryName") || undefined,
+      currency: attr(total, "CurrencyCode") || undefined,
+      status: attr(head, "Status") || undefined,
+    });
+  }
+  return out;
+}
+
+/** Generic <Reservation>/<Booking>/<Res> fallback for non-standard XML shapes. */
 function parseReservationsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
   const re = /<(Reservation|Booking|Res)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
@@ -440,14 +491,16 @@ function parseReservationsXml(xml: string): MiniReservation[] {
     const block = m[2] + m[3]; // attributes + inner elements
     const checkIn = normDate(xmlField(block, RF.checkIn));
     const checkOut = normDate(xmlField(block, RF.checkOut));
-    const revenue = normNum(xmlField(block, RF.revenue));
-    if (!checkIn || !checkOut || revenue == null) continue;
+    const gross = normNum(xmlField(block, RF.gross));
+    if (!checkIn || !checkOut || gross == null) continue;
     out.push({
       id: xmlField(block, RF.id) || `${checkIn}_${out.length}`,
       checkIn,
       checkOut,
-      revenue,
+      gross,
       roomType: xmlField(block, RF.roomType) || undefined,
+      roomNumber: xmlField(block, RF.roomNumber) || undefined,
+      country: xmlField(block, RF.country) || undefined,
       status: xmlField(block, RF.status) || undefined,
       currency: xmlField(block, RF.currency) || undefined,
     });
@@ -455,7 +508,7 @@ function parseReservationsXml(xml: string): MiniReservation[] {
   return out;
 }
 
-/** Parse a MiniHotel reservations response (JSON or XML) into flat reservations. */
+/** Parse a MiniHotel reservations response (JSON, GetReservationKey XML, or generic). */
 export function parseReservations(payload: string): MiniReservation[] {
   const t = payload.trim();
   if (t.startsWith("{") || t.startsWith("[")) {
@@ -465,17 +518,21 @@ export function parseReservations(payload: string): MiniReservation[] {
       /* not JSON after all — fall through to XML */
     }
   }
+  if (/<Booking\b/i.test(t)) {
+    const bookings = parseBookingsXml(t);
+    if (bookings.length) return bookings;
+  }
   return parseReservationsXml(t);
 }
 
-/** Best-effort GetReservationKey request — calibrate against a real response if needed. */
+/** GetReservationKey request (§3.3) — filter by arrival date, include room prices. */
 export function buildReservationsRequest(conn: MiniHotelConnection, from: string, to: string): string {
   return (
     '<?xml version="1.0" encoding="UTF-8" ?>' +
-    '<GetReservationKey xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+    "<GetReservationKey>" +
     `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" />` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
-    `<DateRange from="${from}" to="${to}" />` +
+    `<ArrivalDate From="${from}" To="${to}" />` +
     "<IncludeRoomPrices>true</IncludeRoomPrices>" +
     "</GetReservationKey>"
   );
@@ -486,7 +543,7 @@ export async function fetchReservations(conn: MiniHotelConnection, from: string,
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
   try {
-    const res = await fetch(`${ep.content}/GetReservationKey`, {
+    const res = await fetch(`${ep.content}/api/Agents/Sci/Reservation/GetReservationKey`, {
       method: "POST",
       headers: { "Content-Type": "application/xml" },
       body: buildReservationsRequest(conn, from, to),
@@ -509,9 +566,11 @@ export interface ReservationSyncResult {
   parsed: number; // reservations parsed from the response
   recorded: number; // stored
   skipped: number; // unparseable rows dropped
-  counted: number; // non-cancelled reservations now on file
+  counted: number; // non-cancelled, non-test reservations now on file
+  test: number; // excluded as test apartments
   months: number; // distinct months with revenue
-  revenue: number; // total counted revenue, ILS
+  revenue: number; // total counted NET revenue, ILS
+  vat: number; // total VAT stripped out
   message?: string;
 }
 
@@ -536,8 +595,10 @@ export async function syncReservationsFromMiniHotel(opts: {
         recorded: 0,
         skipped: 0,
         counted: 0,
+        test: 0,
         months: 0,
         revenue: 0,
+        vat: 0,
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
@@ -545,7 +606,19 @@ export async function syncReservationsFromMiniHotel(opts: {
   }
 
   const parsed = parseReservations(payload);
-  const { recorded, skipped } = upsertReservations(parsed);
+  const { recorded, skipped } = upsertReservations(
+    parsed.map((r) => ({
+      id: r.id,
+      roomType: r.roomType,
+      roomNumber: r.roomNumber,
+      checkIn: r.checkIn,
+      checkOut: r.checkOut,
+      gross: r.gross, // tax-inclusive — upsertReservations derives net from country
+      country: r.country,
+      currency: r.currency,
+      status: r.status,
+    })),
+  );
   const stats = reservationStats();
   return {
     ok: true,
@@ -555,7 +628,9 @@ export async function syncReservationsFromMiniHotel(opts: {
     recorded,
     skipped,
     counted: stats.count,
+    test: stats.test,
     months: stats.months,
     revenue: stats.revenue,
+    vat: stats.vat,
   };
 }
