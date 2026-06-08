@@ -11,11 +11,12 @@ import type {
   Confidence,
   CurvePoint,
   ElasticityResult,
+  LearnedRecCompact,
   Observation,
   SegmentCurve,
   SegmentKey,
 } from "./types";
-import { getProfile } from "@/lib/repos/visibility";
+import { costDefaults, getProfile } from "@/lib/repos/visibility";
 
 const pageOf = (rank: number) => Math.max(1, Math.ceil(rank / WEB_PAGE_SIZE));
 const round = (n: number, step = 1) => Math.round(n / step) * step;
@@ -77,10 +78,13 @@ function confidenceLevel(
 ): Confidence {
   if (n < LEARNING.nMin) return "low";
   if (freshnessDays != null && freshnessDays > LEARNING.staleAfterDays) return "low";
+  // No CI measured (bootstrap skipped) → gate "high" on sample size alone.
   const tight =
-    ci != null && targetNightly != null && targetNightly > 0
-      ? (ci.hi - ci.lo) / targetNightly < 0.2
-      : false;
+    ci == null
+      ? true
+      : targetNightly != null && targetNightly > 0
+        ? (ci.hi - ci.lo) / targetNightly < 0.2
+        : false;
   if (n >= LEARNING.nHigh && tight) return "high";
   return "medium";
 }
@@ -109,7 +113,7 @@ export function segmentCurve(
 // price to reach a target page, the marginal positions per ₪, and confidence.
 export function elasticityForListing(
   listingId: string,
-  opts: { nights?: number; checkIn?: string | null; targetPage?: number } = {},
+  opts: { nights?: number; checkIn?: string | null; targetPage?: number; bootstrap?: boolean } = {},
 ): ElasticityResult | null {
   const nights = opts.nights ?? 30;
   const state = listingState(listingId, nights, opts.checkIn ?? null);
@@ -150,7 +154,7 @@ export function elasticityForListing(
     const qAdj = Math.min(0.999, Math.max(0.001, (targetRank - offsetRank) / T));
     const inv = invertCurve(curve, qAdj);
     const targetNightly = round(inv.x, 5);
-    ci = bootstrapTarget(obs, qAdj);
+    ci = opts.bootstrap === false ? null : bootstrapTarget(obs, qAdj);
     target = {
       page: targetPage,
       rank: targetRank,
@@ -175,6 +179,30 @@ export function elasticityForListing(
 
   const before = cur != null ? Math.round(cur * nights) : null;
   const after = target?.nightly != null ? Math.round(target.nightly * nights) : null;
+
+  // Monthly profit impact (costs are monthly), using the shared cost defaults so
+  // the numbers match the Search & Profit / Profitability views.
+  const costs = costDefaults();
+  const profitAt = (nightly: number | null): { profit: number | null; margin: number | null } => {
+    const rent = state.listing.monthlyRent;
+    if (nightly == null || rent == null) return { profit: null, margin: null };
+    const rev = nightly * 30 * (1 - costs.monthlyDiscountPct / 100);
+    const fees = (rev * (costs.bgFeePct + costs.airbnbFeePct)) / 100;
+    const bills =
+      (state.listing.utilities ?? costs.defaultUtilities) +
+      (state.listing.cleaningFee ?? costs.defaultCleaning);
+    const profit = rev - fees - bills - rent;
+    return { profit: Math.round(profit), margin: rev ? profit / rev : null };
+  };
+  const econBefore = profitAt(cur);
+  const econAfter = profitAt(target?.nightly ?? null);
+  const economics = {
+    rentKnown: state.listing.monthlyRent != null,
+    profitBefore: econBefore.profit,
+    profitAfter: econAfter.profit,
+    marginBefore: econBefore.margin != null ? round1(econBefore.margin * 100) : null,
+    marginAfter: econAfter.margin != null ? round1(econAfter.margin * 100) : null,
+  };
 
   const level = confidenceLevel(n, freshnessDays, ci, target?.nightly ?? null);
 
@@ -205,6 +233,7 @@ export function elasticityForListing(
     target,
     marginal: { positionsPer100Nightly, positionsPerPct },
     revenue: { nights, before, after, delta: before != null && after != null ? after - before : null },
+    economics,
     confidence: {
       level,
       n,
@@ -214,5 +243,25 @@ export function elasticityForListing(
     },
     curve: sampleCurve(curve, T),
     note,
+  };
+}
+
+// Compact per-listing recommendation for the dashboard batch — skips the
+// bootstrap CI (confidence is gated on sample size + freshness there).
+export function learnedRec(
+  listingId: string,
+  nights: number,
+  targetPage: number,
+): LearnedRecCompact | null {
+  const r = elasticityForListing(listingId, { nights, targetPage, bootstrap: false });
+  if (!r || !r.target) return null;
+  return {
+    targetPage: r.target.page,
+    suggestedNightly: r.target.nightly,
+    deltaPct: r.target.deltaPct,
+    expectedPage: r.current.expectedPage,
+    reachable: r.target.reachable,
+    confidence: r.confidence.level,
+    n: r.confidence.n,
   };
 }
