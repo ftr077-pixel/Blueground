@@ -1,5 +1,27 @@
 import { getSetting, setSetting } from "@/lib/repos/visibility";
+import { getDb } from "@/lib/db";
 import { aggregate, computeBridge, type BridgeOverrides } from "@/lib/bridge/engine";
+
+// Real rental-revenue actuals from MiniHotel: the ARI sync writes per-night
+// price + booked cells (source = "minihotel") into the Rates Calendar. Booked
+// nights × price, summed per month, is realized/on-the-books room revenue.
+export function getLiveActuals(): { byMonth: Record<string, number>; months: number } {
+  const byMonth: Record<string, number> = {};
+  try {
+    const rows = getDb()
+      .prepare(
+        `SELECT substr(date,1,7) AS ym,
+                SUM(CASE WHEN booked = 1 AND COALESCE(closed,0) = 0 AND price IS NOT NULL
+                         THEN price ELSE 0 END) AS revenue
+         FROM rate_calendar WHERE source = 'minihotel' GROUP BY ym`,
+      )
+      .all() as Array<{ ym: string; revenue: number | null }>;
+    for (const r of rows) if (r.revenue && r.revenue > 0) byMonth[r.ym] = Math.round(r.revenue);
+  } catch {
+    /* rate_calendar may not exist on older DBs — no live actuals then */
+  }
+  return { byMonth, months: Object.keys(byMonth).length };
+}
 
 // Driver what-if overrides persist as a JSON blob in the shared meta settings.
 const KEY = "bridge_overrides";
@@ -41,6 +63,18 @@ export type Period = "month" | "quarter" | "year";
 export function getBridgeView(period: Period, base = false) {
   const overrides = base ? {} : getOverrides();
   const result = computeBridge(overrides);
+
+  // Overlay live MiniHotel rental-revenue onto the workbook actuals, per month,
+  // for the rental-revenue line (the room revenue the PMS actually measures).
+  const live = getLiveActuals();
+  if (live.months > 0) {
+    for (const ln of result.lines) {
+      if (ln.id === "rentalRevenue") {
+        ln.actual = result.months.map((m, i) => live.byMonth[m] ?? ln.actual[i]);
+      }
+    }
+  }
+
   const agg = aggregate(result, period);
   return {
     scenario: result.scenario,
@@ -58,5 +92,6 @@ export function getBridgeView(period: Period, base = false) {
     overrides,
     maxBaselineErrorPct: result.maxBaselineErrorPct,
     actualMonths: result.actualMonths,
+    liveActualMonths: live.months,
   };
 }

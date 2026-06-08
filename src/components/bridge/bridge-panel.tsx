@@ -54,6 +54,7 @@ interface View {
   overrides: Record<string, number>;
   maxBaselineErrorPct: number;
   actualMonths: number;
+  liveActualMonths: number;
 }
 
 const fmtC = (v: number) => {
@@ -203,9 +204,10 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
             onReset={() => postOverride({ reset: true })}
           />
           <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-            <span className="font-medium text-foreground">Actuals &amp; variance:</span> the real-data
-            column populates from production (MiniHotel reservations → revenue, occupancy, ADR) once
-            connected — dropped into this same P&amp;L structure beside the plan.
+            <span className="font-medium text-foreground">Actuals &amp; variance:</span> rental-revenue
+            actuals are wired live from MiniHotel — booked nights × rate from the ARI sync, summed per
+            month — and drop into the Actual column beside the plan. Other lines fill as more
+            production data lands.
           </p>
         </>
       )}
@@ -250,7 +252,9 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
           </div>
           <p className="text-[11px] text-muted-foreground">
             {mode === "forecast"
-              ? `Plan vs Actual vs variance in one structure — actuals reported for ${data.actualMonths} month(s); the rest fill from production (MiniHotel). “·” = no actual yet.`
+              ? `Plan vs Actual vs variance in one structure — actuals for ${data.actualMonths} month(s)${
+                  data.liveActualMonths ? `, incl. ${data.liveActualMonths} live from MiniHotel` : ""
+                }; the rest fill from production as it syncs. “·” = no actual yet.`
               : "Driver-derived plan of record. Costs are negative; margins recompute per period."}
           </p>
         </CardHeader>
