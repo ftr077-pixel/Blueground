@@ -205,9 +205,9 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
           />
           <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
             <span className="font-medium text-foreground">Actuals &amp; variance:</span> rental-revenue
-            actuals are wired live from MiniHotel — booked nights × rate from the ARI sync, summed per
-            month — and drop into the Actual column beside the plan. Other lines fill as more
-            production data lands.
+            actuals are wired live from MiniHotel — actual reservations, with room revenue recognized
+            per night across each stay and summed per month — and drop into the Actual column beside
+            the plan. There are no costs in MiniHotel, so cost lines keep coming from the workbook.
           </p>
         </>
       )}
