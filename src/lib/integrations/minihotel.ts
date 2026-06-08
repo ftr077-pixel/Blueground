@@ -283,6 +283,21 @@ export function parseRoomTypes(xml: string): RoomTypeInfo[] {
   return out;
 }
 
+/** Discover room types (code + name) from an ARI Bulk response's <RoomType id RoomName>. */
+export function parseAriRoomTypes(xml: string): RoomTypeInfo[] {
+  const x = decodeEntities(xml);
+  const seen = new Map<string, string>();
+  const re = /<RoomType\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(x))) {
+    const code = (attr(m[1], "id") ?? "").trim();
+    if (!code || seen.has(code)) continue;
+    const name = (attr(m[1], "RoomName") ?? attr(m[1], "Name") ?? "").trim();
+    seen.set(code, name || code);
+  }
+  return [...seen].map(([code, description]) => ({ code, description }));
+}
+
 export async function fetchRoomTypes(conn: MiniHotelConnection): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const url = `${ep.content}/agents/ws/settings/rooms/RoomsMain.asmx/getRoomTypes`;
@@ -313,23 +328,59 @@ export async function importApartmentsFromMiniHotel(opts: {
   replaceDemo?: boolean;
 }): Promise<ImportResult> {
   const conn = getMiniHotelConnection();
-  let xml = opts.xml;
-  if (!xml) {
-    if (!conn.username || !conn.password || !conn.hotelId) {
-      return {
-        ok: false,
-        imported: 0,
-        removedDemo: 0,
-        apartments: [],
-        errors: [],
-        message: "MiniHotel connection isn't configured — set it in Settings first.",
-      };
-    }
-    xml = await fetchRoomTypes(conn);
+  if (!opts.xml && (!conn.username || !conn.password || !conn.hotelId)) {
+    return {
+      ok: false,
+      imported: 0,
+      removedDemo: 0,
+      apartments: [],
+      errors: [],
+      message: "MiniHotel connection isn't configured — set it in Settings first.",
+    };
   }
 
-  const errors = parseAriErrors(xml);
-  const types = parseRoomTypes(xml);
+  const snip = (s: string) => decodeEntities(s).replace(/\s+/g, " ").trim().slice(0, 200);
+  const errors: string[] = [];
+  let types: RoomTypeInfo[] = [];
+  let snippet = "";
+
+  if (opts.xml) {
+    snippet = snip(opts.xml);
+    errors.push(...parseAriErrors(opts.xml));
+    // Accept either a getRoomTypes response or an ARI feed.
+    types = parseRoomTypes(opts.xml);
+    if (types.length === 0) types = parseAriRoomTypes(opts.xml);
+  } else {
+    // 1) Content & Data API getRoomTypes — richest (has descriptions), but needs
+    //    Content-API access.
+    try {
+      const cx = await fetchRoomTypes(conn);
+      snippet = snip(cx);
+      types = parseRoomTypes(cx);
+      if (types.length === 0) errors.push(...parseAriErrors(cx));
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : "getRoomTypes failed");
+    }
+    // 2) Fall back to the room types embedded in the ARI feed. This works for
+    //    ARI-only accounts, where the Content API returns S009 (Invalid
+    //    credentials) — the same access that already powers the rate Sync.
+    if (types.length === 0) {
+      try {
+        const ax = await fetchBulkAri(conn, todayUTC(), plusDays(todayUTC(), 1));
+        const ariTypes = parseAriRoomTypes(ax);
+        if (ariTypes.length > 0) {
+          types = ariTypes;
+          errors.length = 0; // ARI succeeded; the Content-API error is moot
+        } else {
+          snippet = snip(ax);
+          errors.push(...parseAriErrors(ax));
+        }
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : "ARI fallback failed");
+      }
+    }
+  }
+
   if (types.length === 0) {
     return {
       ok: false,
@@ -338,8 +389,8 @@ export async function importApartmentsFromMiniHotel(opts: {
       apartments: [],
       errors,
       message: errors.length
-        ? `MiniHotel returned: ${errors.join(" | ")}`
-        : `No room types found in MiniHotel's response. It began: ${decodeEntities(xml).replace(/\s+/g, " ").trim().slice(0, 180)}`,
+        ? `Couldn't read apartments — MiniHotel said: ${errors.join(" | ")}`
+        : `No room types found. Response began: ${snippet}`,
     };
   }
 
