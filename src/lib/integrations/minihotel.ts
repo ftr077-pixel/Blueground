@@ -3,6 +3,7 @@ import {
   getMiniHotelMapping,
   getExcludedRoomCodes,
   miniHotelEndpoints,
+  miniHotelContentAuth,
   type MiniHotelConnection,
 } from "@/lib/repos/integrations";
 import { upsertOverride } from "@/lib/repos/rates";
@@ -273,10 +274,11 @@ export interface ImportResult {
 }
 
 export function buildRoomTypesRequest(conn: MiniHotelConnection): string {
+  const a = miniHotelContentAuth(conn);
   return (
     '<?xml version="1.0" encoding="UTF-8"?>' +
     '<Request><Settings name="getRoomTypes">' +
-    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}"/>` +
+    `<Authentication username="${escXml(a.username)}" password="${escXml(a.password)}"/>` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
     "</Settings></Request>"
   );
@@ -678,10 +680,11 @@ export function parseReservations(payload: string): MiniReservation[] {
 
 /** GetReservationKey request (§3.3) — filter by arrival date, include room prices. */
 export function buildReservationsRequest(conn: MiniHotelConnection, from: string, to: string): string {
+  const a = miniHotelContentAuth(conn);
   return (
     '<?xml version="1.0" encoding="UTF-8" ?>' +
     "<GetReservationKey>" +
-    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" />` +
+    `<Authentication username="${escXml(a.username)}" password="${escXml(a.password)}" />` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
     `<ArrivalDate From="${from}" To="${to}" />` +
     "<IncludeRoomPrices>true</IncludeRoomPrices>" +
