@@ -54,6 +54,19 @@ function escXml(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+// MiniHotel responses are entity-encoded XML (their docs ship an UnEscapeXml
+// helper), and .asmx endpoints can wrap the payload in <string>…</string> with
+// the inner XML encoded. Decode before parsing so tags are real. Mirrors
+// MiniHotel's own decoder (the same five named entities); &amp; is done last.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, "&");
+}
+
 export function buildBulkAriRequest(conn: MiniHotelConnection, from: string, to: string): string {
   const rateCode = conn.rateCode || "USD";
   return (
@@ -82,9 +95,10 @@ const truthy = (v: string | null) => v != null && /^(yes|true|1|y)$/i.test(v.tri
 /** Parse a Bulk ARI <AvailRaters> response into flat per-room-type/day cells. */
 export function parseBulkAri(xml: string): AriCell[] {
   const cells: AriCell[] = [];
+  const x = decodeEntities(xml);
   const rtRe = /<RoomType\b([^>]*)>([\s\S]*?)<\/RoomType>/gi;
   let rt: RegExpExecArray | null;
-  while ((rt = rtRe.exec(xml))) {
+  while ((rt = rtRe.exec(x))) {
     const code = attr(rt[1], "id");
     if (!code) continue;
     const dayRe = /<Day\b([^>]*)>/gi;
@@ -251,14 +265,19 @@ export function buildRoomTypesRequest(conn: MiniHotelConnection): string {
 
 /** Parse a getRoomTypes response (<ArrayOfRoomTypes><RoomTypes><Type/><Description/>…). */
 export function parseRoomTypes(xml: string): RoomTypeInfo[] {
+  // Decode first (responses are entity-encoded / may be <string>-wrapped), scope
+  // to the ArrayOfRoomTypes block when present, then pull each Type + optional
+  // Description. Pairing on Type→Description is robust to the container's name.
+  const decoded = decodeEntities(xml);
+  const scope =
+    decoded.match(/<ArrayOfRoomTypes\b[^>]*>([\s\S]*?)<\/ArrayOfRoomTypes>/i)?.[1] ?? decoded;
   const out: RoomTypeInfo[] = [];
-  const re = /<RoomTypes\b[^>]*>([\s\S]*?)<\/RoomTypes>/gi;
+  const re = /<Type>([\s\S]*?)<\/Type>\s*(?:<Description>([\s\S]*?)<\/Description>)?/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml))) {
-    const block = m[1];
-    const code = (block.match(/<Type>([\s\S]*?)<\/Type>/i)?.[1] ?? "").trim();
+  while ((m = re.exec(scope))) {
+    const code = (m[1] ?? "").trim();
     if (!code) continue;
-    const desc = (block.match(/<Description>([\s\S]*?)<\/Description>/i)?.[1] ?? "").trim();
+    const desc = (m[2] ?? "").trim();
     out.push({ code, description: desc || code });
   }
   return out;
@@ -320,7 +339,7 @@ export async function importApartmentsFromMiniHotel(opts: {
       errors,
       message: errors.length
         ? `MiniHotel returned: ${errors.join(" | ")}`
-        : "No room types returned by MiniHotel.",
+        : `No room types found in MiniHotel's response. It began: ${decodeEntities(xml).replace(/\s+/g, " ").trim().slice(0, 180)}`,
     };
   }
 
@@ -434,9 +453,10 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
 
 function parseReservationsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
+  const x = decodeEntities(xml);
   const re = /<(Reservation|Booking|Res)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml))) {
+  while ((m = re.exec(x))) {
     const block = m[2] + m[3]; // attributes + inner elements
     const checkIn = normDate(xmlField(block, RF.checkIn));
     const checkOut = normDate(xmlField(block, RF.checkOut));
