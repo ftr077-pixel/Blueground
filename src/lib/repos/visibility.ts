@@ -323,6 +323,18 @@ export function listListingsByProfile(profileId: string): TrackedListing[] {
   ).map(rowToListing);
 }
 
+/** Link a Hub unit to (at most) one Airbnb listing via tracked_listings.unit_id. */
+export function setUnitListing(unitId: string, listingId: string | null): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    if (listingId) {
+      db.prepare("UPDATE tracked_listings SET unit_id = ? WHERE id = ?").run(unitId, listingId);
+    }
+  });
+  tx();
+}
+
 export function createListing(input: ListingInput): TrackedListing {
   const db = getDb();
   const id = "lst-" + randomUUID().slice(0, 8);
