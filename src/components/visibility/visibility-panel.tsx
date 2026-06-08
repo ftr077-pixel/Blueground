@@ -19,6 +19,7 @@ import {
   economics,
   fmtPct,
   recommend,
+  snapStayPrice,
   type CostDefaults,
   type PricingRules,
   type Rec,
@@ -796,7 +797,7 @@ function ListingRows({
                             : "—"}
                       </td>
                       <td className="px-2 py-1 text-right font-mono">
-                        {money(applyLos(s.price, s.nights, cost))}
+                        {money(applyLos(snapStayPrice(s), s.nights, cost))}
                       </td>
                     </tr>
                   ))}
