@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
 import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
+import type { CostDefaults } from "@/lib/revenue";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
 export interface SearchProfile {
@@ -642,6 +643,24 @@ export function recentSnapshots(listingId: string, limit = 300): ListingSnapshot
 }
 
 // ---------------------------------------------------------------- composed views
+// Operator cost settings (BG/Airbnb fees, default bills, LOS discounts) with the
+// same defaults the dashboard uses. Shared so the learner's profit math matches.
+export function costDefaults(): CostDefaults {
+  const num = (k: string, d: number) => {
+    const v = getSetting(k);
+    return v != null && v !== "" ? Number(v) : d;
+  };
+  return {
+    bgFeePct: num("bg_fee_pct", 6),
+    airbnbFeePct: num("airbnb_fee_pct", 0),
+    defaultUtilities: num("default_utilities", 1000),
+    defaultCleaning: num("default_cleaning", 500),
+    weeklyDiscountPct: num("los_weekly_pct", 0),
+    biWeeklyDiscountPct: num("los_biweekly_pct", 0),
+    monthlyDiscountPct: num("los_monthly_pct", 0),
+  };
+}
+
 export function getDashboard() {
   const profiles = listProfiles();
   const listings = listListings().map((l) => ({ ...l, latest: latestSnapshots(l.id) }));
@@ -653,15 +672,7 @@ export function getDashboard() {
     profiles,
     listings,
     primaryStay: num("primary_stay", 30),
-    costDefaults: {
-      bgFeePct: num("bg_fee_pct", 6),
-      airbnbFeePct: num("airbnb_fee_pct", 0),
-      defaultUtilities: num("default_utilities", 1000),
-      defaultCleaning: num("default_cleaning", 500),
-      weeklyDiscountPct: num("los_weekly_pct", 0),
-      biWeeklyDiscountPct: num("los_biweekly_pct", 0),
-      monthlyDiscountPct: num("los_monthly_pct", 0),
-    },
+    costDefaults: costDefaults(),
     pricingRules: {
       marginLow: num("pr_margin_low", 25),
       marginHigh: num("pr_margin_high", 45),
