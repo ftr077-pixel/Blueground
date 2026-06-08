@@ -649,6 +649,16 @@ export function getDashboard() {
       biWeeklyDiscountPct: num("los_biweekly_pct", 0),
       monthlyDiscountPct: num("los_monthly_pct", 0),
     },
+    pricingRules: {
+      marginLow: num("pr_margin_low", 25),
+      marginHigh: num("pr_margin_high", 45),
+      rankWellPage: num("pr_rank_well_page", 1),
+      buriedPage: num("pr_buried_page", 5),
+      urgentDays: num("pr_urgent_days", 14),
+      relaxedDays: num("pr_relaxed_days", 45),
+      stepPct: num("pr_step_pct", 5),
+      floorMargin: num("pr_floor_margin", 10),
+    },
   };
 }
 

@@ -20,6 +20,16 @@ export async function GET() {
     weeklyDiscountPct: num("los_weekly_pct", 0),
     biWeeklyDiscountPct: num("los_biweekly_pct", 0),
     monthlyDiscountPct: num("los_monthly_pct", 0),
+    pricingRules: {
+      marginLow: num("pr_margin_low", 25),
+      marginHigh: num("pr_margin_high", 45),
+      rankWellPage: num("pr_rank_well_page", 1),
+      buriedPage: num("pr_buried_page", 5),
+      urgentDays: num("pr_urgent_days", 14),
+      relaxedDays: num("pr_relaxed_days", 45),
+      stepPct: num("pr_step_pct", 5),
+      floorMargin: num("pr_floor_margin", 10),
+    },
   });
 }
 
@@ -35,6 +45,16 @@ export async function POST(req: Request) {
     weeklyDiscountPct?: number;
     biWeeklyDiscountPct?: number;
     monthlyDiscountPct?: number;
+    pricingRules?: {
+      marginLow?: number;
+      marginHigh?: number;
+      rankWellPage?: number;
+      buriedPage?: number;
+      urgentDays?: number;
+      relaxedDays?: number;
+      stepPct?: number;
+      floorMargin?: number;
+    };
   } | null;
   if (body == null) return NextResponse.json({ error: "invalid json" }, { status: 400 });
   if (body.proxyUrl !== undefined) setSetting("proxy_url", (body.proxyUrl ?? "").trim());
@@ -56,5 +76,19 @@ export async function POST(req: Request) {
     setSetting("los_biweekly_pct", String(Math.max(0, Math.min(90, body.biWeeklyDiscountPct))));
   if (body.monthlyDiscountPct !== undefined)
     setSetting("los_monthly_pct", String(Math.max(0, Math.min(90, body.monthlyDiscountPct))));
+  const pr = body.pricingRules;
+  if (pr) {
+    const setNum = (key: string, v: number | undefined) => {
+      if (v !== undefined && Number.isFinite(v)) setSetting(key, String(Math.max(0, v)));
+    };
+    setNum("pr_margin_low", pr.marginLow);
+    setNum("pr_margin_high", pr.marginHigh);
+    setNum("pr_rank_well_page", pr.rankWellPage);
+    setNum("pr_buried_page", pr.buriedPage);
+    setNum("pr_urgent_days", pr.urgentDays);
+    setNum("pr_relaxed_days", pr.relaxedDays);
+    setNum("pr_step_pct", pr.stepPct);
+    setNum("pr_floor_margin", pr.floorMargin);
+  }
   return NextResponse.json({ ok: true });
 }

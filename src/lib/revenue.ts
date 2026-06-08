@@ -152,6 +152,101 @@ export function economics(l: DashListing, d: CostDefaults): Economics {
   return { revenue, bgFee, airbnbFee, utilities, cleaning, rent, rentKnown, cost, profit, margin };
 }
 
+export interface PricingRules {
+  marginLow: number; // below this %, a well-ranked listing is "too cheap"
+  marginHigh: number; // above this %, a buried listing is "too expensive"
+  rankWellPage: number; // page <= this counts as ranking well
+  buriedPage: number; // page >= this (or not found) counts as buried
+  urgentDays: number; // available within this many days = act now
+  relaxedDays: number; // available beyond this = no rush
+  stepPct: number; // suggested price change size
+  floorMargin: number; // never suggest lowering below this %
+}
+
+export type RecAction = "raise" | "lower" | "hold" | "review" | "none";
+
+export interface Rec {
+  action: RecAction;
+  urgency: "now" | "soon" | "later" | null;
+  reason: string;
+  suggested: number | null;
+}
+
+// Earliest scanned check-in for a stay length — the soonest booking window.
+export function primaryCheckIn(l: DashListing, nights: number): string | null {
+  const rows = l.latest.filter((s) => s.nights === nights && s.checkIn);
+  if (!rows.length) return null;
+  return rows.reduce((b, s) => (s.checkIn < b.checkIn ? s : b)).checkIn;
+}
+export function leadDays(checkIn: string | null): number | null {
+  if (!checkIn) return null;
+  const dt = new Date(`${checkIn}T00:00:00`);
+  if (Number.isNaN(dt.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((dt.getTime() - today.getTime()) / 86_400_000);
+}
+
+const roundTo = (n: number, step: number) => Math.round(n / step) * step;
+
+// Price recommendation from position x margin, with lead-time urgency.
+export function recommend(
+  l: DashListing,
+  d: CostDefaults,
+  r: PricingRules,
+  primaryStay: number,
+): Rec {
+  const e = economics(l, d);
+  if (e.revenue == null)
+    return { action: "none", urgency: null, reason: "no price scanned yet", suggested: null };
+  if (!e.rentKnown)
+    return { action: "none", urgency: null, reason: "set rent for a recommendation", suggested: null };
+
+  const page = bestPage(l, primaryStay);
+  const marginPct = Math.round((e.margin ?? 0) * 100);
+  const rankingWell = page != null && page <= r.rankWellPage;
+  const buried = page == null || page >= r.buriedPage;
+  const lead = leadDays(primaryCheckIn(l, primaryStay));
+  const urgency: Rec["urgency"] =
+    lead == null ? "later" : lead <= r.urgentDays ? "now" : lead >= r.relaxedDays ? "later" : "soon";
+
+  let action: RecAction = "hold";
+  let reason = `priced about right (${marginPct}% margin${page != null ? `, page ${page}` : ""})`;
+  if (rankingWell && marginPct < r.marginLow) {
+    action = "raise";
+    reason = `page ${page} but only ${marginPct}% margin — room to charge more`;
+  } else if (buried && marginPct > r.marginHigh) {
+    action = "lower";
+    reason = `${page == null ? "not in search" : `page ${page}`} at ${marginPct}% margin — likely overpriced`;
+  } else if (buried && marginPct <= r.marginLow) {
+    action = "review";
+    reason = `buried and thin (${marginPct}%) — can't fix on price alone`;
+  }
+
+  let suggested: number | null = null;
+  if (action === "raise") {
+    suggested = roundTo(e.revenue * (1 + r.stepPct / 100), 50);
+  } else if (action === "lower") {
+    const feePct = (d.bgFeePct + d.airbnbFeePct) / 100;
+    const fixed =
+      (l.utilities ?? d.defaultUtilities) +
+      (l.cleaningFee ?? d.defaultCleaning) +
+      (l.monthlyRent ?? 0);
+    const denom = 1 - feePct - r.floorMargin / 100;
+    const minRev = denom > 0 ? fixed / denom : Infinity;
+    const target = Math.max(e.revenue * (1 - r.stepPct / 100), minRev);
+    suggested = target < e.revenue ? roundTo(target, 50) : null;
+    if (suggested == null) {
+      action = "review";
+      reason = "overpriced but already near your floor margin — needs a non-price fix";
+    }
+  }
+  if (action === "lower" && urgency === "later" && lead != null) {
+    reason = `${reason}; ${lead}d out, watch for now`;
+  }
+  return { action, urgency, reason, suggested };
+}
+
 export const CHART = {
   grid: "hsl(214 32% 91%)",
   axis: "hsl(215 16% 47%)",
