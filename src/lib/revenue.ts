@@ -26,6 +26,7 @@ export interface DashListing {
   monthlyRent: number | null;
   utilities: number | null;
   cleaningFee: number | null;
+  address: string | null;
   active: boolean;
   latest: DashSnapshot[];
 }
@@ -39,10 +40,21 @@ export interface DashProfile {
   active: boolean;
 }
 
+export interface CostDefaults {
+  bgFeePct: number;
+  airbnbFeePct: number;
+  defaultUtilities: number;
+  defaultCleaning: number;
+  weeklyDiscountPct: number;
+  biWeeklyDiscountPct: number;
+  monthlyDiscountPct: number;
+}
+
 export interface Dashboard {
   profiles: DashProfile[];
   listings: DashListing[];
   primaryStay: number;
+  costDefaults: CostDefaults;
 }
 
 export const STAY_LABELS: Record<number, string> = {
@@ -76,8 +88,8 @@ export function availableForStay(l: DashListing, nights: number): boolean {
   return l.latest.some((s) => s.nights === nights && (s.available === true || s.found));
 }
 
-// Monthly (30-night) price — our revenue proxy for a one-month booking.
-export function monthlyPrice(l: DashListing): number | null {
+// The scraped list price (gross, before length-of-stay discount) for 30 nights.
+export function rawMonthlyPrice(l: DashListing): number | null {
   const rows = l.latest.filter((s) => s.nights === 30);
   const found = rows.filter((s) => s.found && s.price != null && s.page != null);
   if (found.length)
@@ -85,23 +97,59 @@ export function monthlyPrice(l: DashListing): number | null {
   return rows.find((s) => s.price != null)?.price ?? null;
 }
 
+export type LosDiscounts = {
+  weeklyDiscountPct: number;
+  biWeeklyDiscountPct: number;
+  monthlyDiscountPct: number;
+};
+
+// Fixed length-of-stay discount for a stay of `nights`: monthly for 28+,
+// two-week for 14-27, weekly for 7-13, none below a week.
+export function losDiscountPct(nights: number, d: LosDiscounts): number {
+  if (nights >= 28) return d.monthlyDiscountPct;
+  if (nights >= 14) return d.biWeeklyDiscountPct;
+  if (nights >= 7) return d.weeklyDiscountPct;
+  return 0;
+}
+export function applyLos(raw: number | null, nights: number, d: LosDiscounts): number | null {
+  if (raw == null) return null;
+  return raw * (1 - losDiscountPct(nights, d) / 100);
+}
+
+// Monthly revenue = the 1-month list price with your fixed monthly discount applied.
+export function monthlyPrice(l: DashListing, d: CostDefaults): number | null {
+  return applyLos(rawMonthlyPrice(l), 30, d);
+}
+
 export interface Economics {
   revenue: number | null;
+  bgFee: number | null;
+  airbnbFee: number | null;
+  utilities: number;
+  cleaning: number;
+  rent: number | null;
+  rentKnown: boolean;
   cost: number | null;
   profit: number | null;
   margin: number | null;
-  costsKnown: boolean;
 }
 
-// Monthly economics: revenue (1-month price) minus rent + utilities + cleaning.
-export function economics(l: DashListing): Economics {
-  const revenue = monthlyPrice(l);
-  const parts = [l.monthlyRent, l.utilities, l.cleaningFee];
-  const costsKnown = parts.some((c) => c != null);
-  const cost = costsKnown ? parts.reduce<number>((s, c) => s + (c ?? 0), 0) : null;
+// Monthly economics. Revenue = 1-month price. Costs = BG franchise fee (% of
+// gross revenue) + utilities + cleaning + rent. Utilities and cleaning fall back
+// to the configured defaults; rent has no default (set per property).
+export function economics(l: DashListing, d: CostDefaults): Economics {
+  const revenue = monthlyPrice(l, d);
+  const bgFee = revenue != null ? (revenue * d.bgFeePct) / 100 : null;
+  const airbnbFee = revenue != null ? (revenue * d.airbnbFeePct) / 100 : null;
+  const utilities = l.utilities ?? d.defaultUtilities;
+  const cleaning = l.cleaningFee ?? d.defaultCleaning;
+  const rent = l.monthlyRent;
+  const rentKnown = rent != null;
+  const cost =
+    revenue != null ? (bgFee ?? 0) + (airbnbFee ?? 0) + utilities + cleaning + (rent ?? 0) : null;
   const profit = revenue != null && cost != null ? revenue - cost : null;
   const margin = profit != null && revenue ? profit / revenue : null;
-  return { revenue, cost, profit, margin, costsKnown };
+  return { revenue, bgFee, airbnbFee, utilities, cleaning, rent, rentKnown, cost, profit, margin };
 }
 
 export const CHART = {

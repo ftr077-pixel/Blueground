@@ -48,8 +48,7 @@ function Stat({ label, value, tone = "text-foreground" }: { label: string; value
 }
 
 const SUBTABS = [
-  { href: "/visibility", label: "Search Visibility" },
-  { href: "/visibility/profitability", label: "Profitability" },
+  { href: "/visibility", label: "Search & Profit" },
   { href: "/visibility/analytics", label: "Position Trends" },
   { href: "/visibility/pricing", label: "Pricing vs Rank" },
   { href: "/visibility/portfolio", label: "Portfolio" },
@@ -71,7 +70,7 @@ export function OverviewPanel() {
   if (!data) return null;
 
   const primary = data.primaryStay;
-  const eco = data.listings.map((l) => economics(l));
+  const eco = data.listings.map((l) => economics(l, data.costDefaults));
   const totRev = eco.reduce((s, e) => s + (e.revenue ?? 0), 0);
   const totProfit = eco.reduce((s, e) => s + (e.profit ?? 0), 0);
   const knownRev = eco.filter((e) => e.profit != null).reduce((s, e) => s + (e.revenue ?? 0), 0);
@@ -84,7 +83,7 @@ export function OverviewPanel() {
   const barData = data.listings
     .map((l) => ({
       name: l.label.length > 14 ? `${l.label.slice(0, 13)}…` : l.label,
-      profit: economics(l).profit,
+      profit: economics(l, data.costDefaults).profit,
     }))
     .filter((d): d is { name: string; profit: number } => d.profit != null)
     .sort((a, b) => b.profit - a.profit)

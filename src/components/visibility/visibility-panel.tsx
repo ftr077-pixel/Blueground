@@ -14,6 +14,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatRelative } from "@/lib/utils";
+import { applyLos, economics, fmtPct, type CostDefaults } from "@/lib/revenue";
 
 interface Snapshot {
   id: string;
@@ -49,6 +50,10 @@ interface Listing {
   profileId: string;
   guests: number | null;
   minNights: number | null;
+  address: string | null;
+  monthlyRent: number | null;
+  utilities: number | null;
+  cleaningFee: number | null;
   active: boolean;
   latest: Snapshot[];
 }
@@ -141,6 +146,15 @@ export function VisibilityPanel() {
   const [primaryStay, setPrimaryStay] = useState(30);
   const [showAllStays, setShowAllStays] = useState(false);
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "primary", dir: 1 });
+  const [cost, setCost] = useState<CostDefaults>({
+    bgFeePct: 6,
+    airbnbFeePct: 0,
+    defaultUtilities: 1000,
+    defaultCleaning: 500,
+    weeklyDiscountPct: 0,
+    biWeeklyDiscountPct: 0,
+    monthlyDiscountPct: 0,
+  });
 
   async function refresh() {
     try {
@@ -150,10 +164,12 @@ export function VisibilityPanel() {
         profiles: Profile[];
         listings: Listing[];
         primaryStay?: number;
+        costDefaults?: Partial<CostDefaults>;
       };
       setProfiles(body.profiles);
       setListings(body.listings);
       if (body.primaryStay) setPrimaryStay(body.primaryStay);
+      if (body.costDefaults) setCost((c) => ({ ...c, ...body.costDefaults }));
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to load");
     } finally {
@@ -314,11 +330,15 @@ export function VisibilityPanel() {
 
   const primaryLabel = nightsLabel(primaryStay);
   const pcells = listings.map((l) => stayCell(l.latest, primaryLabel));
+  const ecos = listings.map((l) => economics(l, cost));
   const total = listings.length;
   const available = pcells.filter((c) => c.kind === "ranked" || c.kind === "buried").length;
-  const inSearch = pcells.filter((c) => c.kind === "ranked").length;
   const page1 = pcells.filter((c) => c.kind === "ranked" && c.page === 1).length;
-  const stat = (label: string, value: number, tone = "text-foreground") => (
+  const totRevenue = ecos.reduce((s, e) => s + (e.revenue ?? 0), 0);
+  const totProfit = ecos.reduce((s, e) => s + (e.profit ?? 0), 0);
+  const knownRev = ecos.filter((e) => e.profit != null).reduce((s, e) => s + (e.revenue ?? 0), 0);
+  const avgMargin = knownRev ? totProfit / knownRev : null;
+  const stat = (label: string, value: number | string, tone = "text-foreground") => (
     <div>
       <div className={`text-2xl font-semibold tracking-tight ${tone}`}>{value}</div>
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
@@ -336,8 +356,14 @@ export function VisibilityPanel() {
         <CardContent className="flex flex-wrap items-center gap-x-10 gap-y-3 p-5">
           {stat("Listings", total)}
           {stat(`Available · ${primaryLabel}`, available, "text-[hsl(var(--success))]")}
-          {stat(`In search · ${primaryLabel}`, inSearch, "text-primary")}
-          {stat(`Page 1 · ${primaryLabel}`, page1, "text-[hsl(var(--success))]")}
+          {stat(`Page 1 · ${primaryLabel}`, page1, "text-primary")}
+          {stat("Monthly revenue", money(totRevenue))}
+          {stat(
+            "Monthly profit",
+            money(totProfit),
+            totProfit >= 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--danger))]",
+          )}
+          {stat("Avg margin", fmtPct(avgMargin))}
         </CardContent>
       </Card>
 
@@ -382,6 +408,7 @@ export function VisibilityPanel() {
             l,
             pc: stayCell(l.latest, primaryLabel),
             h: headline(l.latest, primaryLabel),
+            e: economics(l, cost),
           }))
           .filter(({ l, pc }) => matches(l, pc))
           .sort((a, b) => {
@@ -389,7 +416,10 @@ export function VisibilityPanel() {
             let d = 0;
             if (key === "name") d = a.l.label.localeCompare(b.l.label);
             else if (key === "checkin") d = cmpStr(a.h.checkIn, b.h.checkIn);
-            else if (key === "price") d = cmpNum(a.h.price, b.h.price);
+            else if (key === "revenue") d = cmpNum(a.e.revenue, b.e.revenue);
+            else if (key === "rent") d = cmpNum(a.e.rent, b.e.rent);
+            else if (key === "profit") d = cmpNum(a.e.profit, b.e.profit);
+            else if (key === "margin") d = cmpNum(a.e.margin, b.e.margin);
             else if (key.startsWith("stay:"))
               d =
                 cellRank(stayCell(a.l.latest, key.slice(5))) -
@@ -398,7 +428,7 @@ export function VisibilityPanel() {
             if (d === 0) d = a.l.label.localeCompare(b.l.label);
             return d * dir;
           });
-        const colSpan = stayCols.length + 5;
+        const colSpan = stayCols.length + 8;
         return (
           <Card key={p.id}>
             <CardHeader className="pb-3">
@@ -450,9 +480,27 @@ export function VisibilityPanel() {
                       </th>
                       <th
                         className="cursor-pointer select-none px-3 py-2 text-right hover:text-foreground"
-                        onClick={() => onSort("price")}
+                        onClick={() => onSort("revenue")}
                       >
-                        Price{arrow("price")}
+                        Revenue{arrow("revenue")}
+                      </th>
+                      <th
+                        className="cursor-pointer select-none px-3 py-2 text-right hover:text-foreground"
+                        onClick={() => onSort("rent")}
+                      >
+                        Rent{arrow("rent")}
+                      </th>
+                      <th
+                        className="cursor-pointer select-none px-3 py-2 text-right hover:text-foreground"
+                        onClick={() => onSort("profit")}
+                      >
+                        Profit{arrow("profit")}
+                      </th>
+                      <th
+                        className="cursor-pointer select-none px-3 py-2 text-right hover:text-foreground"
+                        onClick={() => onSort("margin")}
+                      >
+                        Margin{arrow("margin")}
                       </th>
                       <th className="px-2 py-2" />
                     </tr>
@@ -465,13 +513,15 @@ export function VisibilityPanel() {
                         </td>
                       </tr>
                     ) : (
-                      rows.map(({ l, h }) => (
+                      rows.map(({ l, h, e }) => (
                         <ListingRows
                           key={l.id}
                           l={l}
                           h={h}
+                          e={e}
                           stayCols={stayCols}
                           colSpan={colSpan}
+                          cost={cost}
                           isOpen={open.has(l.id)}
                           onToggle={() => toggle(l.id)}
                           selected={selected.has(l.id)}
@@ -515,8 +565,10 @@ function StayCell({ cell }: { cell: ReturnType<typeof stayCell> }) {
 function ListingRows({
   l,
   h,
+  e,
   stayCols,
   colSpan,
+  cost,
   isOpen,
   onToggle,
   selected,
@@ -524,8 +576,10 @@ function ListingRows({
 }: {
   l: Listing;
   h: ReturnType<typeof headline>;
+  e: ReturnType<typeof economics>;
   stayCols: string[];
   colSpan: number;
+  cost: CostDefaults;
   isOpen: boolean;
   onToggle: () => void;
   selected: boolean;
@@ -549,6 +603,7 @@ function ListingRows({
             {l.airbnbId}
             {l.guests != null && ` · ${l.guests} guests`}
           </div>
+          {l.address && <div className="text-[10px] text-muted-foreground">{l.address}</div>}
         </td>
         {stayCols.map((c) => (
           <td key={c} className="px-3 py-2 text-center font-mono">
@@ -561,7 +616,26 @@ function ListingRows({
         >
           {fmtDate(h.checkIn)}
         </td>
-        <td className="px-3 py-2 text-right font-mono">{money(h.price)}</td>
+        <td className="px-3 py-2 text-right font-mono">{money(e.revenue)}</td>
+        <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+          {e.rentKnown ? money(e.rent) : <span className="italic">set rent</span>}
+        </td>
+        <td
+          className={`px-3 py-2 text-right font-mono ${
+            e.profit == null
+              ? "text-muted-foreground"
+              : e.profit >= 0
+                ? "text-[hsl(var(--success))]"
+                : "text-[hsl(var(--danger))]"
+          }`}
+          title={`BG fee ${money(e.bgFee)} · Airbnb fee ${money(e.airbnbFee)} · utilities ${money(
+            e.utilities,
+          )} · cleaning ${money(e.cleaning)}`}
+        >
+          {money(e.profit)}
+          {!e.rentKnown && e.profit != null && <span title="rent not set">*</span>}
+        </td>
+        <td className="px-3 py-2 text-right font-mono">{fmtPct(e.margin)}</td>
         <td className="px-2 py-2 text-muted-foreground">
           {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </td>
@@ -605,7 +679,9 @@ function ListingRows({
                             ? "not in top 280"
                             : "—"}
                       </td>
-                      <td className="px-2 py-1 text-right font-mono">{money(s.price)}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {money(applyLos(s.price, s.nights, cost))}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

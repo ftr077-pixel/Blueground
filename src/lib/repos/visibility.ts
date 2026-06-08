@@ -35,6 +35,7 @@ export interface TrackedListing {
   monthlyRent: number | null;
   utilities: number | null;
   cleaningFee: number | null;
+  address: string | null;
   active: boolean;
   createdAt: string;
 }
@@ -95,6 +96,7 @@ interface ListingSql {
   monthly_rent: number | null;
   utilities: number | null;
   cleaning_fee: number | null;
+  address: string | null;
   active: number;
   created_at: string;
 }
@@ -158,6 +160,7 @@ function rowToListing(r: ListingSql): TrackedListing {
     monthlyRent: r.monthly_rent,
     utilities: r.utilities,
     cleaningFee: r.cleaning_fee,
+    address: r.address,
     active: !!r.active,
     createdAt: r.created_at,
   };
@@ -294,6 +297,7 @@ export interface ListingInput {
   monthlyRent?: number | null;
   utilities?: number | null;
   cleaningFee?: number | null;
+  address?: string | null;
 }
 
 export function getListing(id: string): TrackedListing | null {
@@ -323,9 +327,9 @@ export function createListing(input: ListingInput): TrackedListing {
   const id = "lst-" + randomUUID().slice(0, 8);
   db.prepare(
     `INSERT INTO tracked_listings
-      (id, airbnb_id, label, platform, profile_id, unit_id, guests, start_dates, min_nights, min_nights_checked_at, monthly_rent, utilities, cleaning_fee, active, created_at)
+      (id, airbnb_id, label, platform, profile_id, unit_id, guests, start_dates, min_nights, min_nights_checked_at, monthly_rent, utilities, cleaning_fee, address, active, created_at)
      VALUES
-      (@id, @airbnb_id, @label, @platform, @profile_id, @unit_id, @guests, @start_dates, NULL, NULL, @monthly_rent, @utilities, @cleaning_fee, 1, @created_at)`,
+      (@id, @airbnb_id, @label, @platform, @profile_id, @unit_id, @guests, @start_dates, NULL, NULL, @monthly_rent, @utilities, @cleaning_fee, @address, 1, @created_at)`,
   ).run({
     id,
     airbnb_id: input.airbnbId,
@@ -339,6 +343,7 @@ export function createListing(input: ListingInput): TrackedListing {
     monthly_rent: input.monthlyRent ?? null,
     utilities: input.utilities ?? null,
     cleaning_fee: input.cleaningFee ?? null,
+    address: input.address ?? null,
     created_at: new Date().toISOString(),
   });
   return getListing(id)!;
@@ -355,6 +360,7 @@ export function updateListing(
     monthlyRent?: number | null;
     utilities?: number | null;
     cleaningFee?: number | null;
+    address?: string | null;
   },
 ): void {
   const db = getDb();
@@ -365,10 +371,11 @@ export function updateListing(
   const monthlyRent = patch.monthlyRent !== undefined ? patch.monthlyRent : cur.monthlyRent;
   const utilities = patch.utilities !== undefined ? patch.utilities : cur.utilities;
   const cleaningFee = patch.cleaningFee !== undefined ? patch.cleaningFee : cur.cleaningFee;
+  const address = patch.address !== undefined ? patch.address : cur.address;
   db.prepare(
     `UPDATE tracked_listings SET label=@label, active=@active, profile_id=@profile_id,
        guests=@guests, start_dates=@start_dates, monthly_rent=@monthly_rent,
-       utilities=@utilities, cleaning_fee=@cleaning_fee WHERE id=@id`,
+       utilities=@utilities, cleaning_fee=@cleaning_fee, address=@address WHERE id=@id`,
   ).run({
     id,
     label: patch.label ?? cur.label,
@@ -379,6 +386,7 @@ export function updateListing(
     monthly_rent: monthlyRent ?? null,
     utilities: utilities ?? null,
     cleaning_fee: cleaningFee ?? null,
+    address: address ?? null,
   });
 }
 
@@ -389,6 +397,92 @@ export function deleteListing(id: string): void {
     db.prepare("DELETE FROM tracked_listings WHERE id = ?").run(id);
   });
   tx();
+}
+
+// Bulk-set rent (and address) from pasted rows. Each row is
+// "[index] <key> <rent>" (tab- or space-separated). The key is an Airbnb ID
+// (matched exactly) or a listing name/address (matched against the label,
+// ignoring case/punctuation). Unmatched rows are returned for review.
+function importTokens(line: string): string[] {
+  return (line.includes("\t") ? line.split("\t") : line.split(/\s{2,}/))
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+export function bulkSetRentAddress(text: string): {
+  updated: number;
+  unmatched: string[];
+  sampleListings: string[];
+  listingCount: number;
+} {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const listings = listListings();
+  const byAirbnb = new Map<string, TrackedListing>();
+  const byName = new Map<string, TrackedListing[]>();
+  for (const l of listings) {
+    byAirbnb.set(String(l.airbnbId), l);
+    const k = norm(l.label);
+    const arr = byName.get(k) ?? [];
+    arr.push(l);
+    byName.set(k, arr);
+  }
+  const findByKey = (key: string): TrackedListing | undefined => {
+    if (/^\d{7,}$/.test(key)) return byAirbnb.get(key);
+    const n = norm(key);
+    if (!n) return undefined;
+    const m = byName.get(n);
+    return m && m.length === 1 ? m[0] : undefined;
+  };
+
+  let updated = 0;
+  const unmatched: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const cells = importTokens(line);
+    if (cells.length < 2) {
+      unmatched.push(line);
+      continue;
+    }
+    const rent = parseFloat(cells[cells.length - 1].replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(rent)) {
+      unmatched.push(line);
+      continue;
+    }
+
+    // Try several keys per row: each leading cell as-is, plus the bare number
+    // from a tag like "#TLV12" — so listings named by address, by "TLV12", or by
+    // plain index all match.
+    const idCells = cells.slice(0, -1);
+    const candidates: string[] = [];
+    for (const c of idCells) {
+      if (norm(c)) candidates.push(c);
+      if (/tlv/i.test(c) || /^#?\d{1,4}$/.test(c)) {
+        const d = c.replace(/\D/g, "");
+        if (d) candidates.push(d);
+      }
+    }
+    // The address is the cell that reads like one (a letter plus a space/comma).
+    const address = idCells.find((c) => /[a-z]/i.test(c) && /[\s,]/.test(c)) ?? null;
+
+    let target: TrackedListing | undefined;
+    for (const cand of candidates) {
+      target = findByKey(cand);
+      if (target) break;
+    }
+    if (!target) {
+      unmatched.push(line);
+      continue;
+    }
+    updateListing(target.id, { monthlyRent: rent, ...(address ? { address } : {}) });
+    updated++;
+  }
+  return {
+    updated,
+    unmatched,
+    sampleListings: listings.slice(0, 12).map((l) => l.label),
+    listingCount: listings.length,
+  };
 }
 
 // Parse pasted listings — one per line. Handles plain Airbnb IDs, room URLs, and
@@ -538,7 +632,24 @@ export function recentSnapshots(listingId: string, limit = 300): ListingSnapshot
 export function getDashboard() {
   const profiles = listProfiles();
   const listings = listListings().map((l) => ({ ...l, latest: latestSnapshots(l.id) }));
-  return { profiles, listings, primaryStay: Number(getSetting("primary_stay")) || 30 };
+  const num = (k: string, d: number) => {
+    const v = getSetting(k);
+    return v != null && v !== "" ? Number(v) : d;
+  };
+  return {
+    profiles,
+    listings,
+    primaryStay: num("primary_stay", 30),
+    costDefaults: {
+      bgFeePct: num("bg_fee_pct", 6),
+      airbnbFeePct: num("airbnb_fee_pct", 0),
+      defaultUtilities: num("default_utilities", 1000),
+      defaultCleaning: num("default_cleaning", 500),
+      weeklyDiscountPct: num("los_weekly_pct", 0),
+      biWeeklyDiscountPct: num("los_biweekly_pct", 0),
+      monthlyDiscountPct: num("los_monthly_pct", 0),
+    },
+  };
 }
 
 // What the scraper box pulls: active profiles, each with its active listings.
