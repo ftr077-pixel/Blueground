@@ -37,6 +37,7 @@ export async function POST(req: Request) {
     runId: input.runId,
     snapshots: input.snapshots,
     listingMinNights: input.listingMinNights,
+    searchResults: input.searchResults,
   });
   return NextResponse.json({ ok: true, recorded });
 }

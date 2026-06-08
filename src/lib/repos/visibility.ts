@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
+import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
 export interface SearchProfile {
@@ -556,6 +557,9 @@ export interface RecordRunInput {
     currency?: string | null;
   }>;
   listingMinNights?: Record<string, number | null>;
+  // Full competitor price ladder per search, captured alongside our listings'
+  // snapshots in the same run (optional — older scrapers omit it).
+  searchResults?: SearchResultsInput[];
 }
 
 export function recordRun(input: RecordRunInput): number {
@@ -598,6 +602,15 @@ export function recordRun(input: RecordRunInput): number {
         "UPDATE tracked_listings SET min_nights = ?, min_nights_checked_at = ? WHERE id = ?",
       );
       for (const [lid, mn] of Object.entries(input.listingMinNights)) upd.run(mn ?? null, ts, lid);
+    }
+    // Ladder shares the run's id + ts so it lines up with the snapshots above.
+    if (input.searchResults?.length) {
+      insertSearchResults(db, {
+        profileId: input.profileId,
+        runId: input.runId,
+        ts,
+        searches: input.searchResults,
+      });
     }
   });
   tx();
