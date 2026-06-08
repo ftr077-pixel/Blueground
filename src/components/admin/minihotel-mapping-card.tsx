@@ -18,6 +18,12 @@ interface Row {
   neighborhood: string;
   platform: string;
   roomType: string | null;
+  airbnbListingId?: string | null;
+}
+interface AirbnbOption {
+  id: string;
+  label: string;
+  airbnbId: string;
 }
 
 export function MiniHotelMappingCard() {
@@ -29,12 +35,15 @@ export function MiniHotelMappingCard() {
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [airbnbListings, setAirbnbListings] = useState<AirbnbOption[]>([]);
+  const [linkingId, setLinkingId] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch("/api/integrations/minihotel/mapping", { cache: "no-store" })
       .then((r) => r.json())
-      .then((d: { rows: Row[] }) => {
+      .then((d: { rows: Row[]; airbnbListings?: AirbnbOption[] }) => {
         setRows(d.rows);
+        setAirbnbListings(d.airbnbListings ?? []);
         const next: Record<string, string> = {};
         for (const r of d.rows) next[r.unitId] = r.roomType ?? "";
         setDraft(next);
@@ -108,6 +117,20 @@ export function MiniHotelMappingCard() {
     }
   }
 
+  async function setListing(unitId: string, listingId: string) {
+    setLinkingId(unitId);
+    try {
+      await fetch("/api/integrations/minihotel/mapping", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unitId, listingId: listingId || null }),
+      });
+      load();
+    } finally {
+      setLinkingId(null);
+    }
+  }
+
   const mapped = Object.values(draft).filter((v) => v.trim()).length;
 
   return (
@@ -139,6 +162,7 @@ export function MiniHotelMappingCard() {
                   <th className="py-2 pr-3 font-medium">Apartment (this app)</th>
                   <th className="py-2 pr-3 font-medium">Neighborhood</th>
                   <th className="py-2 pr-3 font-medium">MiniHotel room-type code</th>
+                  <th className="py-2 pr-3 font-medium">Airbnb listing</th>
                   <th className="py-2 font-medium text-right">Remove</th>
                 </tr>
               </thead>
@@ -159,6 +183,23 @@ export function MiniHotelMappingCard() {
                         placeholder="e.g. DBL, 2BEDAPT"
                         onChange={(e) => setDraft((d) => ({ ...d, [r.unitId]: e.target.value }))}
                       />
+                    </td>
+                    <td className="py-1.5 pr-3">
+                      <select
+                        className={`${input} w-48`}
+                        value={r.airbnbListingId ?? ""}
+                        disabled={linkingId === r.unitId || airbnbListings.length === 0}
+                        onChange={(e) => setListing(r.unitId, e.target.value)}
+                      >
+                        <option value="">
+                          {airbnbListings.length ? "— not linked —" : "no Airbnb listings yet"}
+                        </option>
+                        {airbnbListings.map((l) => (
+                          <option key={l.id} value={l.id}>
+                            {l.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td className="py-1.5 text-right">
                       <button
