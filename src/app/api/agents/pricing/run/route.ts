@@ -14,7 +14,7 @@ export async function POST() {
       noOps: result.noOps.length,
     },
     decisions: result.decisions.map((d) => ({
-      unit: { id: d.unit.id, name: d.unit.name, neighborhood: d.unit.neighborhood },
+      unit: { id: d.unitId, name: d.unitName, neighborhood: d.neighborhood },
       oldRate: d.oldRate,
       newRate: d.newRate,
       deltaPct: Number(d.deltaPct.toFixed(2)),
@@ -24,6 +24,9 @@ export async function POST() {
       effectiveMonthlyRate: d.effectiveMonthlyRate,
       minStay: d.minStay,
       prevMinStay: d.prevMinStay,
+      minStaySource: d.minStaySource,
+      leadDays: d.leadDays,
+      factors: d.factors,
     })),
   });
 }
