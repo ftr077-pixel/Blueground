@@ -38,8 +38,8 @@ export type Period = "month" | "quarter" | "year";
 
 // Computed model with overrides applied + aggregated to the requested period.
 // The chart always uses the monthly series; the table uses the period buckets.
-export function getBridgeView(period: Period) {
-  const overrides = getOverrides();
+export function getBridgeView(period: Period, base = false) {
+  const overrides = base ? {} : getOverrides();
   const result = computeBridge(overrides);
   const agg = aggregate(result, period);
   return {
