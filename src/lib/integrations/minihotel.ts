@@ -5,6 +5,7 @@ import {
   type MiniHotelConnection,
 } from "@/lib/repos/integrations";
 import { upsertOverride } from "@/lib/repos/rates";
+import { upsertImportedUnit, deleteUnitsByIdPrefix } from "@/lib/repos/units";
 import { upsertReservations, reservationStats } from "@/lib/repos/reservations";
 
 /**
@@ -221,6 +222,115 @@ export async function syncFromMiniHotel(opts: {
     unmappedTypes: [...unmapped].sort(),
     errors,
   };
+}
+
+// ----------------------------------------------------- apartment import
+export interface RoomTypeInfo {
+  code: string;
+  description: string;
+}
+
+export interface ImportResult {
+  ok: boolean;
+  imported: number;
+  removedDemo: number;
+  apartments: { id: string; name: string; code: string }[];
+  errors: string[];
+  message?: string;
+}
+
+export function buildRoomTypesRequest(conn: MiniHotelConnection): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<Request><Settings name="getRoomTypes">' +
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}"/>` +
+    `<Hotel id="${escXml(conn.hotelId)}" />` +
+    "</Settings></Request>"
+  );
+}
+
+/** Parse a getRoomTypes response (<ArrayOfRoomTypes><RoomTypes><Type/><Description/>…). */
+export function parseRoomTypes(xml: string): RoomTypeInfo[] {
+  const out: RoomTypeInfo[] = [];
+  const re = /<RoomTypes\b[^>]*>([\s\S]*?)<\/RoomTypes>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const block = m[1];
+    const code = (block.match(/<Type>([\s\S]*?)<\/Type>/i)?.[1] ?? "").trim();
+    if (!code) continue;
+    const desc = (block.match(/<Description>([\s\S]*?)<\/Description>/i)?.[1] ?? "").trim();
+    out.push({ code, description: desc || code });
+  }
+  return out;
+}
+
+export async function fetchRoomTypes(conn: MiniHotelConnection): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const url = `${ep.content}/agents/ws/settings/rooms/RoomsMain.asmx/getRoomTypes`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildRoomTypesRequest(conn),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Import the hotel's room types from MiniHotel as real Hub apartments, each
+ * auto-mapped to its MiniHotel code. Optionally removes the demo seed units
+ * (ids prefixed "BG-"). Rates fill in when the operator runs Sync.
+ */
+export async function importApartmentsFromMiniHotel(opts: {
+  xml?: string;
+  replaceDemo?: boolean;
+}): Promise<ImportResult> {
+  const conn = getMiniHotelConnection();
+  let xml = opts.xml;
+  if (!xml) {
+    if (!conn.username || !conn.password || !conn.hotelId) {
+      return {
+        ok: false,
+        imported: 0,
+        removedDemo: 0,
+        apartments: [],
+        errors: [],
+        message: "MiniHotel connection isn't configured — set it in Settings first.",
+      };
+    }
+    xml = await fetchRoomTypes(conn);
+  }
+
+  const errors = parseAriErrors(xml);
+  const types = parseRoomTypes(xml);
+  if (types.length === 0) {
+    return {
+      ok: false,
+      imported: 0,
+      removedDemo: 0,
+      apartments: [],
+      errors,
+      message: errors.length
+        ? `MiniHotel returned: ${errors.join(" | ")}`
+        : "No room types returned by MiniHotel.",
+    };
+  }
+
+  const apartments = types.map((t) => ({ id: `MH-${t.code}`, name: t.description, code: t.code }));
+  for (const a of apartments) {
+    upsertImportedUnit({ id: a.id, name: a.name, platform: "MiniHotel", minihotelRoomType: a.code });
+  }
+  const removedDemo = opts.replaceDemo ? deleteUnitsByIdPrefix("BG-") : 0;
+
+  return { ok: true, imported: apartments.length, removedDemo, apartments, errors };
 }
 
 // ============================================================ reservations (actuals)

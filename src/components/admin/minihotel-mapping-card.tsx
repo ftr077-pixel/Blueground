@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Link2, Loader2 } from "lucide-react";
+import { DownloadCloud, Link2, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -9,6 +9,8 @@ const input =
   "rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:border-primary/50";
 const btn =
   "inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50";
+const btnGhost =
+  "inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
 
 interface Row {
   unitId: string;
@@ -24,6 +26,8 @@ export function MiniHotelMappingCard() {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importMsg, setImportMsg] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch("/api/integrations/minihotel/mapping", { cache: "no-store" })
@@ -54,6 +58,37 @@ export function MiniHotelMappingCard() {
       load();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function importFromMiniHotel() {
+    if (
+      !window.confirm(
+        "Import your apartments from MiniHotel and remove the demo apartments? This replaces the current list; rates fill in when you Sync.",
+      )
+    )
+      return;
+    setImporting(true);
+    setImportMsg(null);
+    try {
+      const r = await fetch("/api/integrations/minihotel/import-apartments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ replaceDemo: true }),
+      });
+      const d = (await r.json()) as { ok: boolean; imported?: number; removedDemo?: number; message?: string };
+      if (d.ok) {
+        setImportMsg(
+          `Imported ${d.imported ?? 0} apartment(s) from MiniHotel${d.removedDemo ? `, removed ${d.removedDemo} demo` : ""}. Codes were auto-filled — review, then Sync to pull rates.`,
+        );
+        load();
+      } else {
+        setImportMsg(d.message || "Import failed.");
+      }
+    } catch (e) {
+      setImportMsg(e instanceof Error ? e.message : "import failed");
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -113,15 +148,20 @@ export function MiniHotelMappingCard() {
             </table>
           </div>
         )}
-        <div className="mt-3 flex items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" disabled={busy || !loaded} onClick={save} className={btn}>
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             {saved ? "Saved ✓" : "Save mapping"}
           </button>
+          <button type="button" disabled={importing} onClick={importFromMiniHotel} className={btnGhost}>
+            {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
+            Import from MiniHotel
+          </button>
           <span className="text-[10px] text-muted-foreground">
-            Codes come from MiniHotel (Rates &amp; Availability / room-type setup).
+            Import pulls your real apartments from MiniHotel and auto-fills the codes.
           </span>
         </div>
+        {importMsg && <p className="mt-2 text-[11px] text-muted-foreground">{importMsg}</p>}
       </CardContent>
     </Card>
   );
