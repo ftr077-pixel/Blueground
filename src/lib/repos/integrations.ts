@@ -32,7 +32,46 @@ const K = {
   password: "minihotel_password",
   hotelId: "minihotel_hotel_id",
   rateCode: "minihotel_rate_code",
+  vatRate: "minihotel_vat_rate",
+  vatCountries: "minihotel_vat_countries",
+  excludedRoomTypes: "minihotel_excluded_room_types",
 } as const;
+
+const DEFAULT_VAT_RATE = 0.18; // Israeli standard VAT (locals only; tourists are zero-rated)
+const DEFAULT_VAT_COUNTRIES = "IL,ISR,ISRAEL";
+
+function parseRate(raw: string | null | undefined): number {
+  if (raw == null || raw.trim() === "") return DEFAULT_VAT_RATE;
+  let n = Number(raw.replace(/[%\s]/g, ""));
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_VAT_RATE;
+  if (n > 1) n = n / 100; // "18" / "18%" => 0.18
+  return n;
+}
+const splitCodes = (raw: string | null | undefined): string[] =>
+  (raw ?? "")
+    .split(/[,;\n]/)
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+
+/** Israeli VAT rate as a fraction (e.g. 0.18). Configurable in Settings. */
+export function getVatRate(): number {
+  return parseRate(getSetting(K.vatRate));
+}
+/** Country tokens that mean "local / VAT-liable" (Israeli guests). */
+export function getLocalVatCountries(): Set<string> {
+  const codes = splitCodes(getSetting(K.vatCountries) ?? DEFAULT_VAT_COUNTRIES);
+  return new Set(codes.length ? codes : splitCodes(DEFAULT_VAT_COUNTRIES));
+}
+/** Room-type codes / room numbers that are test apartments — kept out of the P&L. */
+export function getExcludedRoomCodes(): Set<string> {
+  return new Set(splitCodes(getSetting(K.excludedRoomTypes)));
+}
+/** True if a reservation's country (iso2/iso3/name) is VAT-liable (local). */
+export function isLocalVatCountry(country: string | null | undefined): boolean {
+  if (!country) return false;
+  const locals = getLocalVatCountries();
+  return splitCodes(country).some((tok) => locals.has(tok));
+}
 
 export function miniHotelEndpoints(env: MiniHotelEnv): MiniHotelEndpoints {
   return env === "production"
@@ -66,6 +105,9 @@ export interface MiniHotelConnectionPatch {
   password?: string; // empty/omitted => keep existing
   hotelId?: string;
   rateCode?: string;
+  vatRate?: string; // e.g. "18" or "0.18"
+  vatCountries?: string; // comma-separated country tokens that pay VAT
+  excludedRoomTypes?: string; // comma-separated test room-type codes / room numbers
 }
 
 export function saveMiniHotelConnection(p: MiniHotelConnectionPatch): void {
@@ -73,6 +115,9 @@ export function saveMiniHotelConnection(p: MiniHotelConnectionPatch): void {
   if (p.username !== undefined) setSetting(K.username, p.username.trim());
   if (p.hotelId !== undefined) setSetting(K.hotelId, p.hotelId.trim());
   if (p.rateCode !== undefined) setSetting(K.rateCode, p.rateCode.trim());
+  if (p.vatRate !== undefined) setSetting(K.vatRate, p.vatRate.trim());
+  if (p.vatCountries !== undefined) setSetting(K.vatCountries, p.vatCountries.trim());
+  if (p.excludedRoomTypes !== undefined) setSetting(K.excludedRoomTypes, p.excludedRoomTypes.trim());
   // Only overwrite the password when a non-empty value is supplied.
   if (typeof p.password === "string" && p.password.length > 0) setSetting(K.password, p.password);
 }
@@ -83,6 +128,9 @@ export interface MiniHotelConnectionView {
   hotelId: string;
   rateCode: string;
   hasPassword: boolean;
+  vatRate: number; // fraction, e.g. 0.18
+  vatCountries: string;
+  excludedRoomTypes: string;
   endpoints: MiniHotelEndpoints;
 }
 
@@ -95,6 +143,9 @@ export function getMiniHotelConnectionView(): MiniHotelConnectionView {
     hotelId: c.hotelId,
     rateCode: c.rateCode,
     hasPassword: c.password.length > 0,
+    vatRate: getVatRate(),
+    vatCountries: getSetting(K.vatCountries) ?? DEFAULT_VAT_COUNTRIES,
+    excludedRoomTypes: getSetting(K.excludedRoomTypes) ?? "",
     endpoints: miniHotelEndpoints(c.env),
   };
 }
