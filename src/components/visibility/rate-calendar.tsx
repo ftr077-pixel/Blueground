@@ -159,11 +159,19 @@ export function RateCalendar() {
         written?: number;
         mappedTypes?: number;
         unmappedTypes?: string[];
+        errors?: string[];
         message?: string;
       };
       if (d.ok) {
         const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
-        setSyncMsg({ ok: true, text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}.` });
+        const issues =
+          d.errors && d.errors.length
+            ? ` · ${d.errors.length} MiniHotel issue(s) skipped: ${d.errors.slice(0, 2).join(" | ")}${d.errors.length > 2 ? " …" : ""}`
+            : "";
+        setSyncMsg({
+          ok: !(d.errors && d.errors.length),
+          text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.`,
+        });
         await refresh();
       } else {
         setSyncMsg({ ok: false, text: d.message || "Sync failed." });
