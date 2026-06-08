@@ -17,6 +17,19 @@ export interface DashSnapshot {
   price: number | null;
 }
 
+// Compact learned recommendation attached per-listing by /api/visibility (from
+// the Pricing Intelligence model). Drives recommend()'s suggested price when the
+// model is confident; absent/low-confidence falls back to the heuristic.
+export interface LearnedRec {
+  targetPage: number;
+  suggestedNightly: number | null;
+  deltaPct: number | null;
+  expectedPage: number | null;
+  reachable: boolean;
+  confidence: "high" | "medium" | "low";
+  n: number;
+}
+
 export interface DashListing {
   id: string;
   airbnbId: string;
@@ -29,6 +42,7 @@ export interface DashListing {
   address: string | null;
   active: boolean;
   latest: DashSnapshot[];
+  learned?: LearnedRec | null;
 }
 
 export interface DashProfile {
@@ -228,7 +242,9 @@ export function recommend(
   // Available but invisible (not found, or ranked deep) — price is the lever.
   if (buried) {
     const pos = page == null ? "not in search" : `page ${page}`;
-    let suggested: number | null = null;
+
+    // Margin floor: never suggest a price below the floorMargin (unchanged).
+    let minRev = Infinity;
     if (e.revenue != null) {
       const feePct = (d.bgFeePct + d.airbnbFeePct) / 100;
       const fixed =
@@ -236,7 +252,38 @@ export function recommend(
         (l.cleaningFee ?? d.defaultCleaning) +
         (l.monthlyRent ?? 0);
       const denom = 1 - feePct - r.floorMargin / 100;
-      const minRev = denom > 0 ? fixed / denom : Infinity;
+      minRev = denom > 0 ? fixed / denom : Infinity;
+    }
+
+    // Preferred: the learned price to reach the well-ranked page (calibrated to
+    // this listing), when the model is confident — instead of a flat stepPct cut.
+    const learned = l.learned;
+    if (
+      e.revenue != null &&
+      learned &&
+      learned.confidence !== "low" &&
+      learned.suggestedNightly != null
+    ) {
+      const learnedMonthly = applyLos(learned.suggestedNightly * 30, 30, d);
+      if (learnedMonthly != null && learnedMonthly < e.revenue) {
+        const floored = Math.max(learnedMonthly, minRev);
+        if (floored < e.revenue) {
+          const suggested = roundTo(floored, 50);
+          const dropPct = Math.round((1 - suggested / e.revenue) * 100);
+          const held = learnedMonthly < minRev ? ` (held at ${r.floorMargin}% floor)` : "";
+          return {
+            action: "lower",
+            urgency,
+            suggested,
+            reason: `${pos} — learned: drop ~${dropPct}% to reach page ${learned.targetPage}${held} · n=${learned.n}${wait}`,
+          };
+        }
+      }
+    }
+
+    // Heuristic fallback: a flat stepPct cut, down to the margin floor.
+    let suggested: number | null = null;
+    if (e.revenue != null && minRev !== Infinity) {
       const stepRev = e.revenue * (1 - r.stepPct / 100);
       if (stepRev > minRev) suggested = roundTo(Math.max(stepRev, minRev), 50);
     }

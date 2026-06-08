@@ -9,6 +9,7 @@
 
 import type { Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
+import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
 
 export interface DateOverride {
   /** Absolute nightly rate to pin for this date (skips dynamic rules), or undefined. */
@@ -91,4 +92,99 @@ export function mockProviders(): MarketProviders {
       return null;
     },
   };
+}
+
+// --------------------------------------------------------------------------
+// AirROI-backed providers: map cached market_snapshots (refreshed by the daily
+// sync) onto the engine's MarketProviders. Each method draws on a *distinct*
+// AirROI signal so the rule stack doesn't double-count the same data:
+//   occupancy   ← forward pacing fill_rate (by date)
+//   seasonality ← forward booked-rate curve (rate seasonality)
+//   pacing      ← near-term vs window fill velocity
+//   demand      ← small fill-vs-average nudge (also flexes min-stay)
+//   min-stay    ← real market min-nights (AirROI summary, scraper as fallback)
+// --------------------------------------------------------------------------
+interface Prepped {
+  snap: MarketSnapshot;
+  pacingByDate: Map<string, PacingPoint>;
+  meanFill: number;
+  nearMeanFill: number;
+  meanBookedRate: number;
+}
+
+const dkey = (d: Date) => d.toISOString().slice(0, 10);
+const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
+
+function prep(snap: MarketSnapshot): Prepped {
+  const pacing = snap.pacing ?? [];
+  const fills = pacing.map((p) => p.fill_rate).filter((x) => x > 0);
+  const near = pacing.slice(0, 30).map((p) => p.fill_rate).filter((x) => x > 0);
+  const rates = pacing.map((p) => p.booked_rate_avg).filter((x) => x > 0);
+  return {
+    snap,
+    pacingByDate: new Map(pacing.map((p) => [p.date, p])),
+    meanFill: mean(fills),
+    nearMeanFill: mean(near.length ? near : fills),
+    meanBookedRate: mean(rates),
+  };
+}
+
+export function airRoiProviders(): MarketProviders {
+  const prepped = new Map<string, Prepped>();
+  for (const s of listMarketSnapshots()) prepped.set(s.neighborhood, prep(s));
+
+  const summaries = [...prepped.values()]
+    .map((p) => p.snap.summary)
+    .filter((s): s is NonNullable<MarketSnapshot["summary"]> => !!s);
+  const globalOcc = summaries.length ? mean(summaries.map((s) => s.occupancy)) : 0.85;
+  const globalMinNights = summaries.length ? Math.round(mean(summaries.map((s) => s.min_nights))) : null;
+  const scraperMedian = marketMinNightsBenchmark().median;
+
+  return {
+    seasonalityIndex(date) {
+      const ratios: number[] = [];
+      for (const p of prepped.values()) {
+        const pt = p.pacingByDate.get(dkey(date));
+        if (pt && p.meanBookedRate > 0 && pt.booked_rate_avg > 0) {
+          ratios.push(pt.booked_rate_avg / p.meanBookedRate);
+        }
+      }
+      return ratios.length ? clamp(mean(ratios), 0.85, 1.15) : null;
+    },
+    eventDemand(unit, date) {
+      const p = prepped.get(unit.neighborhood);
+      const pt = p?.pacingByDate.get(dkey(date));
+      if (p && pt && p.meanFill > 0) {
+        return {
+          bump: clamp(pt.fill_rate - p.meanFill, -0.05, 0.05),
+          driver: `AirROI ${p.snap.marketName ?? unit.neighborhood}: fill ${(pt.fill_rate * 100).toFixed(0)}% vs ${(p.meanFill * 100).toFixed(0)}% avg`,
+        };
+      }
+      return { bump: 0, driver: "AirROI market data" };
+    },
+    pacing(unit) {
+      const p = prepped.get(unit.neighborhood);
+      if (p && p.meanFill > 0) return clamp((p.nearMeanFill - p.meanFill) / p.meanFill, -1, 1);
+      return 0;
+    },
+    occupancy(unit, date) {
+      const p = prepped.get(unit.neighborhood);
+      const pt = p?.pacingByDate.get(dkey(date));
+      if (pt && pt.fill_rate > 0) return pt.fill_rate;
+      if (p?.snap.summary) return p.snap.summary.occupancy;
+      return globalOcc;
+    },
+    compMedianMinNights() {
+      return globalMinNights ?? scraperMedian;
+    },
+    dateOverride() {
+      return null;
+    },
+  };
+}
+
+/** Pick the live provider when market data has been synced, else the mock. */
+export function marketProviders(): MarketProviders {
+  return listMarketSnapshots().length > 0 ? airRoiProviders() : mockProviders();
 }

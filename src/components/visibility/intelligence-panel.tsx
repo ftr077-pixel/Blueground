@@ -55,6 +55,13 @@ interface Elasticity {
   } | null;
   marginal: { positionsPer100Nightly: number | null; positionsPerPct: number | null };
   revenue: { nights: number; before: number | null; after: number | null; delta: number | null };
+  economics: {
+    rentKnown: boolean;
+    profitBefore: number | null;
+    profitAfter: number | null;
+    marginBefore: number | null;
+    marginAfter: number | null;
+  } | null;
   confidence: {
     level: "high" | "medium" | "low";
     n: number;
@@ -269,13 +276,25 @@ function Recommendation({ data, confBadge }: { data: Elasticity; confBadge: Reac
               sub={`${data.revenue.delta >= 0 ? "+" : ""}${fmtMoney(data.revenue.delta)}`}
             />
           )}
+          {data.economics?.rentKnown && data.economics.profitBefore != null && (
+            <Stat
+              label="Profit / mo"
+              value={`${fmtMoney(data.economics.profitBefore)} → ${fmtMoney(data.economics.profitAfter)}`}
+              sub={
+                data.economics.marginBefore != null
+                  ? `margin ${data.economics.marginBefore}% → ${data.economics.marginAfter}%`
+                  : undefined
+              }
+            />
+          )}
         </div>
 
         {drop && data.note && <p className="text-[11px] text-muted-foreground">{data.note}</p>}
         <p className="text-[11px] text-muted-foreground">
           Based on {data.confidence.n} market listings
           {data.confidence.freshnessDays != null && ` · scanned ${data.confidence.freshnessDays}d ago`}.
-          Model A (cross-sectional market curve). Margin/profit + auto-apply land in M3.
+          Model A (cross-sectional market curve). When confident, this drives the ▼ Lower suggestion
+          in Search &amp; Profit.
         </p>
       </CardContent>
     </Card>

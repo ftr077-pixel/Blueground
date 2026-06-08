@@ -62,6 +62,14 @@ export interface ElasticityResult {
     positionsPerPct: number | null;
   };
   revenue: { nights: number; before: number | null; after: number | null; delta: number | null };
+  // Monthly profit impact (null fields when rent isn't set). Margins are percentages.
+  economics: {
+    rentKnown: boolean;
+    profitBefore: number | null;
+    profitAfter: number | null;
+    marginBefore: number | null;
+    marginAfter: number | null;
+  } | null;
   confidence: {
     level: Confidence;
     n: number;
@@ -71,4 +79,15 @@ export interface ElasticityResult {
   };
   curve: CurvePoint[];
   note: string | null;
+}
+
+// Compact per-listing recommendation the dashboard attaches (drives recommend()).
+export interface LearnedRecCompact {
+  targetPage: number;
+  suggestedNightly: number | null;
+  deltaPct: number | null;
+  expectedPage: number | null;
+  reachable: boolean;
+  confidence: Confidence;
+  n: number;
 }

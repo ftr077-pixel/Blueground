@@ -8,7 +8,7 @@ import {
   type PricingHistoryRow,
 } from "@/lib/repos/units";
 import { PRICING_AGENT } from "@/lib/config/pricing";
-import { mockProviders, type MarketProviders } from "@/lib/pricing/providers";
+import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { representativeQuote, type FactorResult } from "@/lib/pricing/engine";
 
 const {
@@ -56,7 +56,7 @@ const fpct = (f: number) => `${f >= 1 ? "+" : ""}${((f - 1) * 100).toFixed(1)}%`
  * owns the side-effects: applying sub-gate moves, escalating big ones to the
  * Action Center (spec.md §5), updating min-stay, and writing history + activity.
  */
-export function runPricingPass(providers: MarketProviders = mockProviders()): PricingRunResult {
+export function runPricingPass(providers: MarketProviders = marketProviders()): PricingRunResult {
   const asOf = new Date();
   const ranAt = asOf.toISOString();
   const units = listUnits();
