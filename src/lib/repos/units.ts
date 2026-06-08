@@ -147,6 +147,23 @@ export function deleteUnitsByIdPrefix(prefix: string): number {
   return n;
 }
 
+/** Delete one unit, cleaning its FK rows (rate_calendar, pricing_history) and
+ *  nulling soft references (tracked_*, reservation) first. */
+export function deleteUnit(unitId: string): boolean {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM units WHERE id = ?").get(unitId)) return false;
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM rate_calendar WHERE unit_id = ?").run(unitId);
+    db.prepare("DELETE FROM pricing_history WHERE unit_id = ?").run(unitId);
+    db.prepare("UPDATE tracked_searches SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    db.prepare("UPDATE reservation SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    db.prepare("DELETE FROM units WHERE id = ?").run(unitId);
+  });
+  tx();
+  return true;
+}
+
 export function recordPricing(
   input: Omit<PricingHistoryRow, "id" | "ts" | "signals"> & {
     signals: Record<string, unknown>;
