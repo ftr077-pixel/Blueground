@@ -65,18 +65,22 @@ const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`;
 const inputCls =
   "rounded-md border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50";
 
-export function BridgePanel() {
+export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" }) {
   const [period, setPeriod] = useState<"month" | "quarter" | "year">("year");
   const [data, setData] = useState<View | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (p: string) => {
-    const r = await fetch(`/api/bridge?period=${p}`, { cache: "no-store" });
-    if (!r.ok) throw new Error(`failed (${r.status})`);
-    setData((await r.json()) as View);
-  }, []);
+  const load = useCallback(
+    async (p: string) => {
+      const baseParam = mode === "plan" ? "&base=1" : "";
+      const r = await fetch(`/api/bridge?period=${p}${baseParam}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`failed (${r.status})`);
+      setData((await r.json()) as View);
+    },
+    [mode],
+  );
 
   useEffect(() => {
     setLoading(true);
@@ -129,6 +133,7 @@ export function BridgePanel() {
         <span>
           {data.scenario} · {summary.months} months
         </span>
+        {mode === "plan" && <Badge variant="muted">plan of record · read-only</Badge>}
         {hasOverrides && (
           <Badge variant="info">what-if active · {Object.keys(data.overrides).length} driver(s)</Badge>
         )}
@@ -183,14 +188,23 @@ export function BridgePanel() {
         </CardContent>
       </Card>
 
-      {/* driver what-if editor */}
-      <DriverEditor
-        drivers={data.drivers}
-        busy={busy}
-        hasOverrides={hasOverrides}
-        onSet={(key, value) => postOverride({ key, value })}
-        onReset={() => postOverride({ reset: true })}
-      />
+      {/* driver what-if editor + actuals slot (forecast only) */}
+      {mode === "forecast" && (
+        <>
+          <DriverEditor
+            drivers={data.drivers}
+            busy={busy}
+            hasOverrides={hasOverrides}
+            onSet={(key, value) => postOverride({ key, value })}
+            onReset={() => postOverride({ reset: true })}
+          />
+          <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">Actuals &amp; variance:</span> the real-data
+            column populates from production (MiniHotel reservations → revenue, occupancy, ADR) once
+            connected — dropped into this same P&amp;L structure beside the plan.
+          </p>
+        </>
+      )}
 
       {/* P&L table */}
       <Card>
