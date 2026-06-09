@@ -46,6 +46,13 @@ interface Pull {
   vat?: number;
   test?: number;
 }
+interface AriProbe {
+  ok: boolean;
+  message?: string;
+  count?: number;
+  withAmount?: number;
+  sampleRaw?: string;
+}
 
 export function MiniHotelCard() {
   const [env, setEnv] = useState<"sandbox" | "production">("sandbox");
@@ -65,6 +72,7 @@ export function MiniHotelCard() {
   const [saved, setSaved] = useState(false);
   const [test, setTest] = useState<TestResult | null>(null);
   const [pull, setPull] = useState<Pull | null>(null);
+  const [ari, setAri] = useState<AriProbe | null>(null);
 
   const apply = useCallback((v: View) => {
     setEnv(v.env);
@@ -172,6 +180,25 @@ export function MiniHotelCard() {
       });
     } catch (e) {
       setPull({ ok: false, message: e instanceof Error ? e.message : "pull failed" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Probe the working ARI server (api.minihotel.cloud) for the reservation list,
+  // to see what bookings it returns (no revenue — preview only).
+  async function tryAri() {
+    setBusy(true);
+    setAri(null);
+    try {
+      const r = await fetch("/api/reservations/ari", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days: 40 }),
+      }).then((res) => res.json());
+      setAri(r as AriProbe);
+    } catch (e) {
+      setAri({ ok: false, message: e instanceof Error ? e.message : "probe failed" });
     } finally {
       setBusy(false);
     }
@@ -312,9 +339,12 @@ export function MiniHotelCard() {
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
             Pull reservations → P&amp;L
           </button>
+          <button type="button" disabled={busy} onClick={tryAri} className={btnGhost}>
+            Try ARI list (api.minihotel.cloud)
+          </button>
           {pull ? (
             pull.ok ? (
-              <span className="text-[11px] text-foreground">
+              <span className="w-full text-[11px] text-foreground">
                 ✓ {pull.parsed} pulled ·{" "}
                 <span className="font-medium">
                   {pull.month}: ₪{(pull.net ?? 0).toLocaleString()} net
@@ -323,14 +353,32 @@ export function MiniHotelCard() {
                 {pull.test ? ` · ${pull.test} test excluded` : ""}
               </span>
             ) : (
-              <span className="text-[11px] text-[hsl(var(--warning))]">Pull failed: {pull.message}</span>
+              <span className="w-full text-[11px] text-[hsl(var(--warning))]">Pull failed: {pull.message}</span>
             )
           ) : (
-            <span className="text-[10px] text-muted-foreground">
-              Pulls actual reservations and drops this month&apos;s net revenue into the P&amp;L. Run from
-              the box (whitelisted with MiniHotel).
+            <span className="w-full text-[10px] text-muted-foreground">
+              <b>Pull reservations → P&amp;L</b> uses the Content &amp; Data API (real revenue, VAT-correct).
+              <b> Try ARI list</b> reads the booking list from the server that already works — to see what
+              it returns (no prices on that one). Run both from the box.
             </span>
           )}
+          {ari ? (
+            ari.ok ? (
+              <span className="w-full text-[11px] text-foreground">
+                ARI server returned <span className="font-medium">{ari.count} reservation(s)</span>
+                {ari.withAmount
+                  ? ` · ${ari.withAmount} include a price 🎉`
+                  : " · no prices on this list (occupancy only)"}
+                {ari.sampleRaw ? (
+                  <span className="mt-0.5 block break-all font-mono text-[10px] text-muted-foreground">
+                    {ari.sampleRaw}
+                  </span>
+                ) : null}
+              </span>
+            ) : (
+              <span className="w-full text-[11px] text-[hsl(var(--warning))]">ARI probe failed: {ari.message}</span>
+            )
+          ) : null}
         </div>
 
         {endpoints && (
