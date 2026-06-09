@@ -38,6 +38,19 @@ export interface MinNightsPoint {
   p90: number;
 }
 
+// Monthly historical series — one call to /markets/metrics/all.
+export interface MetricsPoint {
+  date: string;
+  occupancy: number;
+  average_daily_rate: number;
+  revpar: number;
+  revenue: number;
+  booking_lead_time: number;
+  length_of_stay: number;
+  min_nights: number;
+  active_listings_count: number;
+}
+
 export interface MarketSnapshot {
   neighborhood: string;
   marketName: string | null;
@@ -46,6 +59,9 @@ export interface MarketSnapshot {
   summary: MarketSummary | null;
   pacing: PacingPoint[];
   minNights: MinNightsPoint[];
+  metrics: MetricsPoint[];
+  /** Human label of the comp filter applied (e.g. "2 BR"), or null for all units. */
+  filterLabel: string | null;
 }
 
 interface MarketSnapshotSql {
@@ -56,6 +72,8 @@ interface MarketSnapshotSql {
   summary: string | null;
   pacing: string | null;
   min_nights: string | null;
+  metrics: string | null;
+  filter: string | null;
 }
 
 function parse<T>(raw: string | null, fallback: T): T {
@@ -76,6 +94,8 @@ function rowToSnapshot(r: MarketSnapshotSql): MarketSnapshot {
     summary: parse<MarketSummary | null>(r.summary, null),
     pacing: parse<PacingPoint[]>(r.pacing, []),
     minNights: parse<MinNightsPoint[]>(r.min_nights, []),
+    metrics: parse<MetricsPoint[]>(r.metrics, []),
+    filterLabel: r.filter,
   };
 }
 
@@ -86,20 +106,24 @@ export interface MarketSnapshotInput {
   summary: MarketSummary | null;
   pacing: PacingPoint[];
   minNights: MinNightsPoint[];
+  metrics: MetricsPoint[];
+  filterLabel: string | null;
 }
 
 export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
   const db = getDb();
   db.prepare(
-    `INSERT INTO market_snapshots (neighborhood, market_name, fetched_at, currency, summary, pacing, min_nights)
-     VALUES (@neighborhood, @market_name, @fetched_at, @currency, @summary, @pacing, @min_nights)
+    `INSERT INTO market_snapshots (neighborhood, market_name, fetched_at, currency, summary, pacing, min_nights, metrics, filter)
+     VALUES (@neighborhood, @market_name, @fetched_at, @currency, @summary, @pacing, @min_nights, @metrics, @filter)
      ON CONFLICT(neighborhood) DO UPDATE SET
        market_name = excluded.market_name,
        fetched_at  = excluded.fetched_at,
        currency    = excluded.currency,
        summary     = excluded.summary,
        pacing      = excluded.pacing,
-       min_nights  = excluded.min_nights`,
+       min_nights  = excluded.min_nights,
+       metrics     = excluded.metrics,
+       filter      = excluded.filter`,
   ).run({
     neighborhood: input.neighborhood,
     market_name: input.marketName,
@@ -108,6 +132,8 @@ export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
     summary: input.summary ? JSON.stringify(input.summary) : null,
     pacing: JSON.stringify(input.pacing ?? []),
     min_nights: JSON.stringify(input.minNights ?? []),
+    metrics: JSON.stringify(input.metrics ?? []),
+    filter: input.filterLabel ?? null,
   });
 }
 
