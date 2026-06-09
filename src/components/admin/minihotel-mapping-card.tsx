@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { DownloadCloud, Link2, Loader2, Trash2, Wand2 } from "lucide-react";
+import { ChevronDown, ChevronRight, DownloadCloud, Link2, Loader2, Trash2, Wand2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -44,6 +44,7 @@ export function MiniHotelMappingCard() {
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [matching, setMatching] = useState(false);
   const [matchMsg, setMatchMsg] = useState<string | null>(null);
+  const [showTable, setShowTable] = useState(false); // long list — collapsed by default
 
   const load = useCallback(() => {
     fetch("/api/integrations/minihotel/mapping", { cache: "no-store" })
@@ -195,74 +196,93 @@ export function MiniHotelMappingCard() {
         {!loaded ? (
           <p className="text-xs text-muted-foreground">Loading…</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[520px] border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-border text-left text-muted-foreground">
-                  <th className="py-2 pr-3 font-medium">Apartment (this app)</th>
-                  <th className="py-2 pr-3 font-medium">Neighborhood</th>
-                  <th className="py-2 pr-3 font-medium">MiniHotel room-type code</th>
-                  <th className="py-2 pr-3 font-medium">Airbnb listing</th>
-                  <th className="py-2 font-medium text-right">Remove</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedRows.map((r) => (
-                  <tr key={r.unitId} className="border-b border-border/40">
-                    <td className="py-1.5 pr-3">
-                      <div className="font-medium text-foreground">{r.name}</div>
-                      <div className="text-[10px] text-muted-foreground">
-                        {r.unitId} · {r.platform}
-                      </div>
-                    </td>
-                    <td className="py-1.5 pr-3 text-muted-foreground">{r.neighborhood}</td>
-                    <td className="py-1.5 pr-3">
-                      <input
-                        className={`${input} w-44`}
-                        value={draft[r.unitId] ?? ""}
-                        placeholder="e.g. DBL, 2BEDAPT"
-                        onChange={(e) => setDraft((d) => ({ ...d, [r.unitId]: e.target.value }))}
-                      />
-                    </td>
-                    <td className="py-1.5 pr-3">
-                      <select
-                        className={`${input} w-48`}
-                        value={r.airbnbListingId ?? ""}
-                        disabled={linkingId === r.unitId || airbnbListings.length === 0}
-                        onChange={(e) => setListing(r.unitId, e.target.value)}
-                      >
-                        <option value="">
-                          {airbnbListings.length ? "— not linked —" : "no Airbnb listings yet"}
-                        </option>
-                        {sortedListings
-                          .filter((l) => l.id === r.airbnbListingId || !assignedListingIds.has(l.id))
-                          .map((l) => (
-                            <option key={l.id} value={l.id}>
-                              {l.label}
+          <>
+            <button
+              type="button"
+              onClick={() => setShowTable((v) => !v)}
+              className="flex w-full items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+            >
+              {showTable ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+              {rows.length} apartment{rows.length === 1 ? "" : "s"}
+              <span className="ml-auto text-[10px] font-normal">
+                {showTable ? "hide" : "show all"}
+              </span>
+            </button>
+            {showTable && (
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full min-w-[520px] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-border text-left text-muted-foreground">
+                      <th className="py-2 pr-3 font-medium">Apartment (this app)</th>
+                      <th className="py-2 pr-3 font-medium">Neighborhood</th>
+                      <th className="py-2 pr-3 font-medium">MiniHotel room-type code</th>
+                      <th className="py-2 pr-3 font-medium">Airbnb listing</th>
+                      <th className="py-2 font-medium text-right">Remove</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedRows.map((r) => (
+                      <tr key={r.unitId} className="border-b border-border/40">
+                        <td className="py-1.5 pr-3">
+                          <div className="font-medium text-foreground">{r.name}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {r.unitId} · {r.platform}
+                          </div>
+                        </td>
+                        <td className="py-1.5 pr-3 text-muted-foreground">{r.neighborhood}</td>
+                        <td className="py-1.5 pr-3">
+                          <input
+                            className={`${input} w-44`}
+                            value={draft[r.unitId] ?? ""}
+                            placeholder="e.g. DBL, 2BEDAPT"
+                            onChange={(e) => setDraft((d) => ({ ...d, [r.unitId]: e.target.value }))}
+                          />
+                        </td>
+                        <td className="py-1.5 pr-3">
+                          <select
+                            className={`${input} w-48`}
+                            value={r.airbnbListingId ?? ""}
+                            disabled={linkingId === r.unitId || airbnbListings.length === 0}
+                            onChange={(e) => setListing(r.unitId, e.target.value)}
+                          >
+                            <option value="">
+                              {airbnbListings.length ? "— not linked —" : "no Airbnb listings yet"}
                             </option>
-                          ))}
-                      </select>
-                    </td>
-                    <td className="py-1.5 text-right">
-                      <button
-                        type="button"
-                        title="Remove this apartment"
-                        disabled={deletingId === r.unitId}
-                        onClick={() => deleteApartment(r.unitId, r.name)}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:border-danger/30 hover:text-[hsl(var(--danger))] disabled:opacity-50"
-                      >
-                        {deletingId === r.unitId ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                            {sortedListings
+                              .filter((l) => l.id === r.airbnbListingId || !assignedListingIds.has(l.id))
+                              .map((l) => (
+                                <option key={l.id} value={l.id}>
+                                  {l.label}
+                                </option>
+                              ))}
+                          </select>
+                        </td>
+                        <td className="py-1.5 text-right">
+                          <button
+                            type="button"
+                            title="Remove this apartment"
+                            disabled={deletingId === r.unitId}
+                            onClick={() => deleteApartment(r.unitId, r.name)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:border-danger/30 hover:text-[hsl(var(--danger))] disabled:opacity-50"
+                          >
+                            {deletingId === r.unitId ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" disabled={busy || !loaded} onClick={save} className={btn}>
