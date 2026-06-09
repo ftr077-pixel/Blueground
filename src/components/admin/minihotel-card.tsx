@@ -75,6 +75,7 @@ export function MiniHotelCard() {
   const [test, setTest] = useState<TestResult | null>(null);
   const [pull, setPull] = useState<Pull | null>(null);
   const [ari, setAri] = useState<AriOcc | null>(null);
+  const [log, setLog] = useState<string | null>(null);
 
   const apply = useCallback((v: View) => {
     setEnv(v.env);
@@ -204,6 +205,35 @@ export function MiniHotelCard() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Probe both MiniHotel APIs and produce a copy-paste report for their support.
+  async function genLog() {
+    setBusy(true);
+    setLog(null);
+    try {
+      const r = await fetch("/api/integrations/minihotel/diagnostics", { method: "POST" }).then((res) =>
+        res.json(),
+      );
+      setLog(r.ok ? r.log : r.message || "Could not generate log.");
+    } catch (e) {
+      setLog(e instanceof Error ? e.message : "Could not generate log.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  function copyLog() {
+    if (log) navigator.clipboard?.writeText(log).catch(() => undefined);
+  }
+  function downloadLog() {
+    if (!log) return;
+    const blob = new Blob([log], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `minihotel-diagnostics-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const configured = hasPassword && !!username && !!hotelId;
@@ -410,6 +440,35 @@ export function MiniHotelCard() {
             )}
           </div>
         )}
+
+        <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" disabled={busy} onClick={genLog} className={btnGhost}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Generate MiniHotel support log
+            </button>
+            {log ? (
+              <>
+                <button type="button" onClick={copyLog} className={btnGhost}>
+                  Copy
+                </button>
+                <button type="button" onClick={downloadLog} className={btnGhost}>
+                  Download .txt
+                </button>
+              </>
+            ) : (
+              <span className="text-[10px] text-muted-foreground">
+                Probes both MiniHotel APIs and writes a copy-paste report for their support (password
+                redacted). Run from the box.
+              </span>
+            )}
+          </div>
+          {log ? (
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background px-3 py-2 font-mono text-[10px] leading-relaxed text-foreground">
+              {log}
+            </pre>
+          ) : null}
+        </div>
 
         <p className="text-[10px] text-muted-foreground">
           Stored on this server only. The password is write-only here — it is never shown again after
