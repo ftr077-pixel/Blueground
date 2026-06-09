@@ -70,14 +70,24 @@ function decodeEntities(s: string): string {
     .replace(/&amp;/gi, "&");
 }
 
-export function buildBulkAriRequest(conn: MiniHotelConnection, from: string, to: string): string {
+export function buildBulkAriRequest(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  roomTypeIds?: string[],
+): string {
   const rateCode = conn.rateCode || "USD";
+  const roomTypes =
+    roomTypeIds && roomTypeIds.length
+      ? `<RoomTypes>${roomTypeIds.map((id) => `<RoomType id="${escXml(id)}" />`).join("")}</RoomTypes>`
+      : "";
   return (
     '<?xml version="1.0" encoding="UTF-8" ?>' +
     '<AvailRaterq xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
     `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="05" />` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
     `<DateRange from="${from}" to="${to}" />` +
+    roomTypes +
     `<Prices rateCode="${escXml(rateCode)}"></Prices>` +
     "</AvailRaterq>"
   );
@@ -159,7 +169,12 @@ export function extractMiniHotelErrors(text: string): string[] {
   return out;
 }
 
-export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
+export async function fetchBulkAri(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  roomTypeIds?: string[],
+): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -167,7 +182,7 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
     const res = await fetch(ep.ari, {
       method: "POST",
       headers: { "Content-Type": "application/xml" },
-      body: buildBulkAriRequest(conn, from, to),
+      body: buildBulkAriRequest(conn, from, to, roomTypeIds),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -180,6 +195,79 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
   }
 }
 
+/**
+ * Fetch ARI scoped to the mapped, non-excluded room types, so a single
+ * misconfigured/excluded room (ERR 310) can't abort the whole feed. One scoped
+ * request handles the common case; if it still comes back empty (a bad room is
+ * among the targets), salvage the healthy rooms in small batches, then per room.
+ */
+async function fetchScopedAri(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+): Promise<{ cells: AriCell[]; errors: string[] }> {
+  const excluded = getExcludedRoomCodes();
+  const targets = [
+    ...new Set(
+      getMiniHotelMapping()
+        .filter((m) => m.roomType)
+        .map((m) => (m.roomType as string).trim())
+        .filter(Boolean),
+    ),
+  ].filter((c) => !excluded.has(c.toUpperCase()));
+
+  // Nothing mapped → fall back to the whole-hotel feed.
+  if (targets.length === 0) {
+    const xml = await fetchBulkAri(conn, from, to);
+    return { cells: parseBulkAri(xml), errors: parseAriErrors(xml) };
+  }
+
+  const errors = new Set<string>();
+
+  // Happy path: one request for all mapped, non-excluded rooms.
+  try {
+    const xml = await fetchBulkAri(conn, from, to, targets);
+    const got = parseBulkAri(xml);
+    parseAriErrors(xml).forEach((e) => errors.add(e));
+    if (got.length > 0) return { cells: got, errors: [...errors] };
+  } catch (e) {
+    errors.add(e instanceof Error ? e.message : "scoped request failed");
+  }
+
+  // Empty → a bad room among the targets aborted it. Batch, then per-room
+  // (bounded so the sync stays responsive even if every batch trips).
+  const cells: AriCell[] = [];
+  let budget = 30;
+  const BATCH = 20;
+  for (let i = 0; i < targets.length && budget > 0; i += BATCH) {
+    const batch = targets.slice(i, i + BATCH);
+    budget--;
+    let got: AriCell[] = [];
+    try {
+      const xml = await fetchBulkAri(conn, from, to, batch);
+      got = parseBulkAri(xml);
+      parseAriErrors(xml).forEach((e) => errors.add(e));
+    } catch {
+      /* fall through to per-room */
+    }
+    if (got.length > 0) {
+      cells.push(...got);
+      continue;
+    }
+    for (const code of batch) {
+      if (budget <= 0) break;
+      budget--;
+      try {
+        const one = parseBulkAri(await fetchBulkAri(conn, from, to, [code]));
+        if (one.length) cells.push(...one);
+      } catch {
+        /* skip this room */
+      }
+    }
+  }
+  return { cells, errors: [...errors] };
+}
+
 export async function syncFromMiniHotel(opts: {
   from?: string;
   days?: number;
@@ -190,8 +278,12 @@ export async function syncFromMiniHotel(opts: {
   const days = Math.max(1, Math.min(120, opts.days ?? 60));
   const to = plusDays(from, days - 1);
 
-  let xml = opts.xml;
-  if (!xml) {
+  let parsed: AriCell[];
+  let errors: string[];
+  if (opts.xml) {
+    parsed = parseBulkAri(opts.xml);
+    errors = parseAriErrors(opts.xml);
+  } else {
     if (!conn.username || !conn.password || !conn.hotelId) {
       return {
         ok: false,
@@ -206,11 +298,11 @@ export async function syncFromMiniHotel(opts: {
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
-    xml = await fetchBulkAri(conn, from, to);
+    // Scope to mapped, non-excluded room types so one bad room can't blank it all.
+    const scoped = await fetchScopedAri(conn, from, to);
+    parsed = scoped.cells;
+    errors = scoped.errors;
   }
-
-  const parsed = parseBulkAri(xml);
-  const errors = parseAriErrors(xml);
 
   // RoomTypeCode -> unit id(s); case-insensitive so codes match regardless of casing.
   const byType = new Map<string, string[]>();
