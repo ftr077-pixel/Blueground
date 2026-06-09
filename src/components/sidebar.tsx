@@ -14,6 +14,7 @@ import {
   ConciergeBell,
   Gauge,
   LayoutDashboard,
+  LineChart,
   Radar,
   Settings,
   ShieldAlert,
@@ -32,6 +33,7 @@ const REVENUE_HUB = {
   base: "/visibility",
   children: [
     { href: "/departments/revenue", label: "Pricing Engine", icon: Gauge },
+    { href: "/market", label: "Market Analytics", icon: LineChart },
     { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
     { href: "/visibility", label: "Search & Profit", icon: Radar },
