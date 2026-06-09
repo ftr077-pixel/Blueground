@@ -146,7 +146,7 @@ if [ -n "$AIRROI_API_KEY" ]; then
   log "Daily AirROI market-data sync cron ($MARKET_CRON_SCHEDULE)"
   cat >/etc/cron.d/market-sync <<CRON
 SHELL=/bin/bash
-$MARKET_CRON_SCHEDULE root curl -fsS -X POST http://localhost:$APP_PORT/api/market/sync >> /var/log/market-sync.log 2>&1
+$MARKET_CRON_SCHEDULE root curl -fsS -H "x-scraper-key: $SCRAPER_API_KEY" -X POST http://localhost:$APP_PORT/api/market/sync >> /var/log/market-sync.log 2>&1
 CRON
   chmod 0644 /etc/cron.d/market-sync
 else

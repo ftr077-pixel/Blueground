@@ -5,8 +5,21 @@ import { listMarketSnapshots } from "@/lib/repos/market";
 
 export const dynamic = "force-dynamic";
 
+// This route bypasses the dashboard login (see middleware BYPASS), so it guards
+// itself with the shared SCRAPER_API_KEY (header `x-scraper-key`) — same scheme
+// as the scraper's snapshot endpoint. Open in local dev when the key isn't set.
+function unauthorized(req: Request): NextResponse | null {
+  const required = process.env.SCRAPER_API_KEY;
+  if (required && req.headers.get("x-scraper-key") !== required) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  return null;
+}
+
 // Status: whether the provider is configured + what's currently cached.
-export async function GET() {
+export async function GET(req: Request) {
+  const denied = unauthorized(req);
+  if (denied) return denied;
   const snapshots = listMarketSnapshots();
   return NextResponse.json({
     configured: isAirRoiConfigured(),
@@ -22,6 +35,8 @@ export async function GET() {
 // Trigger a market-data refresh (run daily on the box; safe to call manually).
 // AirROI bills per call, so we skip if we synced recently unless ?force=1.
 export async function POST(req: Request) {
+  const denied = unauthorized(req);
+  if (denied) return denied;
   const force = new URL(req.url).searchParams.get("force") === "1";
   const minHours = Number(process.env.MARKET_SYNC_MIN_HOURS || 6);
   const last = listMarketSnapshots().reduce<string | null>(
