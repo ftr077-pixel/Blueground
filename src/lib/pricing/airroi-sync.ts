@@ -34,10 +34,15 @@ export interface MarketSyncResult {
 }
 
 const REGION_HINT = process.env.AIRROI_REGION_HINT || "Tel Aviv-Yafo, Israel";
+// AirROI accepts only 'usd' or 'native' for the currency param; 'native' auto-maps
+// to the market's local currency (ILS for Israel). We keep a separate display
+// currency for the ₪ symbol shown in the UI.
+const AIRROI_CURRENCY = process.env.AIRROI_CURRENCY || "native";
+const DISPLAY_CURRENCY = process.env.AIRROI_DISPLAY_CURRENCY || "ILS";
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : "unknown error");
 
-export async function syncMarketData(currency = "ILS"): Promise<MarketSyncResult> {
+export async function syncMarketData(): Promise<MarketSyncResult> {
   if (!isAirRoiConfigured()) {
     return { ok: false, reason: "AIRROI_API_KEY not set", synced: [], failed: [] };
   }
@@ -66,17 +71,17 @@ export async function syncMarketData(currency = "ILS"): Promise<MarketSyncResult
       let pacing: PacingPoint[] = [];
       let minNights: MinNightsPoint[] = [];
       try {
-        summary = await getMarketSummary(market, currency);
+        summary = await getMarketSummary(market, AIRROI_CURRENCY);
       } catch (e) {
         errs.push(`summary: ${msg(e)}`);
       }
       try {
-        pacing = await getMarketFuturePacing(market, currency);
+        pacing = await getMarketFuturePacing(market, AIRROI_CURRENCY);
       } catch (e) {
         errs.push(`pacing: ${msg(e)}`);
       }
       try {
-        minNights = await getMarketMinNights(market, currency);
+        minNights = await getMarketMinNights(market, AIRROI_CURRENCY);
       } catch (e) {
         errs.push(`min-nights: ${msg(e)}`);
       }
@@ -93,7 +98,7 @@ export async function syncMarketData(currency = "ILS"): Promise<MarketSyncResult
       upsertMarketSnapshot({
         neighborhood,
         marketName: market.full_name ?? null,
-        currency,
+        currency: DISPLAY_CURRENCY,
         summary,
         pacing,
         minNights,
