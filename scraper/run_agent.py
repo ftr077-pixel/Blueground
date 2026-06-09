@@ -21,11 +21,15 @@ Env:
 import datetime
 import json
 import os
+import socket
 import time
 import urllib.request
 import uuid
 
 import pyairbnb
+
+# Hard cap so a hung proxy / Airbnb connection can't block the whole run forever.
+socket.setdefaulttimeout(120)
 
 APP_URL = os.environ.get("APP_URL", "http://localhost:3000").rstrip("/")
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
