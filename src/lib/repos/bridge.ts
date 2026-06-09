@@ -1,24 +1,17 @@
 import { getSetting, setSetting } from "@/lib/repos/visibility";
-import { getDb } from "@/lib/db";
+import { monthlyReservationRevenue } from "@/lib/repos/reservations";
 import { aggregate, computeBridge, type BridgeOverrides } from "@/lib/bridge/engine";
 
-// Real rental-revenue actuals from MiniHotel: the ARI sync writes per-night
-// price + booked cells (source = "minihotel") into the Rates Calendar. Booked
-// nights × price, summed per month, is realized/on-the-books room revenue.
+// Real rental-revenue actuals from MiniHotel: the actual reservations (room
+// revenue) pulled from the Content & Data API, recognized per night across each
+// stay and summed per month. No costs exist in MiniHotel, so only revenue lands.
 export function getLiveActuals(): { byMonth: Record<string, number>; months: number } {
-  const byMonth: Record<string, number> = {};
+  let byMonth: Record<string, number> = {};
   try {
-    const rows = getDb()
-      .prepare(
-        `SELECT substr(date,1,7) AS ym,
-                SUM(CASE WHEN booked = 1 AND COALESCE(closed,0) = 0 AND price IS NOT NULL
-                         THEN price ELSE 0 END) AS revenue
-         FROM rate_calendar WHERE source = 'minihotel' GROUP BY ym`,
-      )
-      .all() as Array<{ ym: string; revenue: number | null }>;
-    for (const r of rows) if (r.revenue && r.revenue > 0) byMonth[r.ym] = Math.round(r.revenue);
+    byMonth = monthlyReservationRevenue();
   } catch {
-    /* rate_calendar may not exist on older DBs — no live actuals then */
+    /* reservation table may not exist on older DBs — no live actuals then */
+    byMonth = {};
   }
   return { byMonth, months: Object.keys(byMonth).length };
 }

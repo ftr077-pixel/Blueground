@@ -115,6 +115,55 @@ export function setUnitMiniHotelRoomType(unitId: string, code: string | null) {
   db.prepare("UPDATE units SET minihotel_room_type = ? WHERE id = ?").run(code, unitId);
 }
 
+/** Create/refresh a unit imported from MiniHotel (rates fill in on the first Sync). */
+export function upsertImportedUnit(u: {
+  id: string;
+  name: string;
+  platform: string;
+  minihotelRoomType: string;
+}) {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO units (id, name, neighborhood, bedrooms, base_rate, current_rate, occupancy_30d, platform, minihotel_room_type)
+     VALUES (@id, @name, '', 0, 0, 0, 0, @platform, @minihotel_room_type)
+     ON CONFLICT(id) DO UPDATE SET name = @name, platform = @platform, minihotel_room_type = @minihotel_room_type`,
+  ).run({ id: u.id, name: u.name, platform: u.platform, minihotel_room_type: u.minihotelRoomType });
+}
+
+/** Delete units whose id starts with `prefix`, cleaning their FK-referencing rows first. */
+export function deleteUnitsByIdPrefix(prefix: string): number {
+  const db = getDb();
+  const like = prefix + "%";
+  const n = (db.prepare("SELECT COUNT(*) AS c FROM units WHERE id LIKE ?").get(like) as { c: number }).c;
+  if (n === 0) return 0;
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM rate_calendar WHERE unit_id LIKE ?").run(like);
+    db.prepare("DELETE FROM pricing_history WHERE unit_id LIKE ?").run(like);
+    db.prepare("UPDATE tracked_searches SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
+    db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
+    db.prepare("DELETE FROM units WHERE id LIKE ?").run(like);
+  });
+  tx();
+  return n;
+}
+
+/** Delete one unit, cleaning its FK rows (rate_calendar, pricing_history) and
+ *  nulling soft references (tracked_*, reservation) first. */
+export function deleteUnit(unitId: string): boolean {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM units WHERE id = ?").get(unitId)) return false;
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM rate_calendar WHERE unit_id = ?").run(unitId);
+    db.prepare("DELETE FROM pricing_history WHERE unit_id = ?").run(unitId);
+    db.prepare("UPDATE tracked_searches SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    db.prepare("UPDATE reservation SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    db.prepare("DELETE FROM units WHERE id = ?").run(unitId);
+  });
+  tx();
+  return true;
+}
+
 export function recordPricing(
   input: Omit<PricingHistoryRow, "id" | "ts" | "signals"> & {
     signals: Record<string, unknown>;

@@ -33,8 +33,14 @@ DASHBOARD_PASS="${DASHBOARD_PASS:-}"
 # Residential proxy for the scraper — REQUIRED (datacenter IPs get blocked).
 PROXY_URL="${PROXY_URL:-}"
 
-# Daily scan time (cron syntax, box local time).
+# External market data (AirROI) — optional. Get a key at airroi.com/developer.
+# When set, the pricing engine uses live market data and a daily sync is enabled.
+AIRROI_API_KEY="${AIRROI_API_KEY:-}"
+AIRROI_REGION_HINT="${AIRROI_REGION_HINT:-Tel Aviv-Yafo, Israel}"
+
+# Daily scan time + market-sync time (cron syntax, box local time).
 CRON_SCHEDULE="${CRON_SCHEDULE:-0 8 * * *}"
+MARKET_CRON_SCHEDULE="${MARKET_CRON_SCHEDULE:-0 7 * * *}"
 # -----------------------------------------------------------------------------
 
 log()  { echo -e "\n\033[1;36m== $* ==\033[0m"; }
@@ -84,6 +90,12 @@ if [ -n "$DASHBOARD_USER" ] && [ -n "$DASHBOARD_PASS" ]; then
   sed -i '/^DASHBOARD_USER=/d; /^DASHBOARD_PASS=/d' "$ENV_FILE"
   printf 'DASHBOARD_USER=%s\nDASHBOARD_PASS=%s\n' "$DASHBOARD_USER" "$DASHBOARD_PASS" >> "$ENV_FILE"
 fi
+# Optional external market data (AirROI). Stored in .env.local; the app + the
+# market-sync cron read it. Re-running with a new key updates it in place.
+if [ -n "$AIRROI_API_KEY" ]; then
+  sed -i '/^AIRROI_API_KEY=/d; /^AIRROI_REGION_HINT=/d' "$ENV_FILE"
+  printf 'AIRROI_API_KEY=%s\nAIRROI_REGION_HINT=%s\n' "$AIRROI_API_KEY" "$AIRROI_REGION_HINT" >> "$ENV_FILE"
+fi
 
 log "Building the dashboard"
 npm install
@@ -128,6 +140,18 @@ else
   rm -f /etc/cron.d/visibility-scan
   echo "The dashboard runs and shows seeded data, but live scanning needs a"
   echo "residential proxy (datacenter IPs get blocked). Re-run with PROXY_URL to enable."
+fi
+
+if [ -n "$AIRROI_API_KEY" ]; then
+  log "Daily AirROI market-data sync cron ($MARKET_CRON_SCHEDULE)"
+  cat >/etc/cron.d/market-sync <<CRON
+SHELL=/bin/bash
+$MARKET_CRON_SCHEDULE root curl -fsS -H "x-scraper-key: $SCRAPER_API_KEY" -X POST http://localhost:$APP_PORT/api/market/sync >> /var/log/market-sync.log 2>&1
+CRON
+  chmod 0644 /etc/cron.d/market-sync
+else
+  log "No AIRROI_API_KEY — market sync left OFF (engine uses built-in sample signals)"
+  rm -f /etc/cron.d/market-sync
 fi
 
 if [ -n "$DOMAIN" ]; then

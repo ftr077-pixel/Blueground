@@ -181,6 +181,32 @@ function init(db: Database.Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_lsnap_listing_ts ON listing_snapshots(listing_id, ts DESC);
 
+    -- Full competitor price ladder per search (every result's price at its
+    -- position), captured from the same result set the scraper already fetches.
+    -- One row per (search, rank); a "search" = profile × run × check-in × nights
+    -- × guests. This is the substrate for the price→position learner: a single
+    -- scan yields the whole market price-vs-rank curve for that exact query.
+    CREATE TABLE IF NOT EXISTS search_results (
+      id            TEXT PRIMARY KEY,
+      profile_id    TEXT NOT NULL REFERENCES search_profiles(id),
+      run_id        TEXT NOT NULL,
+      ts            TEXT NOT NULL,
+      check_in      TEXT NOT NULL,
+      check_out     TEXT NOT NULL,
+      nights        INTEGER NOT NULL,
+      guests        INTEGER NOT NULL,
+      total         INTEGER NOT NULL,
+      room_id       TEXT,
+      rank          INTEGER NOT NULL,
+      page          INTEGER NOT NULL,
+      position      INTEGER NOT NULL,
+      price         REAL,
+      price_nightly REAL,
+      currency      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_results_segment ON search_results(profile_id, nights, check_in, run_id);
+    CREATE INDEX IF NOT EXISTS idx_results_ts ON search_results(ts);
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
@@ -217,7 +243,57 @@ function init(db: Database.Database) {
       updated_at  TEXT,
       PRIMARY KEY (unit_id, date)
     );
+
+    -- Actual reservations pulled from MiniHotel (Content & Data API). This is the
+    -- source of *real* revenue actuals: room revenue per booking, recognized per
+    -- night across the stay (see repos/reservations). Cancelled / no-show rows and
+    -- test apartments are kept but excluded from revenue. The revenue column is NET
+    -- of VAT (Israeli guests pay 18%, tourists are zero-rated); gross/vat keep the
+    -- breakdown for audit. unit_id is the mapped Hub unit (nullable).
+    CREATE TABLE IF NOT EXISTS reservation (
+      id          TEXT PRIMARY KEY,
+      unit_id     TEXT,
+      room_type   TEXT,
+      room_number TEXT,
+      check_in    TEXT NOT NULL,
+      check_out   TEXT NOT NULL,
+      nights      INTEGER NOT NULL,
+      revenue     INTEGER NOT NULL,
+      gross       INTEGER,
+      vat         INTEGER,
+      vat_basis   TEXT,
+      currency    TEXT,
+      country     TEXT,
+      status      TEXT,
+      source      TEXT NOT NULL DEFAULT 'minihotel',
+      updated_at  TEXT
+    );
+
+    -- Occupancy backbone from MiniHotel's ARI server (Room Status Inquiry). These
+    -- bookings carry no revenue (that's the Content & Data API), but they're the
+    -- real occupancy: which room is booked which nights. Refreshed as a full
+    -- snapshot each sync. ari_room is the room inventory (the occupancy denominator).
+    CREATE TABLE IF NOT EXISTS ari_booking (
+      res_number  TEXT PRIMARY KEY,
+      room_number TEXT,
+      room_type   TEXT,
+      check_in    TEXT NOT NULL,
+      check_out   TEXT NOT NULL,
+      status      TEXT,
+      updated_at  TEXT
+    );
+    CREATE TABLE IF NOT EXISTS ari_room (
+      room_number TEXT PRIMARY KEY,
+      room_type   TEXT
+    );
   `);
+
+  // Reservation columns added after the table first shipped.
+  ensureColumn(db, "reservation", "room_number", "TEXT");
+  ensureColumn(db, "reservation", "gross", "INTEGER");
+  ensureColumn(db, "reservation", "vat", "INTEGER");
+  ensureColumn(db, "reservation", "vat_basis", "TEXT");
+  ensureColumn(db, "reservation", "country", "TEXT");
 
   // Migrations for DBs created before these columns existed.
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");
@@ -267,6 +343,22 @@ function init(db: Database.Database) {
   db.exec(`
     UPDATE units SET min_rate = CAST(ROUND(base_rate * ${floorPct} / ${step}) * ${step} AS INTEGER) WHERE min_rate IS NULL;
     UPDATE units SET max_rate = CAST(ROUND(base_rate * ${ceilPct} / ${step}) * ${step} AS INTEGER) WHERE max_rate IS NULL;
+  `);
+
+  // Cached market data from the external provider (AirROI). One row per
+  // neighborhood; refreshed by the daily market sync. JSON blobs hold the raw
+  // metric payloads so the providers/Market view can read without re-fetching
+  // (the API is pay-per-call).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS market_snapshots (
+      neighborhood  TEXT PRIMARY KEY,
+      market_name   TEXT,
+      fetched_at    TEXT NOT NULL,
+      currency      TEXT,
+      summary       TEXT,
+      pacing        TEXT,
+      min_nights    TEXT
+    );
   `);
 }
 
@@ -484,6 +576,75 @@ function seedProfiles(db: Database.Database) {
   tx();
 }
 
+// Synthetic competitor ladder for the seeded proof run, so Pricing Intelligence
+// renders on a fresh DB before any real scan posts ladder rows. Deterministic and
+// clearly demo data: our listing keeps its real captured point (rank 51 @
+// ₪29,783); the rest are a plausible Tel-Aviv price ladder where cheaper listings
+// tend to rank better (with noise standing in for the non-price factors).
+function seedLadder(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_ladder'").get();
+  if (seeded) return;
+
+  const profileId = "prof-telaviv-2g";
+  const airbnbId = "1602229503214826484";
+  const runId = "seed-proof-run";
+  const ts = "2026-06-06T09:00:00.000Z";
+  const checkIn = "2026-08-01";
+  const checkOut = "2026-08-31";
+  const nights = 30;
+  const guests = 2;
+  const total = 280;
+  const currency = "ILS";
+
+  const noise = (k: number) => {
+    const x = Math.sin(k * 9301 + 49297) * 233280;
+    return x - Math.floor(x); // 0..1, deterministic
+  };
+
+  const ins = db.prepare(`
+    INSERT INTO search_results
+      (id, profile_id, run_id, ts, check_in, check_out, nights, guests, total,
+       room_id, rank, page, position, price, price_nightly, currency)
+    VALUES
+      (@id, @profile_id, @run_id, @ts, @check_in, @check_out, @nights, @guests, @total,
+       @room_id, @rank, @page, @position, @price, @price_nightly, @currency)
+  `);
+
+  const tx = db.transaction(() => {
+    for (let rank = 1; rank <= total; rank++) {
+      let priceTotal: number;
+      let roomId: string | null = null;
+      if (rank === 51) {
+        priceTotal = 29783; // our listing's real captured point
+        roomId = airbnbId;
+      } else {
+        const nightly = 620 + 3.4 * rank + (noise(rank) - 0.5) * 520;
+        priceTotal = Math.max(9000, Math.round((nightly * nights) / 10) * 10);
+      }
+      ins.run({
+        id: randomUUID(),
+        profile_id: profileId,
+        run_id: runId,
+        ts,
+        check_in: checkIn,
+        check_out: checkOut,
+        nights,
+        guests,
+        total,
+        room_id: roomId,
+        rank,
+        page: Math.floor((rank - 1) / 18) + 1,
+        position: ((rank - 1) % 18) + 1,
+        price: priceTotal,
+        price_nightly: priceTotal / nights,
+        currency,
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_ladder', 'v1')").run();
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (global.__rohubDb) return global.__rohubDb;
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -491,6 +652,7 @@ export function getDb(): Database.Database {
   init(db);
   seed(db);
   seedProfiles(db);
+  seedLadder(db);
   global.__rohubDb = db;
   return db;
 }

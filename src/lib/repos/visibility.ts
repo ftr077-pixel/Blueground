@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
+import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
+import type { CostDefaults } from "@/lib/revenue";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
 export interface SearchProfile {
@@ -322,6 +324,18 @@ export function listListingsByProfile(profileId: string): TrackedListing[] {
   ).map(rowToListing);
 }
 
+/** Link a Hub unit to (at most) one Airbnb listing via tracked_listings.unit_id. */
+export function setUnitListing(unitId: string, listingId: string | null): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id = ?").run(unitId);
+    if (listingId) {
+      db.prepare("UPDATE tracked_listings SET unit_id = ? WHERE id = ?").run(unitId, listingId);
+    }
+  });
+  tx();
+}
+
 export function createListing(input: ListingInput): TrackedListing {
   const db = getDb();
   const id = "lst-" + randomUUID().slice(0, 8);
@@ -556,6 +570,9 @@ export interface RecordRunInput {
     currency?: string | null;
   }>;
   listingMinNights?: Record<string, number | null>;
+  // Full competitor price ladder per search, captured alongside our listings'
+  // snapshots in the same run (optional — older scrapers omit it).
+  searchResults?: SearchResultsInput[];
 }
 
 export function recordRun(input: RecordRunInput): number {
@@ -599,6 +616,15 @@ export function recordRun(input: RecordRunInput): number {
       );
       for (const [lid, mn] of Object.entries(input.listingMinNights)) upd.run(mn ?? null, ts, lid);
     }
+    // Ladder shares the run's id + ts so it lines up with the snapshots above.
+    if (input.searchResults?.length) {
+      insertSearchResults(db, {
+        profileId: input.profileId,
+        runId: input.runId,
+        ts,
+        searches: input.searchResults,
+      });
+    }
   });
   tx();
   return input.snapshots.length;
@@ -629,6 +655,24 @@ export function recentSnapshots(listingId: string, limit = 300): ListingSnapshot
 }
 
 // ---------------------------------------------------------------- composed views
+// Operator cost settings (BG/Airbnb fees, default bills, LOS discounts) with the
+// same defaults the dashboard uses. Shared so the learner's profit math matches.
+export function costDefaults(): CostDefaults {
+  const num = (k: string, d: number) => {
+    const v = getSetting(k);
+    return v != null && v !== "" ? Number(v) : d;
+  };
+  return {
+    bgFeePct: num("bg_fee_pct", 6),
+    airbnbFeePct: num("airbnb_fee_pct", 0),
+    defaultUtilities: num("default_utilities", 1000),
+    defaultCleaning: num("default_cleaning", 500),
+    weeklyDiscountPct: num("los_weekly_pct", 0),
+    biWeeklyDiscountPct: num("los_biweekly_pct", 0),
+    monthlyDiscountPct: num("los_monthly_pct", 0),
+  };
+}
+
 export function getDashboard() {
   const profiles = listProfiles();
   const listings = listListings().map((l) => ({ ...l, latest: latestSnapshots(l.id) }));
@@ -640,15 +684,7 @@ export function getDashboard() {
     profiles,
     listings,
     primaryStay: num("primary_stay", 30),
-    costDefaults: {
-      bgFeePct: num("bg_fee_pct", 6),
-      airbnbFeePct: num("airbnb_fee_pct", 0),
-      defaultUtilities: num("default_utilities", 1000),
-      defaultCleaning: num("default_cleaning", 500),
-      weeklyDiscountPct: num("los_weekly_pct", 0),
-      biWeeklyDiscountPct: num("los_biweekly_pct", 0),
-      monthlyDiscountPct: num("los_monthly_pct", 0),
-    },
+    costDefaults: costDefaults(),
     pricingRules: {
       marginLow: num("pr_margin_low", 25),
       marginHigh: num("pr_margin_high", 45),
