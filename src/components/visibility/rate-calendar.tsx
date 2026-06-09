@@ -21,8 +21,8 @@ import { StatTile } from "@/components/stat-tile";
 
 interface RateCell {
   date: string;
-  price: number;
-  available: number;
+  price: number | null;
+  available: number | null;
   minNights: number;
   closed: boolean;
   booked: boolean;
@@ -375,7 +375,7 @@ export function RateCalendar() {
                             }`}
                           >
                             <div className="font-medium">
-                              {c.closed ? <Lock className="mx-auto h-3 w-3" /> : c.price}
+                              {c.closed ? <Lock className="mx-auto h-3 w-3" /> : (c.price ?? "—")}
                             </div>
                             <div className="text-[9px] text-muted-foreground">
                               {c.booked ? "sold" : c.closed ? "" : c.minNights !== data.defaultMinNights ? `≥${c.minNights}` : ""}
@@ -397,8 +397,9 @@ export function RateCalendar() {
             </table>
           </div>
           <p className="mt-3 text-[10px] text-muted-foreground">
-            Baseline is computed from each listing&apos;s rate &amp; occupancy. A dot marks an
-            override: <span className="text-primary">●</span> manual edit ·{" "}
+            Empty cells (—) have no MiniHotel data yet — run &ldquo;Sync MiniHotel&rdquo; to fill real
+            prices &amp; availability. A dot marks an override:{" "}
+            <span className="text-primary">●</span> manual edit ·{" "}
             <span className="text-info">●</span> synced from MiniHotel.
           </p>
         </CardContent>
@@ -410,6 +411,7 @@ export function RateCalendar() {
 function cellTone(c: RateCell): string {
   if (c.closed) return "bg-danger/10 text-muted-foreground";
   if (c.booked) return "bg-success/15 text-foreground";
+  if (c.price == null) return "bg-muted/20 text-muted-foreground/50"; // no data yet (not synced)
   if (c.weekend) return "bg-muted/50 text-foreground";
   return "bg-card text-foreground";
 }
@@ -438,7 +440,7 @@ function EditBar({
   onSave: (price: number, minNights: number, closed: boolean) => void;
   onClose: () => void;
 }) {
-  const [price, setPrice] = useState(String(cell.price));
+  const [price, setPrice] = useState(cell.price == null ? "" : String(cell.price));
   const [minNights, setMinNights] = useState(String(cell.minNights));
   const [closed, setClosed] = useState(cell.closed);
   const num = (s: string, d: number) => {
@@ -475,7 +477,7 @@ function EditBar({
           type="button"
           disabled={busy}
           className={btnCls}
-          onClick={() => onSave(Math.max(0, num(price, cell.price)), Math.max(1, num(minNights, defaultMinNights)), closed)}
+          onClick={() => onSave(Math.max(0, num(price, cell.price ?? 0)), Math.max(1, num(minNights, defaultMinNights)), closed)}
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
           Save
