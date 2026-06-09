@@ -1,4 +1,5 @@
 import { Settings as SettingsIcon } from "lucide-react";
+import { ManagePanel } from "@/components/visibility/manage-panel";
 import { UpdateCard } from "@/components/admin/update-card";
 import { CostDefaultsCard } from "@/components/admin/cost-defaults-card";
 import { PricingRulesCard } from "@/components/admin/pricing-rules-card";
@@ -18,15 +19,17 @@ export default function SettingsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Settings</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            App maintenance and configuration.
+            Profiles, listings, costs, pricing rules and app maintenance — all configuration in one
+            place.
           </p>
         </div>
       </header>
+      <ManagePanel />
+      <CostDefaultsCard />
+      <PricingRulesCard />
       <MiniHotelCard />
       <RateCodeFinderCard />
       <MiniHotelMappingCard />
-      <CostDefaultsCard />
-      <PricingRulesCard />
       <UpdateCard />
     </div>
   );
