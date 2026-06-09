@@ -5,6 +5,8 @@ import {
   parseBulkAri,
   parseAriRoomTypes,
   extractMiniHotelErrors,
+  fetchGuestsAvail,
+  parseGuestsAvail,
 } from "@/lib/integrations/minihotel";
 
 export const dynamic = "force-dynamic";
@@ -44,6 +46,32 @@ export async function POST() {
   const matched = ariRoomTypeIds.filter((id) => mappedCodes.has(id.trim().toUpperCase()));
   const unmatched = ariRoomTypeIds.filter((id) => !mappedCodes.has(id.trim().toUpperCase()));
 
+  // When the bulk feed comes back empty/blocked, probe the guests-based
+  // availability search (1 night) to see whether THAT endpoint can return rooms
+  // despite the misconfigured room type — i.e. whether the Sync fallback works.
+  let guests:
+    | { roomTypes: number; priced: number; sample: string[]; errors: string[] }
+    | undefined;
+  if (cells.length === 0) {
+    try {
+      const graw = await fetchGuestsAvail(conn, todayUTC(), plusDays(todayUTC(), 1));
+      const rooms = parseGuestsAvail(graw);
+      guests = {
+        roomTypes: rooms.length,
+        priced: rooms.filter((r) => r.price != null).length,
+        sample: rooms.slice(0, 12).map((r) => r.roomType),
+        errors: extractMiniHotelErrors(graw).slice(0, 3),
+      };
+    } catch (e) {
+      guests = {
+        roomTypes: 0,
+        priced: 0,
+        sample: [],
+        errors: [e instanceof Error ? e.message : "availability search failed"],
+      };
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     rateCode: conn.rateCode || "(none)",
@@ -53,6 +81,7 @@ export async function POST() {
     mappedToUnits: matched.length,
     unmatchedRoomTypes: unmatched.slice(0, 12),
     errors: errors.slice(0, 5),
+    guests,
     rawHead: raw.replace(/\s+/g, " ").trim().slice(0, 280),
   });
 }

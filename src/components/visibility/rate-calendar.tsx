@@ -180,25 +180,27 @@ export function RateCalendar() {
         mappedTypes?: number;
         unmappedTypes?: string[];
         errors?: string[];
+        note?: string;
         message?: string;
       };
       if (d.ok) {
         const errs = d.errors ?? [];
         const errText = `${errs.slice(0, 2).join(" | ")}${errs.length > 2 ? " …" : ""}`;
-        // Nothing written + an error = MiniHotel's Bulk ARI aborted the WHOLE feed
-        // on one bad room type (it can't be told to skip rooms — the request only
-        // accepts *ALL*/*MIN*). Say so plainly; "skipped" would be a lie.
+        // Nothing written + an error = MiniHotel's bulk feed aborted on one bad
+        // room type (it can't be told to skip rooms). Say so plainly — "skipped"
+        // would be a lie, since one bad room blocks every room.
         if ((d.written ?? 0) === 0 && errs.length) {
           setSyncMsg({
             ok: false,
-            text: `MiniHotel returned no rates — its feed was blocked by a room-type config error: ${errText}. One misconfigured room stops EVERY room from syncing. Fix that room's Basic occupancy (or deactivate it) in MiniHotel, then Sync again.`,
+            text: `MiniHotel returned no rates — its feed was blocked by a room-type config error: ${errText}. One misconfigured room stops EVERY room from syncing. In MiniHotel, set that room type's Basic occupancy (or deactivate the room type), then Sync again.`,
           });
         } else {
           const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
           const issues = errs.length ? ` · ${errs.length} MiniHotel issue(s): ${errText}` : "";
+          const via = d.note ? ` ${d.note}` : "";
           setSyncMsg({
-            ok: !errs.length,
-            text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.`,
+            ok: !errs.length || !!d.note,
+            text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.${via}`,
           });
         }
         await refresh();
@@ -369,6 +371,23 @@ export function RateCalendar() {
           {diag.errors && diag.errors.length > 0 && (
             <p className="text-[hsl(var(--warning))]">errors: {diag.errors.join(" | ")}</p>
           )}
+          {diag.guests && (
+            <div className="mt-1 border-t border-border/60 pt-1.5">
+              <p
+                className={
+                  diag.guests.roomTypes > 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--warning))]"
+                }
+              >
+                {guestsVerdict(diag.guests)}
+              </p>
+              {diag.guests.sample.length > 0 && (
+                <p className="text-muted-foreground">
+                  availability-search room ids:{" "}
+                  <span className="font-mono text-foreground">{diag.guests.sample.join(", ")}</span>
+                </p>
+              )}
+            </div>
+          )}
           {diag.rawHead && (
             <details>
               <summary className="cursor-pointer text-muted-foreground">raw response</summary>
@@ -515,6 +534,7 @@ interface DiagResult {
   mappedToUnits?: number;
   unmatchedRoomTypes?: string[];
   errors?: string[];
+  guests?: { roomTypes: number; priced: number; sample: string[]; errors: string[] };
   rawHead?: string;
 }
 
@@ -535,6 +555,16 @@ function diagVerdict(d: DiagResult): string {
   if (priced === 0)
     return `Matched ${mapped} room type(s), but no prices came back${d.errors && d.errors.length ? ` (${d.errors.join("; ")})` : ""} — likely occupancy isn't set on those rooms.`;
   return `Looks good: ${priced} priced night(s) across ${mapped} matched room type(s). Hit "Sync MiniHotel" to load them.`;
+}
+
+// Verdict for the guests-based fallback probe (only run when the bulk feed is empty).
+function guestsVerdict(g: NonNullable<DiagResult["guests"]>): string {
+  if (g.roomTypes > 0)
+    return `Fallback works: the availability search returned ${g.roomTypes} room type(s)${g.priced ? `, ${g.priced} priced` : ""} despite the bulk feed being blocked — Sync will use it automatically.`;
+  const e310 = (g.errors || []).find((x) => /ERR\s?310/i.test(x));
+  if (e310)
+    return `Fallback can't help either — the availability search hit the same config error (${e310}). This must be fixed in MiniHotel: set the room type's Basic occupancy (or deactivate it).`;
+  return `Fallback returned no rooms${g.errors && g.errors.length ? ` (${g.errors.join("; ")})` : ""} — the broken room must be fixed in MiniHotel.`;
 }
 
 function LegendSwatch({ className, label }: { className: string; label: string }) {
