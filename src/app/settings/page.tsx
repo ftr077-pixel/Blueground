@@ -4,6 +4,7 @@ import { CostDefaultsCard } from "@/components/admin/cost-defaults-card";
 import { PricingRulesCard } from "@/components/admin/pricing-rules-card";
 import { MiniHotelCard } from "@/components/admin/minihotel-card";
 import { MiniHotelMappingCard } from "@/components/admin/minihotel-mapping-card";
+import { RateCodeFinderCard } from "@/components/admin/ratecode-finder-card";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,7 @@ export default function SettingsPage() {
         </div>
       </header>
       <MiniHotelCard />
+      <RateCodeFinderCard />
       <MiniHotelMappingCard />
       <CostDefaultsCard />
       <PricingRulesCard />
