@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listMarketSnapshots } from "@/lib/repos/market";
 import { isAirRoiConfigured } from "@/lib/pricing/airroi-client";
+import { syncMarketData } from "@/lib/pricing/airroi-sync";
 
 export const dynamic = "force-dynamic";
 
@@ -15,3 +16,12 @@ export async function GET() {
     snapshots,
   });
 }
+
+// Manual "Sync now" from the dashboard UI. Behind the dashboard login (the cron
+// uses /api/market/sync with the key instead). Returns per-area results so the
+// UI can show exactly what synced or why it failed.
+export async function POST() {
+  const result = await syncMarketData();
+  return NextResponse.json(result, { status: result.ok ? 200 : 400 });
+}
+
