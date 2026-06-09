@@ -74,6 +74,7 @@ export async function POST(req: Request) {
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    PYTHONUNBUFFERED: "1", // flush scraper output to scan.log live (no block buffering)
     APP_URL: `http://127.0.0.1:${port}`,
     PROXY_URL: proxy,
     SCRAPER_API_KEY: process.env.SCRAPER_API_KEY || "",
