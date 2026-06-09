@@ -268,6 +268,24 @@ function init(db: Database.Database) {
       source      TEXT NOT NULL DEFAULT 'minihotel',
       updated_at  TEXT
     );
+
+    -- Occupancy backbone from MiniHotel's ARI server (Room Status Inquiry). These
+    -- bookings carry no revenue (that's the Content & Data API), but they're the
+    -- real occupancy: which room is booked which nights. Refreshed as a full
+    -- snapshot each sync. ari_room is the room inventory (the occupancy denominator).
+    CREATE TABLE IF NOT EXISTS ari_booking (
+      res_number  TEXT PRIMARY KEY,
+      room_number TEXT,
+      room_type   TEXT,
+      check_in    TEXT NOT NULL,
+      check_out   TEXT NOT NULL,
+      status      TEXT,
+      updated_at  TEXT
+    );
+    CREATE TABLE IF NOT EXISTS ari_room (
+      room_number TEXT PRIMARY KEY,
+      room_type   TEXT
+    );
   `);
 
   // Reservation columns added after the table first shipped.

@@ -773,6 +773,7 @@ export function markScanStarted(): void {
 
 export function markScanFinished(message: string): void {
   setSetting("scan_running", "");
+  setSetting("scan_pid", "");
   setSetting("scan_finished_at", new Date().toISOString());
   setSetting("scan_message", message);
 }

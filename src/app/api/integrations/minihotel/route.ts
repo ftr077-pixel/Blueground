@@ -28,6 +28,8 @@ export async function POST(req: Request) {
   if (typeof body.vatRate === "string") patch.vatRate = body.vatRate;
   if (typeof body.vatCountries === "string") patch.vatCountries = body.vatCountries;
   if (typeof body.excludedRoomTypes === "string") patch.excludedRoomTypes = body.excludedRoomTypes;
+  if (typeof body.contentUsername === "string") patch.contentUsername = body.contentUsername;
+  if (typeof body.contentPassword === "string") patch.contentPassword = body.contentPassword;
 
   saveMiniHotelConnection(patch);
   // Return the masked view so the client refreshes without ever seeing the password.
