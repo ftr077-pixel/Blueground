@@ -339,9 +339,13 @@ function init(db: Database.Database) {
       currency      TEXT,
       summary       TEXT,
       pacing        TEXT,
-      min_nights    TEXT
+      min_nights    TEXT,
+      metrics       TEXT,
+      filter        TEXT
     );
   `);
+  ensureColumn(db, "market_snapshots", "metrics", "TEXT");
+  ensureColumn(db, "market_snapshots", "filter", "TEXT");
 }
 
 function seed(db: Database.Database) {

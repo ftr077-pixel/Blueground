@@ -1,14 +1,16 @@
 // Daily market-data sync: for each neighborhood in the portfolio, resolve the
-// AirROI market once, pull the summary + forward pacing + min-nights, and cache
-// them in market_snapshots. Designed to run on a schedule (a few calls/day), not
-// per pricing pass. No-ops cleanly when AIRROI_API_KEY isn't set.
+// AirROI market once, pull summary + historical metrics + forward pacing +
+// min-nights (scoped by the configured comp filter), and cache them in
+// market_snapshots. No-ops cleanly when AIRROI_API_KEY isn't set.
 
 import { listUnits } from "@/lib/repos/units";
+import { getSetting } from "@/lib/repos/visibility";
 import {
   upsertMarketSnapshot,
   type AirRoiMarket,
   type PacingPoint,
   type MinNightsPoint,
+  type MetricsPoint,
 } from "@/lib/repos/market";
 import { logActivity } from "@/lib/repos/activity";
 import {
@@ -17,6 +19,9 @@ import {
   getMarketSummary,
   getMarketFuturePacing,
   getMarketMinNights,
+  getMarketAllMetrics,
+  type MarketFilter,
+  type MarketOpts,
 } from "@/lib/pricing/airroi-client";
 
 export interface SyncedArea {
@@ -24,38 +29,51 @@ export interface SyncedArea {
   market: string;
   occupancy: number | null;
   pacingPoints: number;
+  metricsMonths: number;
 }
 
 export interface MarketSyncResult {
   ok: boolean;
   reason?: string;
+  filterLabel: string | null;
   synced: SyncedArea[];
   failed: { neighborhood: string; error: string }[];
 }
 
 const REGION_HINT = process.env.AIRROI_REGION_HINT || "Tel Aviv-Yafo, Israel";
 // AirROI accepts only 'usd' or 'native' for the currency param; 'native' auto-maps
-// to the market's local currency (ILS for Israel). We keep a separate display
-// currency for the ₪ symbol shown in the UI.
+// to the market's local currency (ILS for Israel). Display currency is separate.
 const AIRROI_CURRENCY = process.env.AIRROI_CURRENCY || "native";
 const DISPLAY_CURRENCY = process.env.AIRROI_DISPLAY_CURRENCY || "ILS";
+const NUM_MONTHS = 12;
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : "unknown error");
 
+// Comp filter from settings (set in the UI). null bedrooms = all units.
+function compFilter(): { filter?: MarketFilter; label: string | null } {
+  const raw = getSetting("market_bedrooms");
+  if (raw === null || raw === "") return { filter: undefined, label: null };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { filter: undefined, label: null };
+  if (n >= 4) return { filter: { bedrooms: { gte: 4 } }, label: "4+ BR" };
+  if (n <= 0) return { filter: { bedrooms: { eq: 0 } }, label: "studio" };
+  return { filter: { bedrooms: { eq: n } }, label: `${n} BR` };
+}
+
 export async function syncMarketData(): Promise<MarketSyncResult> {
+  const { filter, label } = compFilter();
   if (!isAirRoiConfigured()) {
-    return { ok: false, reason: "AIRROI_API_KEY not set", synced: [], failed: [] };
+    return { ok: false, reason: "AIRROI_API_KEY not set", filterLabel: label, synced: [], failed: [] };
   }
 
   const neighborhoods = Array.from(new Set(listUnits().map((u) => u.neighborhood)));
-  // If every unit has a blank neighborhood, still sync the city-level market once.
   if (neighborhoods.length === 0) neighborhoods.push("");
 
+  const opts: MarketOpts = { currency: AIRROI_CURRENCY, numMonths: NUM_MONTHS, filter };
   const synced: SyncedArea[] = [];
   const failed: { neighborhood: string; error: string }[] = [];
 
   for (const neighborhood of neighborhoods) {
-    // A blank neighborhood must search the city directly — NOT ", Tel Aviv…".
     const query = neighborhood.trim() ? `${neighborhood}, ${REGION_HINT}` : REGION_HINT;
     try {
       let market: AirRoiMarket | null = await searchMarket(query);
@@ -65,29 +83,33 @@ export async function syncMarketData(): Promise<MarketSyncResult> {
         continue;
       }
 
-      // Fetch each metric independently so one failure doesn't hide the others.
       const errs: string[] = [];
       let summary = null;
+      let metrics: MetricsPoint[] = [];
       let pacing: PacingPoint[] = [];
       let minNights: MinNightsPoint[] = [];
       try {
-        summary = await getMarketSummary(market, AIRROI_CURRENCY);
+        summary = await getMarketSummary(market, opts);
       } catch (e) {
         errs.push(`summary: ${msg(e)}`);
       }
       try {
-        pacing = await getMarketFuturePacing(market, AIRROI_CURRENCY);
+        metrics = await getMarketAllMetrics(market, opts);
+      } catch (e) {
+        errs.push(`metrics: ${msg(e)}`);
+      }
+      try {
+        pacing = await getMarketFuturePacing(market, opts);
       } catch (e) {
         errs.push(`pacing: ${msg(e)}`);
       }
       try {
-        minNights = await getMarketMinNights(market, AIRROI_CURRENCY);
+        minNights = await getMarketMinNights(market, opts);
       } catch (e) {
         errs.push(`min-nights: ${msg(e)}`);
       }
 
-      // Don't cache an empty row — surface why instead.
-      if (!summary && pacing.length === 0) {
+      if (!summary && pacing.length === 0 && metrics.length === 0) {
         failed.push({
           neighborhood,
           error: `"${market.full_name ?? query}" returned no data${errs.length ? ` — ${errs.join("; ")}` : ""}`,
@@ -102,12 +124,15 @@ export async function syncMarketData(): Promise<MarketSyncResult> {
         summary,
         pacing,
         minNights,
+        metrics,
+        filterLabel: label,
       });
       synced.push({
         neighborhood,
         market: market.full_name ?? query,
         occupancy: summary?.occupancy ?? null,
         pacingPoints: pacing.length,
+        metricsMonths: metrics.length,
       });
     } catch (e) {
       failed.push({ neighborhood, error: msg(e) });
@@ -117,9 +142,9 @@ export async function syncMarketData(): Promise<MarketSyncResult> {
   logActivity({
     department: "revenue",
     worker: "Pricing Specialist",
-    message: `AirROI market sync: ${synced.length} area(s) refreshed${failed.length ? `, ${failed.length} failed` : ""}.`,
+    message: `AirROI market sync${label ? ` (${label})` : ""}: ${synced.length} area(s) refreshed${failed.length ? `, ${failed.length} failed` : ""}.`,
     level: failed.length && synced.length === 0 ? "warning" : "info",
   });
 
-  return { ok: true, synced, failed };
+  return { ok: true, filterLabel: label, synced, failed };
 }
