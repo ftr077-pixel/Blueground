@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { BridgePanel } from "@/components/bridge/bridge-panel";
+import { OccupancyPanel } from "@/components/pnl/occupancy-panel";
 
 // One P&L surface, two sub-tabs over the same Bridge 11 m model:
 //   • Forecast — driver controls (what-if) + real-data/variance slot.
@@ -27,6 +28,7 @@ export function PnlWorkspace() {
         ))}
       </div>
       <BridgePanel mode={tab} />
+      <OccupancyPanel />
     </div>
   );
 }
