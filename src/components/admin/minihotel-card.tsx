@@ -46,12 +46,14 @@ interface Pull {
   vat?: number;
   test?: number;
 }
-interface AriProbe {
+interface AriOcc {
   ok: boolean;
   message?: string;
-  count?: number;
-  withAmount?: number;
-  sampleRaw?: string;
+  bookings?: number;
+  rooms?: number;
+  thisMonth?: string;
+  occupancy?: number;
+  bookedNights?: number;
 }
 
 export function MiniHotelCard() {
@@ -72,7 +74,7 @@ export function MiniHotelCard() {
   const [saved, setSaved] = useState(false);
   const [test, setTest] = useState<TestResult | null>(null);
   const [pull, setPull] = useState<Pull | null>(null);
-  const [ari, setAri] = useState<AriProbe | null>(null);
+  const [ari, setAri] = useState<AriOcc | null>(null);
 
   const apply = useCallback((v: View) => {
     setEnv(v.env);
@@ -185,20 +187,20 @@ export function MiniHotelCard() {
     }
   }
 
-  // Probe the working ARI server (api.minihotel.cloud) for the reservation list,
-  // to see what bookings it returns (no revenue — preview only).
+  // Sync occupancy from the ARI server (Room Status) — the bookings that already
+  // work — and store them. No revenue (that's Content & Data); occupancy only.
   async function tryAri() {
     setBusy(true);
     setAri(null);
     try {
-      const r = await fetch("/api/reservations/ari", {
+      const r = await fetch("/api/occupancy/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ days: 40 }),
+        body: JSON.stringify({ days: 45 }),
       }).then((res) => res.json());
-      setAri(r as AriProbe);
+      setAri(r as AriOcc);
     } catch (e) {
-      setAri({ ok: false, message: e instanceof Error ? e.message : "probe failed" });
+      setAri({ ok: false, message: e instanceof Error ? e.message : "sync failed" });
     } finally {
       setBusy(false);
     }
@@ -340,7 +342,7 @@ export function MiniHotelCard() {
             Pull reservations → P&amp;L
           </button>
           <button type="button" disabled={busy} onClick={tryAri} className={btnGhost}>
-            Try ARI list (api.minihotel.cloud)
+            Sync occupancy (ARI)
           </button>
           {pull ? (
             pull.ok ? (
@@ -358,25 +360,21 @@ export function MiniHotelCard() {
           ) : (
             <span className="w-full text-[10px] text-muted-foreground">
               <b>Pull reservations → P&amp;L</b> uses the Content &amp; Data API (real revenue, VAT-correct).
-              <b> Try ARI list</b> reads the booking list from the server that already works — to see what
-              it returns (no prices on that one). Run both from the box.
+              <b> Sync occupancy (ARI)</b> stores the real bookings from the server that already works —
+              occupancy only, no prices. Run both from the box.
             </span>
           )}
           {ari ? (
             ari.ok ? (
               <span className="w-full text-[11px] text-foreground">
-                ARI server returned <span className="font-medium">{ari.count} reservation(s)</span>
-                {ari.withAmount
-                  ? ` · ${ari.withAmount} include a price 🎉`
-                  : " · no prices on this list (occupancy only)"}
-                {ari.sampleRaw ? (
-                  <span className="mt-0.5 block break-all font-mono text-[10px] text-muted-foreground">
-                    {ari.sampleRaw}
-                  </span>
-                ) : null}
+                ✓ {(ari.bookings ?? 0).toLocaleString()} bookings · {ari.rooms} rooms ·{" "}
+                <span className="font-medium">
+                  {ari.thisMonth} occupancy {Math.round((ari.occupancy ?? 0) * 100)}%
+                </span>{" "}
+                ({(ari.bookedNights ?? 0).toLocaleString()} booked nights)
               </span>
             ) : (
-              <span className="w-full text-[11px] text-[hsl(var(--warning))]">ARI probe failed: {ari.message}</span>
+              <span className="w-full text-[11px] text-[hsl(var(--warning))]">Sync failed: {ari.message}</span>
             )
           ) : null}
         </div>

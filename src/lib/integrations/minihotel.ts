@@ -9,6 +9,7 @@ import {
 import { upsertOverride } from "@/lib/repos/rates";
 import { upsertImportedUnit, deleteUnitsByIdPrefix } from "@/lib/repos/units";
 import { upsertReservations, reservationStats } from "@/lib/repos/reservations";
+import { storeAriOccupancy, occupancyByMonth } from "@/lib/repos/occupancy";
 
 /**
  * MiniHotel read sync (server-side).
@@ -492,6 +493,82 @@ export async function pullAriReservations(opts: {
     withAmount: all.filter((r) => r.amount != null).length,
     sampleRaw,
     reservations: all.slice(0, 100),
+    errors,
+  };
+}
+
+/** Room inventory from a Room Status response (<Rooms><Room Number Rmtype/></Rooms>). */
+export function parseRoomStatusRooms(xml: string): { roomNumber: string; roomType?: string }[] {
+  const x = decodeEntities(xml);
+  const scope = x.match(/<Rooms\b[^>]*>([\s\S]*?)<\/Rooms>/i)?.[1] ?? "";
+  const out: { roomNumber: string; roomType?: string }[] = [];
+  const re = /<Room\b([^>]*?)\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(scope))) {
+    const num = attr(m[1], "Number") ?? attr(m[1], "RoomNumber");
+    if (!num) continue;
+    out.push({ roomNumber: num, roomType: attr(m[1], "Rmtype") ?? attr(m[1], "RoomType") ?? undefined });
+  }
+  return out;
+}
+
+export interface AriOccupancyResult {
+  ok: boolean;
+  from: string;
+  to: string;
+  bookings: number; // stored bookings
+  rooms: number; // stored room inventory
+  thisMonth: string;
+  occupancy: number; // this month, 0..1
+  bookedNights: number; // this month
+  errors: string[];
+  message?: string;
+}
+
+/**
+ * Sync occupancy from the ARI server (Room Status Inquiry) into the Hub: store the
+ * booking snapshot + room inventory, then return this month's occupancy. Uses the
+ * credentials that already work for rates. No revenue is involved (ARI has none).
+ */
+export async function syncAriOccupancy(opts: {
+  from?: string;
+  days?: number;
+  xml?: string;
+}): Promise<AriOccupancyResult> {
+  const conn = getMiniHotelConnection();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const days = Math.max(1, Math.min(60, opts.days ?? 45));
+  const to = plusDays(from, days - 1);
+
+  let xml = opts.xml;
+  if (!xml) {
+    if (!conn.username || !conn.password || !conn.hotelId) {
+      return { ok: false, from, to, bookings: 0, rooms: 0, thisMonth: "", occupancy: 0, bookedNights: 0, errors: [], message: "MiniHotel connection isn't configured." };
+    }
+    xml = await fetchRoomStatusRange(conn, from, to);
+  }
+
+  const errors = extractMiniHotelErrors(xml);
+  const bookings = parseRoomStatusReservations(xml).map((r) => ({
+    resNumber: r.resNumber,
+    roomNumber: r.roomNumber,
+    roomType: r.roomType,
+    checkIn: r.checkIn,
+    checkOut: r.checkOut,
+    status: r.status,
+  }));
+  const rooms = parseRoomStatusRooms(xml);
+  const stored = storeAriOccupancy(bookings, rooms);
+  const occ = occupancyByMonth();
+  return {
+    ok: true,
+    from,
+    to,
+    bookings: stored.bookings,
+    rooms: stored.rooms,
+    thisMonth: occ.thisMonth,
+    occupancy: occ.current.occupancy,
+    bookedNights: occ.current.bookedNights,
     errors,
   };
 }
