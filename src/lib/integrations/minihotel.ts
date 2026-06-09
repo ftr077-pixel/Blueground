@@ -195,79 +195,6 @@ export async function fetchBulkAri(
   }
 }
 
-/**
- * Fetch ARI scoped to the mapped, non-excluded room types, so a single
- * misconfigured/excluded room (ERR 310) can't abort the whole feed. One scoped
- * request handles the common case; if it still comes back empty (a bad room is
- * among the targets), salvage the healthy rooms in small batches, then per room.
- */
-async function fetchScopedAri(
-  conn: MiniHotelConnection,
-  from: string,
-  to: string,
-): Promise<{ cells: AriCell[]; errors: string[] }> {
-  const excluded = getExcludedRoomCodes();
-  const targets = [
-    ...new Set(
-      getMiniHotelMapping()
-        .filter((m) => m.roomType)
-        .map((m) => (m.roomType as string).trim())
-        .filter(Boolean),
-    ),
-  ].filter((c) => !excluded.has(c.toUpperCase()));
-
-  // Nothing mapped → fall back to the whole-hotel feed.
-  if (targets.length === 0) {
-    const xml = await fetchBulkAri(conn, from, to);
-    return { cells: parseBulkAri(xml), errors: parseAriErrors(xml) };
-  }
-
-  const errors = new Set<string>();
-
-  // Happy path: one request for all mapped, non-excluded rooms.
-  try {
-    const xml = await fetchBulkAri(conn, from, to, targets);
-    const got = parseBulkAri(xml);
-    parseAriErrors(xml).forEach((e) => errors.add(e));
-    if (got.length > 0) return { cells: got, errors: [...errors] };
-  } catch (e) {
-    errors.add(e instanceof Error ? e.message : "scoped request failed");
-  }
-
-  // Empty → a bad room among the targets aborted it. Batch, then per-room
-  // (bounded so the sync stays responsive even if every batch trips).
-  const cells: AriCell[] = [];
-  let budget = 30;
-  const BATCH = 20;
-  for (let i = 0; i < targets.length && budget > 0; i += BATCH) {
-    const batch = targets.slice(i, i + BATCH);
-    budget--;
-    let got: AriCell[] = [];
-    try {
-      const xml = await fetchBulkAri(conn, from, to, batch);
-      got = parseBulkAri(xml);
-      parseAriErrors(xml).forEach((e) => errors.add(e));
-    } catch {
-      /* fall through to per-room */
-    }
-    if (got.length > 0) {
-      cells.push(...got);
-      continue;
-    }
-    for (const code of batch) {
-      if (budget <= 0) break;
-      budget--;
-      try {
-        const one = parseBulkAri(await fetchBulkAri(conn, from, to, [code]));
-        if (one.length) cells.push(...one);
-      } catch {
-        /* skip this room */
-      }
-    }
-  }
-  return { cells, errors: [...errors] };
-}
-
 export async function syncFromMiniHotel(opts: {
   from?: string;
   days?: number;
@@ -298,10 +225,14 @@ export async function syncFromMiniHotel(opts: {
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
-    // Scope to mapped, non-excluded room types so one bad room can't blank it all.
-    const scoped = await fetchScopedAri(conn, from, to);
-    parsed = scoped.cells;
-    errors = scoped.errors;
+    // One whole-hotel Bulk ARI call. MiniHotel's request can't be scoped to
+    // specific rooms (the RoomType filter only accepts *ALL*/*MIN*), so a single
+    // room type with missing Basic occupancy (ERR 310) aborts the entire feed —
+    // that has to be fixed in MiniHotel, not worked around here. We still collect
+    // any ERR codes so the UI can explain the block instead of failing silently.
+    const xml = await fetchBulkAri(conn, from, to);
+    parsed = parseBulkAri(xml);
+    errors = parseAriErrors(xml);
   }
 
   // RoomTypeCode -> unit id(s); case-insensitive so codes match regardless of casing.

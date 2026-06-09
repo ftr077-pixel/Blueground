@@ -166,15 +166,24 @@ export function RateCalendar() {
         message?: string;
       };
       if (d.ok) {
-        const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
-        const issues =
-          d.errors && d.errors.length
-            ? ` · ${d.errors.length} MiniHotel issue(s) skipped: ${d.errors.slice(0, 2).join(" | ")}${d.errors.length > 2 ? " …" : ""}`
-            : "";
-        setSyncMsg({
-          ok: !(d.errors && d.errors.length),
-          text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.`,
-        });
+        const errs = d.errors ?? [];
+        const errText = `${errs.slice(0, 2).join(" | ")}${errs.length > 2 ? " …" : ""}`;
+        // Nothing written + an error = MiniHotel's Bulk ARI aborted the WHOLE feed
+        // on one bad room type (it can't be told to skip rooms — the request only
+        // accepts *ALL*/*MIN*). Say so plainly; "skipped" would be a lie.
+        if ((d.written ?? 0) === 0 && errs.length) {
+          setSyncMsg({
+            ok: false,
+            text: `MiniHotel returned no rates — its feed was blocked by a room-type config error: ${errText}. One misconfigured room stops EVERY room from syncing. Fix that room's Basic occupancy (or deactivate it) in MiniHotel, then Sync again.`,
+          });
+        } else {
+          const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
+          const issues = errs.length ? ` · ${errs.length} MiniHotel issue(s): ${errText}` : "";
+          setSyncMsg({
+            ok: !errs.length,
+            text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.`,
+          });
+        }
         await refresh();
       } else {
         setSyncMsg({ ok: false, text: d.message || "Sync failed." });
