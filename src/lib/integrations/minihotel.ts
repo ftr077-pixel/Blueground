@@ -370,6 +370,132 @@ export async function fetchRoomStatus(conn: MiniHotelConnection): Promise<string
   }
 }
 
+export interface AriReservation {
+  resNumber: string;
+  name?: string;
+  roomNumber?: string;
+  roomType?: string;
+  checkIn: string;
+  checkOut: string;
+  status?: string;
+  amount?: number; // present only if this hotel's response carries a price-like field
+}
+
+const ymd8 = (s: string | null): string | null => {
+  if (!s) return null;
+  if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  return null;
+};
+
+/**
+ * Parse the <Reservations> list from a Room Status (ResponseType 03) response on
+ * the ARI server. Per MiniHotel's docs this view carries guest/room/dates/status
+ * but NO prices, and omits checked-out/cancelled stays — we still surface any
+ * price-like attribute in case a given hotel's response happens to include one.
+ */
+export function parseRoomStatusReservations(xml: string): AriReservation[] {
+  const x = decodeEntities(xml);
+  const scope = x.match(/<Reservations\b[^>]*>([\s\S]*?)<\/Reservations>/i)?.[1] ?? x;
+  const out: AriReservation[] = [];
+  const re = /<Reservation\b([^>]*?)\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(scope))) {
+    const a = m[1];
+    const checkIn = ymd8(attr(a, "FromYmd") ?? attr(a, "arrival") ?? attr(a, "From"));
+    const checkOut = ymd8(attr(a, "ToYmd") ?? attr(a, "departure") ?? attr(a, "To"));
+    if (!checkIn || !checkOut) continue;
+    const amount =
+      numAttr(a, "AmountAfterTaxes") ??
+      numAttr(a, "Total") ??
+      numAttr(a, "Amount") ??
+      numAttr(a, "Price") ??
+      numAttr(a, "Rate");
+    out.push({
+      resNumber: attr(a, "ResNumber") ?? attr(a, "resnumber") ?? "",
+      name: [attr(a, "Namep"), attr(a, "Namef")].filter(Boolean).join(" ") || undefined,
+      roomNumber: attr(a, "RoomNumber") ?? undefined,
+      roomType: attr(a, "RoomType") ?? undefined,
+      checkIn,
+      checkOut,
+      status: attr(a, "Status") ?? undefined,
+      amount: amount ?? undefined,
+    });
+  }
+  return out;
+}
+
+/** Room Status (ResponseType 03) over an explicit date range, on the ARI server. */
+export async function fetchRoomStatusRange(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.ari, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildRoomStatusRequest(conn, from, to),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface AriReservationsResult {
+  ok: boolean;
+  from: string;
+  to: string;
+  count: number;
+  withAmount: number; // how many reservations carried a price-like field
+  sampleRaw?: string; // first <Reservation .../> tag verbatim — to see all fields
+  reservations: AriReservation[];
+  errors: string[];
+  message?: string;
+}
+
+/**
+ * Probe the ARI server (api.minihotel.cloud) for the reservation list via Room
+ * Status Inquiry — the "can we read bookings from the server that already works?"
+ * test. Preview only: it does NOT write the P&L, because this ARI view has no
+ * revenue. If the response unexpectedly carries prices, withAmount/sampleRaw show it.
+ */
+export async function pullAriReservations(opts: {
+  from?: string;
+  days?: number;
+  xml?: string;
+}): Promise<AriReservationsResult> {
+  const conn = getMiniHotelConnection();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const days = Math.max(1, Math.min(60, opts.days ?? 35));
+  const to = plusDays(from, days - 1);
+
+  let xml = opts.xml;
+  if (!xml) {
+    if (!conn.username || !conn.password || !conn.hotelId) {
+      return { ok: false, from, to, count: 0, withAmount: 0, reservations: [], errors: [], message: "MiniHotel connection isn't configured." };
+    }
+    xml = await fetchRoomStatusRange(conn, from, to);
+  }
+
+  const errors = extractMiniHotelErrors(xml);
+  const all = parseRoomStatusReservations(xml);
+  const sampleRaw = (decodeEntities(xml).match(/<Reservation\b[^>]*?\/?>/i)?.[0] ?? "").slice(0, 400) || undefined;
+  return {
+    ok: true,
+    from,
+    to,
+    count: all.length,
+    withAmount: all.filter((r) => r.amount != null).length,
+    sampleRaw,
+    reservations: all.slice(0, 100),
+    errors,
+  };
+}
+
 /** Room types from a Room Status response (<RoomsTypes><RoomType Code Description/>). */
 export function parseStatusRoomTypes(xml: string): RoomTypeInfo[] {
   const x = decodeEntities(xml);
