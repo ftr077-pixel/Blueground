@@ -82,6 +82,17 @@ const partsUTC = (iso: string) => {
   return { wd: d.getUTCDay(), day: d.getUTCDate(), mon: d.getUTCMonth(), year: d.getUTCFullYear() };
 };
 
+// Units come named like "#TLV12" (the Airbnb internal name). Show them as
+// "TLV 12" and order the calendar by the number, not alphabetically.
+function tlvNum(name: string): number {
+  const m = name.match(/tlv[\s#]*(\d+)/i);
+  return m ? parseInt(m[1], 10) : Number.POSITIVE_INFINITY;
+}
+function tlvLabel(name: string): string {
+  const m = name.match(/tlv[\s#]*(\d+)/i);
+  return m ? `TLV ${m[1]}` : name;
+}
+
 export function RateCalendar() {
   const [from, setFrom] = useState(todayUTC());
   const [days, setDays] = useState(35);
@@ -113,7 +124,13 @@ export function RateCalendar() {
   }, [data]);
 
   const rows = useMemo(
-    () => (data?.rows ?? []).filter((r) => hood === "all" || r.unit.neighborhood === hood),
+    () =>
+      (data?.rows ?? [])
+        .filter((r) => hood === "all" || r.unit.neighborhood === hood)
+        .sort((a, b) => {
+          const d = tlvNum(a.unit.name) - tlvNum(b.unit.name);
+          return d !== 0 ? d : a.unit.name.localeCompare(b.unit.name);
+        }),
     [data, hood],
   );
 
@@ -295,7 +312,7 @@ export function RateCalendar() {
       {selCell && (
         <EditBar
           key={`${selCell.unit.id}|${selCell.cell.date}`}
-          unitName={selCell.unit.name}
+          unitName={tlvLabel(selCell.unit.name)}
           cell={selCell.cell}
           defaultMinNights={data.defaultMinNights}
           busy={busy}
@@ -352,7 +369,7 @@ export function RateCalendar() {
                 {rows.map((row) => (
                   <tr key={row.unit.id} className="border-t border-border/50">
                     <th className="sticky left-0 z-10 bg-card px-3 py-1.5 text-left align-middle min-w-[12rem]">
-                      <div className="font-medium text-foreground leading-tight">{row.unit.name}</div>
+                      <div className="font-medium text-foreground leading-tight">{tlvLabel(row.unit.name)}</div>
                       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         <span>{row.unit.neighborhood}</span>
                         <Badge variant="muted">{row.unit.platform}</Badge>
@@ -370,7 +387,7 @@ export function RateCalendar() {
                             className={`relative h-11 w-14 px-1 leading-tight transition-colors ${cellTone(c)} ${
                               selected ? "ring-2 ring-primary ring-inset" : "hover:brightness-95"
                             }`}
-                            title={`${row.unit.name} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
+                            title={`${tlvLabel(row.unit.name)} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
                               c.source !== "derived" ? ` · ${c.source}` : ""
                             }`}
                           >
