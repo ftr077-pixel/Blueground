@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Loader2, RefreshCw } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -55,6 +56,12 @@ interface MarketResp {
   configured: boolean;
   snapshots: Snapshot[];
 }
+interface SyncResult {
+  ok: boolean;
+  reason?: string;
+  synced: { neighborhood: string; market: string; occupancy: number | null; pacingPoints: number }[];
+  failed: { neighborhood: string; error: string }[];
+}
 
 function shortDate(iso: string) {
   const d = new Date(iso);
@@ -78,38 +85,109 @@ function Tile({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
+function SyncButton({ onClick, syncing }: { onClick: () => void; syncing: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={syncing}
+      title="Pull the latest market data from AirROI now"
+      className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+    >
+      {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+      {syncing ? "Syncing…" : "Sync now"}
+    </button>
+  );
+}
+
+function SyncResultBanner({ result }: { result: SyncResult }) {
+  if (!result.ok) {
+    return (
+      <p className="rounded-md border border-[hsl(var(--danger))]/30 bg-[hsl(var(--danger))]/10 px-3 py-2 text-[11px] text-[hsl(var(--danger))]">
+        Sync failed: {result.reason ?? "unknown error"}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[11px] text-muted-foreground">
+        Synced {result.synced.length} area(s)
+        {result.synced.length > 0 &&
+          `: ${result.synced.map((a) => `${a.market} (${a.pacingPoints}d)`).join(", ")}`}
+        {result.failed.length > 0 && ` · ${result.failed.length} failed`}
+      </p>
+      {result.failed.map((f) => (
+        <p
+          key={f.neighborhood}
+          className="rounded-md border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning))]/10 px-3 py-1.5 text-[11px] text-foreground"
+        >
+          <span className="font-medium">{f.neighborhood || "(all Tel Aviv)"}:</span> {f.error}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 export function MarketAnalyticsPanel() {
   const [resp, setResp] = useState<MarketResp | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+
+  async function load() {
+    const r = await fetch("/api/market", { cache: "no-store" });
+    if (!r.ok) throw new Error(`load failed: ${r.status}`);
+    const b = (await r.json()) as MarketResp;
+    setResp(b);
+    setSelected((cur) => cur ?? b.snapshots[0]?.neighborhood ?? null);
+  }
 
   useEffect(() => {
-    fetch("/api/market", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((b: MarketResp) => {
-        setResp(b);
-        if (b.snapshots.length) setSelected(b.snapshots[0].neighborhood);
-      })
+    load()
       .catch((e) => setError(e instanceof Error ? e.message : "failed to load"))
       .finally(() => setLoading(false));
   }, []);
 
+  async function syncNow() {
+    setSyncing(true);
+    setSyncResult(null);
+    setError(null);
+    try {
+      const r = await fetch("/api/market", { method: "POST" });
+      setSyncResult((await r.json()) as SyncResult);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   if (loading) return <p className="text-xs text-muted-foreground">Loading market data…</p>;
-  if (error) return <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>;
 
   const snapshots = resp?.snapshots ?? [];
+
   if (snapshots.length === 0) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
+        <CardContent className="space-y-3 py-8 text-center">
           <p className="text-sm font-medium">No market data yet</p>
-          <p className="mx-auto mt-1 max-w-md text-[12px] text-muted-foreground">
+          <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
             {resp?.configured
-              ? "AirROI is configured — run the market sync to pull data: "
-              : "Set AIRROI_API_KEY, then run the market sync: "}
-            <code>POST /api/market/sync</code> (the daily cron does this automatically).
+              ? "AirROI is connected. Click Sync now to pull the latest market data."
+              : "AirROI isn't configured yet (set AIRROI_API_KEY). Once it is, Sync now pulls the data."}
           </p>
+          <div className="flex justify-center">
+            <SyncButton onClick={syncNow} syncing={syncing} />
+          </div>
+          {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
+          {syncResult && (
+            <div className="mx-auto max-w-xl text-left">
+              <SyncResultBanner result={syncResult} />
+            </div>
+          )}
         </CardContent>
       </Card>
     );
@@ -153,10 +231,16 @@ export function MarketAnalyticsPanel() {
           )}
           <Badge variant="success">live · AirROI</Badge>
         </div>
-        <span className="text-[11px] text-muted-foreground">
-          updated {fmtRel(snap.fetchedAt)} · {snap.pacing.length} forward days
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-muted-foreground">
+            updated {fmtRel(snap.fetchedAt)} · {snap.pacing.length} forward days
+          </span>
+          <SyncButton onClick={syncNow} syncing={syncing} />
+        </div>
       </div>
+
+      {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
+      {syncResult && <SyncResultBanner result={syncResult} />}
 
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Tile label="Occupancy" value={s ? `${(s.occupancy * 100).toFixed(0)}%` : "—"} sub="market avg" />
