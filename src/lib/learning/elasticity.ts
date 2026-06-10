@@ -7,6 +7,7 @@ import {
 } from "./config";
 import { evalCurve, invertCurve, isotonicNonDecreasing, type IsoCurve, type IsoInput } from "./isotonic";
 import { listingPriceHistory, listingState, marketObservations } from "./dataset";
+import { demandSignal } from "./demand";
 import { listingOffset, ownElasticity } from "./longitudinal";
 import type {
   Confidence,
@@ -17,7 +18,7 @@ import type {
   SegmentCurve,
   SegmentKey,
 } from "./types";
-import { costDefaults, getProfile } from "@/lib/repos/visibility";
+import { costDefaults, getProfile, listListings } from "@/lib/repos/visibility";
 
 const pageOf = (rank: number) => Math.max(1, Math.ceil(rank / WEB_PAGE_SIZE));
 const round = (n: number, step = 1) => Math.round(n / step) * step;
@@ -214,6 +215,10 @@ export function elasticityForListing(
 
   const level = confidenceLevel(n, freshnessDays, ci, target?.nightly ?? null);
 
+  // Relative demand for this check-in: a hot/cold read tempers (never overrides)
+  // the price advice. Drops still come from the curve; demand frames urgency.
+  const demand = state.checkIn ? demandSignal(seg.profileId, nights, state.checkIn) : null;
+
   let note: string | null = null;
   if (n === 0) note = "No market ladder captured for this segment yet — run scans to build it.";
   else if (n < LEARNING.nMin) note = `Learning — only ${n} market points in this segment; treat as indicative.`;
@@ -221,6 +226,10 @@ export function elasticityForListing(
     note = `Already priced for page ${targetPage} or better — no cut needed.`;
   else if (target && !target.reachable)
     note = `Page ${targetPage} may not be reachable on price alone here — consider non-price levers.`;
+  else if (demand?.label === "hot" && target && target.deltaNightly != null && target.deltaNightly < 0)
+    note = `Demand is running hot for this date (top of its own range) — the market may climb to you; consider a smaller drop or a short hold.`;
+  else if (demand?.label === "cold" && target && target.deltaNightly != null && target.deltaNightly < 0)
+    note = `Demand is cold for this date — position buys less; lean on the cut (or non-price levers) early.`;
 
   return {
     listingId,
@@ -255,6 +264,7 @@ export function elasticityForListing(
       ciNightlyHigh: ci ? round(ci.hi, 5) : null,
       freshnessDays: freshnessDays == null ? null : round1(freshnessDays),
     },
+    demand,
     curve: sampleCurve(curve, T),
     note,
   };
@@ -277,5 +287,94 @@ export function learnedRec(
     reachable: r.target.reachable,
     confidence: r.confidence.level,
     n: r.confidence.n,
+  };
+}
+
+// ------------------------------------------------------------- suggestions queue
+// The actionable subset of the portfolio: listings whose learned target price
+// differs meaningfully from what they charge now. This is what the operator works
+// from — instead of stepping through every apartment, only movers show up.
+export interface SuggestionRow {
+  listingId: string;
+  unitId: string | null;
+  label: string;
+  area: string;
+  nights: number;
+  direction: "increase" | "decrease";
+  currentNightly: number;
+  suggestedNightly: number;
+  deltaNightly: number;
+  deltaPct: number;
+  currentPage: number | null;
+  expectedPage: number | null;
+  targetPage: number;
+  confidence: Confidence;
+  n: number;
+  /** Monthly profit delta when listing economics are known (₪/mo), else null. */
+  profitDelta: number | null;
+}
+
+export interface SuggestionBatch {
+  nights: number;
+  targetPage: number;
+  minAbsPct: number;
+  scanned: number;
+  hiddenLowConfidence: number;
+  suggestions: SuggestionRow[];
+}
+
+export function suggestionList(
+  nights: number,
+  targetPage: number,
+  minAbsPct = 2,
+): SuggestionBatch {
+  const listings = listListings().filter((l) => l.active);
+  const suggestions: SuggestionRow[] = [];
+  let hiddenLowConfidence = 0;
+
+  for (const l of listings) {
+    const r = elasticityForListing(l.id, { nights, targetPage, bootstrap: false });
+    if (!r || !r.target || r.target.nightly == null) continue;
+    if (r.current.nightly == null || r.target.deltaPct == null) continue;
+    const suggestedNightly = r.target.nightly;
+    const deltaPct = r.target.deltaPct;
+    if (Math.abs(deltaPct) < minAbsPct) continue; // already priced about right
+    if (deltaPct < 0 && !r.target.reachable) continue; // page not reachable on price alone
+    if (r.confidence.level === "low") {
+      hiddenLowConfidence++;
+      continue;
+    }
+    const profitDelta =
+      r.economics && r.economics.profitBefore != null && r.economics.profitAfter != null
+        ? r.economics.profitAfter - r.economics.profitBefore
+        : null;
+    suggestions.push({
+      listingId: l.id,
+      unitId: l.unitId ?? null,
+      label: r.label,
+      area: r.segment.area,
+      nights,
+      direction: deltaPct >= 0 ? "increase" : "decrease",
+      currentNightly: r.current.nightly,
+      suggestedNightly,
+      deltaNightly: r.target.deltaNightly ?? Math.round(suggestedNightly - r.current.nightly),
+      deltaPct,
+      currentPage: r.current.page,
+      expectedPage: r.current.expectedPage,
+      targetPage: r.target.page,
+      confidence: r.confidence.level,
+      n: r.confidence.n,
+      profitDelta,
+    });
+  }
+
+  suggestions.sort((a, b) => Math.abs(b.deltaPct) - Math.abs(a.deltaPct));
+  return {
+    nights,
+    targetPage,
+    minAbsPct,
+    scanned: listings.length,
+    hiddenLowConfidence,
+    suggestions,
   };
 }

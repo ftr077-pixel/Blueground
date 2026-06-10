@@ -403,7 +403,7 @@ GET /api/learning/curve?profileId=prof-xxx&nights=30&leadBucket=15-30
 | **M2 Model A + read UI** | `elasticity.ts` (cross-sectional) + `/api/learning/*` + Pricing Intelligence panel (read-only insight) | curve renders; "price for page 1" matches a manual read of the ladder | ✅ shipped |
 | **M3 Wire-in** | learned `suggested` in `recommend()` + confidence gating + fallback | Search & Profit "▼ Lower → ₪X" reflects the curve, not 5% | ✅ shipped |
 | **M4 Model B + experiments** | `listing_price_changes` + longitudinal fit + backtest harness | predicted vs realized Δrank tracked | ✅ shipped (`longitudinal.ts`; offset + own-elasticity feed the rec) |
-| **M5 Demand & pace** | demand index + market booking-lead-time (pace) features | curve shifts with demand; "pace vs market" shown | ◐ pace shipped (`/api/learning/market-pace` ingest + "pace vs market"); demand index awaits the operator's feed |
+| **M5 Demand & pace** | demand index + market booking-lead-time (pace) features | curve shifts with demand; "pace vs market" shown | ✅ shipped — pace (`/api/learning/market-pace`) + **relative** demand index (`demand.ts`, `/api/learning/demand`): external market-occupancy readings are scored against their own rolling history (ghost listings make the absolute level meaningless — operator-observed: market reads 30% while the portfolio runs ~100%), blended with supply tightness, anchored to our realized occupancy |
 | **M6 Outcomes** | MiniHotel realized bookings → strategy success-rate & expected-profit target | recommend→act→book attributed; policy conversion tracked | ✅ shipped (bookings sync + `attribution.ts` strategy report) |
 
 ---

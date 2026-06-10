@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { CHART, fmtMoney, nightsLabel } from "@/lib/revenue";
 
 interface Snap {
@@ -75,14 +76,214 @@ interface Elasticity {
     ciNightlyHigh: number | null;
     freshnessDays: number | null;
   };
+  demand: DemandSignal | null;
   curve: CurvePoint[];
   note: string | null;
+}
+
+interface DemandComponent {
+  index: number;
+  percentile: number;
+  raw: number;
+  n: number;
+}
+interface DemandSignal {
+  area: string;
+  date: string;
+  index: number | null;
+  label: "hot" | "firm" | "soft" | "cold" | null;
+  market: DemandComponent | null;
+  supply: DemandComponent | null;
+  ourOccupancy: number | null;
+  readingTs: string | null;
 }
 
 const selectCls =
   "rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:border-primary/50";
 
 const uniq = <T,>(xs: T[]) => Array.from(new Set(xs));
+
+// ----------------------------------------------------------- suggestions queue
+interface SuggestionRow {
+  listingId: string;
+  unitId: string | null;
+  label: string;
+  area: string;
+  nights: number;
+  direction: "increase" | "decrease";
+  currentNightly: number;
+  suggestedNightly: number;
+  deltaNightly: number;
+  deltaPct: number;
+  currentPage: number | null;
+  targetPage: number;
+  confidence: "high" | "medium" | "low";
+  n: number;
+  profitDelta: number | null;
+}
+interface SuggestionBatch {
+  scanned: number;
+  hiddenLowConfidence: number;
+  suggestions: SuggestionRow[];
+}
+
+function SuggestionsQueue({
+  targetPage,
+  onInspect,
+}: {
+  targetPage: number;
+  onInspect: (listingId: string) => void;
+}) {
+  const [batch, setBatch] = useState<SuggestionBatch | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [applied, setApplied] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/learning/suggestions?targetPage=${targetPage}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+      .then((b: SuggestionBatch) => setBatch(b))
+      .catch((e) => setErr(e instanceof Error ? e.message : "failed to load"))
+      .finally(() => setLoading(false));
+  }, [targetPage]);
+
+  async function apply(row: SuggestionRow) {
+    setApplying(row.listingId);
+    setErr(null);
+    try {
+      const r = await fetch("/api/learning/apply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ listingId: row.listingId, nights: row.nights, targetPage }),
+      });
+      const b = (await r.json()) as { ok?: boolean; newNightly?: number; error?: string };
+      if (!r.ok || !b.ok) throw new Error(b.error || `apply failed: ${r.status}`);
+      setApplied((m) => ({ ...m, [row.listingId]: b.newNightly ?? row.suggestedNightly }));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "apply failed");
+    } finally {
+      setApplying(null);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <CardTitle>Suggested moves</CardTitle>
+          {batch && (
+            <span className="text-[11px] text-muted-foreground">
+              {batch.suggestions.length} of {batch.scanned} listings have a move ≥2%
+              {batch.hiddenLowConfidence > 0 && ` · ${batch.hiddenLowConfidence} low-confidence hidden`}
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Only listings the model says are mispriced for page {targetPage} — everything else is
+          already about right. Apply logs the change for outcome tracking and updates the mapped
+          unit&apos;s rate.
+        </p>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <p className="text-[11px] text-muted-foreground">Scanning portfolio…</p>
+        ) : !batch || batch.suggestions.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No actionable suggestions right now — prices look aligned with the market
+            {batch && batch.hiddenLowConfidence > 0
+              ? ` (${batch.hiddenLowConfidence} segment(s) still learning).`
+              : "."}
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left">Listing</th>
+                  <th className="px-3 py-2 text-left">Area</th>
+                  <th className="px-3 py-2 text-right">Now ₪/n</th>
+                  <th className="px-3 py-2 text-right">Suggested</th>
+                  <th className="px-3 py-2 text-right">Δ</th>
+                  <th className="px-3 py-2 text-right">Page</th>
+                  <th className="px-3 py-2 text-right">Profit Δ/mo</th>
+                  <th className="px-3 py-2 text-left">Conf.</th>
+                  <th className="px-3 py-2 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batch.suggestions.map((s) => {
+                  const done = applied[s.listingId] != null;
+                  return (
+                    <tr key={s.listingId} className="border-t border-border/60">
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => onInspect(s.listingId)}
+                          className="max-w-[16rem] truncate text-left font-medium hover:text-primary"
+                          title="Open in the inspector below"
+                        >
+                          {s.label}
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">{s.area}</td>
+                      <td className="px-3 py-2 text-right font-mono">₪{s.currentNightly}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold">
+                        ₪{done ? applied[s.listingId] : s.suggestedNightly}
+                      </td>
+                      <td
+                        className={cn(
+                          "px-3 py-2 text-right font-medium",
+                          s.direction === "increase"
+                            ? "text-[hsl(var(--success))]"
+                            : "text-[hsl(var(--danger))]",
+                        )}
+                      >
+                        {s.direction === "increase" ? "▲ +" : "▼ "}
+                        {s.deltaPct.toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                        {s.currentPage ?? "—"}→{s.targetPage}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {s.profitDelta != null
+                          ? `${s.profitDelta >= 0 ? "+" : ""}₪${s.profitDelta.toLocaleString()}`
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {s.confidence === "high" ? (
+                          <Badge variant="success">high · {s.n}</Badge>
+                        ) : (
+                          <Badge variant="info">med · {s.n}</Badge>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {done ? (
+                          <Badge variant="success">applied ✓</Badge>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => apply(s)}
+                            disabled={applying != null}
+                            className="rounded-md border border-primary/30 bg-primary/15 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+                          >
+                            {applying === s.listingId ? "Applying…" : "Apply"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {err && <p className="mt-2 text-[11px] text-[hsl(var(--danger))]">{err}</p>}
+      </CardContent>
+    </Card>
+  );
+}
 
 export function IntelligencePanel() {
   const [listings, setListings] = useState<Listing[]>([]);
@@ -177,6 +378,8 @@ export function IntelligencePanel() {
 
   return (
     <div className="space-y-6">
+      <SuggestionsQueue targetPage={targetPage} onInspect={(id) => setListingId(id)} />
+
       <div className="flex flex-wrap items-center gap-2">
         <select className={`${selectCls} max-w-[20rem]`} value={listingId} onChange={(e) => setListingId(e.target.value)}>
           {listings.map((l) => (
@@ -225,6 +428,7 @@ export function IntelligencePanel() {
         </p>
       )}
       {data && <Recommendation data={data} confBadge={confBadge} />}
+      {data && <DemandCard demand={data.demand} area={data.segment.area} />}
       {data && <CurveCard data={data} />}
       {listingId && <OutcomesCard listingId={listingId} nights={nights} />}
       <StrategyCard />
@@ -363,7 +567,10 @@ function Recommendation({ data, confBadge }: { data: Elasticity; confBadge: Reac
             {data.segment.area} · {nightsLabel(data.nights)} ·{" "}
             {data.leadDays != null ? `${data.leadDays}d lead` : "—"} ({data.segment.leadBucket})
           </CardTitle>
-          {confBadge}
+          <span className="flex items-center gap-1.5">
+            {data.demand?.label && <DemandBadge label={data.demand.label} />}
+            {confBadge}
+          </span>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -555,6 +762,126 @@ function StrategyCard() {
             </p>
           </>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DemandBadge({ label }: { label: NonNullable<DemandSignal["label"]> }) {
+  const v =
+    label === "hot" ? "danger" : label === "firm" ? "success" : label === "soft" ? "info" : "muted";
+  return <Badge variant={v}>demand {label}</Badge>;
+}
+
+// Relative demand for the selected check-in. The point of this card: the raw
+// market number is NOT trusted at face value (ghost listings sink it); it's read
+// against its own range, with our realized occupancy beside it as the anchor.
+function DemandCard({ demand, area }: { demand: DemandSignal | null; area: string }) {
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function submit() {
+    setMsg(null);
+    try {
+      const res = await fetch("/api/learning/demand", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ area, text }),
+      });
+      const b = (await res.json()) as { recorded?: number; error?: string };
+      setMsg(res.ok ? `recorded ${b.recorded} reading(s) — refresh to see them applied` : b.error ?? "failed");
+      if (res.ok) setText("");
+    } catch {
+      setMsg("failed to post readings");
+    }
+  }
+
+  const m = demand?.market ?? null;
+  const s = demand?.supply ?? null;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Demand · {demand?.date ?? "—"}</CardTitle>
+          {demand?.label ? <DemandBadge label={demand.label} /> : <Badge variant="muted">no data</Badge>}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Market readings are treated as <span className="text-foreground">relative</span> — ghost
+          listings make the absolute level meaningless, so each reading is scored against its own
+          history for this area.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap gap-x-10 gap-y-3 text-sm">
+          {m ? (
+            <Stat
+              label="Market reading"
+              value={`${m.raw}%`}
+              sub={`p${m.percentile} of its own range (n=${m.n}) → ${
+                demand?.label ?? "—"
+              }`}
+            />
+          ) : (
+            <Stat label="Market reading" value="—" sub="paste readings below to enable" />
+          )}
+          {s && (
+            <Stat
+              label="Listings on market"
+              value={String(s.raw)}
+              sub={`p${s.percentile} for this lead window — ${
+                s.index > 0 ? "thinner than usual (hot)" : s.index < 0 ? "fatter than usual (soft)" : "typical"
+              }`}
+            />
+          )}
+          {demand?.ourOccupancy != null && (
+            <Stat
+              label="Our occupancy"
+              value={`${Math.round(demand.ourOccupancy * 100)}%`}
+              sub="realized, around this date (MiniHotel)"
+            />
+          )}
+        </div>
+        {m && demand?.ourOccupancy != null && (
+          <p className="text-[11px] text-muted-foreground">
+            Calibration: the dashboard says {m.raw}% while we run{" "}
+            {Math.round(demand.ourOccupancy * 100)}% — whenever this metric reads at p
+            {m.percentile} of its range, treat the market as{" "}
+            <span className="text-foreground">{demand.label}</span> regardless of the absolute
+            number.
+          </p>
+        )}
+        <div>
+          <button
+            type="button"
+            onClick={() => setPasteOpen((o) => !o)}
+            className="text-[11px] text-primary hover:underline"
+          >
+            {pasteOpen ? "close" : "paste market readings…"}
+          </button>
+          {pasteOpen && (
+            <div className="mt-2 space-y-2">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={4}
+                placeholder={"One per line: YYYY-MM-DD value\n2026-08-01 30\n2026-08-08 28.5"}
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-primary/50"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!text.trim()}
+                  className="rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-60"
+                >
+                  Record for {area}
+                </button>
+                {msg && <span className="text-[11px] text-muted-foreground">{msg}</span>}
+              </div>
+            </div>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
