@@ -22,6 +22,7 @@ import {
   Save,
   Stethoscope,
   TrendingUp,
+  UploadCloud,
   X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -145,6 +146,7 @@ export function RateCalendar() {
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState<{ unitId: string; date: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "listing", dir: 1 });
   const [diagnosing, setDiagnosing] = useState(false);
@@ -251,6 +253,44 @@ export function RateCalendar() {
       await applyOverride({ unitId, baseRate: rate });
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to save base rate");
+    }
+  }
+
+  // PUSH: send our intended prices (pins win, else derived-from-Base) out to
+  // MiniHotel for the selected horizon. The mirror of the Pull button.
+  async function pushMiniHotel() {
+    setPushing(true);
+    setSyncMsg(null);
+    try {
+      const r = await fetch("/api/rates/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days }),
+      });
+      const d = (await r.json()) as {
+        ok: boolean;
+        repriced?: number;
+        pushed?: number;
+        units?: number;
+        days?: number;
+        errors?: string[];
+        message?: string;
+      };
+      if (d.ok) {
+        setSyncMsg({
+          ok: true,
+          text: `Pushed ${d.pushed ?? 0} night(s) across ${d.units ?? 0} apartment(s) to MiniHotel (${d.days ?? days}-day horizon).`,
+        });
+      } else {
+        const reason =
+          d.message || (d.errors && d.errors.length ? d.errors.slice(0, 2).join(" | ") : "push failed");
+        setSyncMsg({ ok: false, text: `Push to MiniHotel failed: ${reason}` });
+      }
+      await refresh();
+    } catch (e) {
+      setSyncMsg({ ok: false, text: e instanceof Error ? e.message : "push failed" });
+    } finally {
+      setPushing(false);
     }
   }
 
@@ -398,12 +438,21 @@ export function RateCalendar() {
           </button>
           <button
             className={btnGhost}
-            title="Pull live prices & availability from MiniHotel into this calendar"
-            disabled={syncing}
+            title="PULL: import MiniHotel's current prices & availability INTO this calendar (overwrites unsaved staged prices with what the PMS has)"
+            disabled={syncing || pushing}
             onClick={syncMiniHotel}
           >
             {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadCloud className="h-4 w-4" />}
-            Sync MiniHotel
+            Pull from MiniHotel
+          </button>
+          <button
+            className={btnCls}
+            title="PUSH: send this calendar's prices OUT to MiniHotel for the selected horizon — manual pins win, otherwise each night derives from the apartment's Base"
+            disabled={pushing || syncing}
+            onClick={pushMiniHotel}
+          >
+            {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+            Push to MiniHotel
           </button>
           <button
             className={btnGhost}
@@ -715,7 +764,7 @@ export function RateCalendar() {
             </table>
           </div>
           <p className="mt-3 text-[10px] text-muted-foreground">
-            Empty cells (—) have no MiniHotel data yet — run &ldquo;Sync MiniHotel&rdquo; to fill real
+            Empty cells (—) have no MiniHotel data yet — run &ldquo;Pull from MiniHotel&rdquo; to fill real
             prices &amp; availability. A dot marks an override:{" "}
             <span className="text-primary">●</span> manual edit ·{" "}
             <span className="text-info">●</span> synced from MiniHotel.
@@ -797,7 +846,7 @@ function diagVerdict(d: DiagResult): string {
     return `ARI returned ${rt} room type(s), but NONE match your apartment mapping — so nothing can fill in. Update the apartment codes to match the ARI ids below.`;
   if (priced === 0)
     return `Matched ${mapped} room type(s), but no prices came back${d.errors && d.errors.length ? ` (${d.errors.join("; ")})` : ""} — likely occupancy isn't set on those rooms.`;
-  return `Looks good: ${priced} priced night(s) across ${mapped} matched room type(s). Hit "Sync MiniHotel" to load them.`;
+  return `Looks good: ${priced} priced night(s) across ${mapped} matched room type(s). Hit "Pull from MiniHotel" to load them.`;
 }
 
 // Verdict for the guests-based fallback probe (only run when the bulk feed is empty).
