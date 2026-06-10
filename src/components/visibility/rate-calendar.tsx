@@ -350,10 +350,10 @@ export function RateCalendar() {
           <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
               <span
-                className="h-3 w-12 rounded-sm"
+                className="h-3 w-12 rounded-sm border border-border/50"
                 style={{
                   background:
-                    "linear-gradient(90deg, hsl(25 85% 48%), hsl(84 38% 88%), hsl(142 85% 48%))",
+                    "linear-gradient(90deg, hsla(8,70%,48%,0.42), hsla(75,70%,48%,0.10), hsla(142,70%,48%,0.42))",
                 }}
               />
               Price vs this unit&rsquo;s typical (low → high)
@@ -523,10 +523,10 @@ export function RateCalendar() {
                           <button
                             type="button"
                             onClick={() => setSel({ unitId: row.unit.id, date: c.date })}
-                            className={`relative h-11 w-14 px-1 leading-tight transition-colors ${tone ? "" : cellTone(c)} ${
+                            className={`relative h-11 w-14 px-1 leading-tight transition-colors ${tone ? "text-foreground" : cellTone(c)} ${
                               selected ? "ring-2 ring-primary ring-inset" : "hover:brightness-95"
                             }`}
-                            style={tone ? { backgroundColor: tone.bg, color: tone.fg } : undefined}
+                            style={tone ? { backgroundColor: tone } : undefined}
                             title={`${apartmentLabel(row.unit)} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
                               c.source !== "derived" ? ` · ${c.source}` : ""
                             }${tone && typical ? ` · ${Math.round(((c.price as number) / typical) * 100)}% of typical ₪${typical}` : ""}`}
@@ -534,10 +534,7 @@ export function RateCalendar() {
                             <div className="font-medium">
                               {c.closed ? <Lock className="mx-auto h-3 w-3" /> : (c.price ?? "—")}
                             </div>
-                            <div
-                              className={tone ? "text-[9px]" : "text-[9px] text-muted-foreground"}
-                              style={tone ? { color: tone.faint } : undefined}
-                            >
+                            <div className="text-[9px] text-muted-foreground">
                               {c.booked ? "sold" : c.closed ? "" : c.minNights !== data.defaultMinNights ? `≥${c.minNights}` : ""}
                             </div>
                             {c.source !== "derived" && (
@@ -591,41 +588,23 @@ function typicalRate(row: RateRow): number | null {
   return ps.length ? ps[Math.floor(ps.length / 2)] : null;
 }
 
-// sRGB relative luminance of an HSL color (text contrast must be judged by
-// luminance, not HSL lightness — a 50%-light green is visually bright).
-function hslLuminance(h: number, s: number, l: number): number {
-  s /= 100;
-  l /= 100;
-  const k = (n: number) => (n + h / 30) % 12;
-  const a = s * Math.min(l, 1 - l);
-  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-  return 0.2126 * lin(f(0)) + 0.7152 * lin(f(8)) + 0.0722 * lin(f(4));
-}
-
 /**
- * Color for an open night's price RELATIVE TO THIS UNIT's typical rate:
- * ≤70% of typical → dark orange · 100% → pale neutral · ≥135% → dark green,
- * interpolated. The text color (white vs near-black) is picked by the
- * background's real luminance, balanced so the worst-case contrast across the
- * whole gradient stays ≥ ~4:1 — the number is always readable.
+ * Translucent wash for an open night's price RELATIVE TO THIS UNIT's typical
+ * rate: ≤70% of typical → red/orange · 100% → barely-there neutral · ≥135% →
+ * green. Low alpha keeps the whole calendar calm to scan, and because it's a
+ * tint over the theme background, the normal foreground text stays readable
+ * in both light and dark mode.
  */
-function priceTone(price: number, typical: number): { bg: string; fg: string; faint: string } {
+function priceTone(price: number, typical: number): string {
   const ratio = price / typical;
   const t =
     ratio <= 1
-      ? 0.5 * clamp01((ratio - 0.7) / 0.3) // 0.70→0 (dark orange) … 1.00→0.5
-      : 0.5 + 0.5 * clamp01((ratio - 1) / 0.35); // 1.00→0.5 … 1.35→1 (dark green)
-  const hue = 25 + t * (142 - 25); // orange → green
+      ? 0.5 * clamp01((ratio - 0.7) / 0.3) // 0.70→0 (red/orange) … 1.00→0.5
+      : 0.5 + 0.5 * clamp01((ratio - 1) / 0.35); // 1.00→0.5 … 1.35→1 (green)
+  const hue = 8 + t * (142 - 8); // red/orange → green
   const intensity = Math.abs(t - 0.5) * 2; // 0 at typical price, 1 at extremes
-  const sat = 38 + intensity * 47;
-  const light = 88 - intensity * 42; // pale center, dark extremes
-  const darkBg = hslLuminance(hue, sat, light) < 0.21;
-  return {
-    bg: `hsl(${hue.toFixed(0)} ${sat.toFixed(0)}% ${light.toFixed(0)}%)`,
-    fg: darkBg ? "#ffffff" : "hsl(224 40% 12%)",
-    faint: darkBg ? "rgba(255,255,255,0.8)" : "hsla(224,30%,12%,0.65)",
-  };
+  const alpha = 0.1 + intensity * 0.32; // gentle wash, a bit deeper at extremes
+  return `hsla(${hue.toFixed(0)}, 70%, 48%, ${alpha.toFixed(2)})`;
 }
 
 interface DiagResult {
