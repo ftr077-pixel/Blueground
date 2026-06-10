@@ -20,8 +20,8 @@ const EPOCH = Date.UTC(2026, 0, 1); // stable origin so booked blocks don't shif
 
 export interface RateCell {
   date: string; // YYYY-MM-DD
-  price: number; // nightly rate, ILS
-  available: number; // sellable units that night (0/1 for a single apartment)
+  price: number | null; // nightly rate, ILS; null = no data yet (not synced)
+  available: number | null; // sellable units that night; null = unknown
   minNights: number;
   closed: boolean;
   booked: boolean;
@@ -164,15 +164,20 @@ export function getCalendar(from: string, days: number): Calendar {
   for (const r of ovRows) ov.set(r.unit_id + "|" + r.date, r);
 
   const rows: RateRow[] = units.map((unit) => {
-    const booked = bookedSet(unit, toIdx);
-    const closed = closedSet(unit, fromIdx, toIdx);
+    // Only fabricate a baseline for units that actually have a rate (legacy/demo
+    // units). MiniHotel-imported apartments come in with rate 0 — for those we
+    // show nothing (price/availability = null) until real data is synced in,
+    // rather than invent numbers.
+    const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+    const booked = hasBaseline ? bookedSet(unit, toIdx) : new Set<number>();
+    const closed = hasBaseline ? closedSet(unit, fromIdx, toIdx) : new Set<number>();
     const cells: RateCell[] = dates.map((date) => {
       const idx = dayIndex(date);
-      let price = basePrice(unit, date, idx);
+      let price: number | null = hasBaseline ? basePrice(unit, date, idx) : null;
       let minNights = DEFAULT_MIN_NIGHTS;
       let isClosed = closed.has(idx);
       let isBooked = booked.has(idx);
-      let available = isBooked || isClosed ? 0 : 1;
+      let available: number | null = hasBaseline ? (isBooked || isClosed ? 0 : 1) : null;
       let source: RateCell["source"] = "derived";
 
       const o = ov.get(unit.id + "|" + date);
@@ -182,7 +187,7 @@ export function getCalendar(from: string, days: number): Calendar {
         if (o.closed != null) isClosed = o.closed === 1;
         if (o.booked != null) isBooked = o.booked === 1;
         if (o.available != null) available = o.available;
-        else available = isBooked || isClosed ? 0 : 1;
+        else if (o.closed != null || o.booked != null) available = isBooked || isClosed ? 0 : 1;
         source = (o.source as RateCell["source"]) || "manual";
       }
 
@@ -225,16 +230,19 @@ export function getCalendar(from: string, days: number): Calendar {
       if (c.closed) closedN++;
       else if (c.booked) {
         sold++;
-        rev += c.price;
-        bookedPrices.push(c.price);
-      } else open++;
+        if (c.price != null) {
+          rev += c.price;
+          bookedPrices.push(c.price);
+        }
+      } else if (c.available === 1) open++; // known-open; null availability = unsynced, skip
     }
   }
   const avg = (xs: number[]) =>
     xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0;
-  const adr = bookedPrices.length
-    ? avg(bookedPrices)
-    : avg(rows.flatMap((row) => row.cells.slice(0, w).map((c) => c.price)));
+  const knownPrices = rows.flatMap((row) =>
+    row.cells.slice(0, w).map((c) => c.price).filter((p): p is number => p != null),
+  );
+  const adr = bookedPrices.length ? avg(bookedPrices) : avg(knownPrices);
   const occupancy = sold + open > 0 ? sold / (sold + open) : 0;
 
   return {

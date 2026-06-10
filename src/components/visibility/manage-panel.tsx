@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -163,6 +163,7 @@ function ListingRow({
 export function ManagePanel() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [listings, setListings] = useState<Listing[]>([]);
+  const [showListings, setShowListings] = useState(false); // long list — collapsed by default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -594,21 +595,40 @@ export function ManagePanel() {
               </div>
 
               <div className="space-y-2">
-                {listings.length === 0 && (
+                {listings.length === 0 ? (
                   <p className="text-[11px] text-muted-foreground">No listings yet.</p>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowListings((v) => !v)}
+                      className="flex w-full items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      {showListings ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                      {listings.length} apartment{listings.length === 1 ? "" : "s"}
+                      <span className="ml-auto text-[10px] font-normal">
+                        {showListings ? "hide" : "show all"}
+                      </span>
+                    </button>
+                    {showListings &&
+                      listings.map((l) => (
+                        <ListingRow
+                          key={l.id}
+                          l={l}
+                          profile={profiles.find((p) => p.id === l.profileId)}
+                          busy={busy}
+                          defaultUtilities={defUtil}
+                          defaultCleaning={defClean}
+                          onPatch={patchListing}
+                          onDelete={removeListing}
+                        />
+                      ))}
+                  </>
                 )}
-                {listings.map((l) => (
-                  <ListingRow
-                    key={l.id}
-                    l={l}
-                    profile={profiles.find((p) => p.id === l.profileId)}
-                    busy={busy}
-                    defaultUtilities={defUtil}
-                    defaultCleaning={defClean}
-                    onPatch={patchListing}
-                    onDelete={removeListing}
-                  />
-                ))}
               </div>
             </>
           )}

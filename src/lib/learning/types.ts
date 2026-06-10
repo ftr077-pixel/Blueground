@@ -70,6 +70,13 @@ export interface ElasticityResult {
     marginBefore: number | null;
     marginAfter: number | null;
   } | null;
+  // Model B signals from the listing's own history (sparse → falls back to A).
+  model: {
+    offsetRank: number; // positions above(-)/below(+) the market curve
+    offsetN: number; // appearances the offset is averaged over
+    ownPositionsPerPct: number | null; // observed positions gained per 1% cut
+    ownN: number; // price-move pairs behind it
+  };
   confidence: {
     level: Confidence;
     n: number;

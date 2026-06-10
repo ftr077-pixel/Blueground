@@ -18,7 +18,6 @@ import {
   Radar,
   Settings,
   ShieldAlert,
-  SlidersHorizontal,
   TrendingUp,
   Wallet,
 } from "lucide-react";
@@ -41,8 +40,6 @@ const REVENUE_HUB = {
     { href: "/visibility/analytics", label: "Position Trends", icon: TrendingUp },
     { href: "/visibility/pricing", label: "Pricing vs Rank", icon: BarChart3 },
     { href: "/visibility/intelligence", label: "Pricing Intelligence", icon: Brain },
-    { href: "/visibility/portfolio", label: "Portfolio", icon: Boxes },
-    { href: "/visibility/manage", label: "Manage", icon: SlidersHorizontal },
   ] as Item[],
 };
 

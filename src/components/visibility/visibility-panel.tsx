@@ -157,6 +157,7 @@ export function VisibilityPanel() {
   const [loading, setLoading] = useState(true);
   const [scanRunning, setScanRunning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
+  const [scanLog, setScanLog] = useState("");
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
@@ -211,9 +212,14 @@ export function VisibilityPanel() {
   async function loadScanState(): Promise<boolean> {
     try {
       const res = await fetch("/api/visibility/scan", { cache: "no-store" });
-      const s = (await res.json()) as { running: boolean; message: string | null };
+      const s = (await res.json()) as {
+        running: boolean;
+        message: string | null;
+        logTail?: string;
+      };
       setScanRunning(s.running);
       setScanMsg(s.message);
+      setScanLog(s.logTail || "");
       return s.running;
     } catch {
       return false;
@@ -255,6 +261,20 @@ export function VisibilityPanel() {
     } catch {
       setScanMsg("could not start scan");
     }
+  }
+
+  async function cancelScan() {
+    setScanMsg("stopping…");
+    try {
+      await fetch("/api/visibility/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancel: true }),
+      });
+    } catch {
+      /* ignore */
+    }
+    await loadScanState();
   }
 
   function toggle(id: string) {
@@ -345,17 +365,31 @@ export function VisibilityPanel() {
               clear
             </button>
           )}
+          {scanRunning && (
+            <button
+              type="button"
+              onClick={cancelScan}
+              className="inline-flex items-center rounded-md border border-[hsl(var(--danger))]/40 px-3 py-1.5 text-xs font-medium text-[hsl(var(--danger))] hover:bg-[hsl(var(--danger))]/10"
+            >
+              Stop
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Link
-            href="/visibility/manage"
+            href="/settings"
             className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
           >
-            <Settings className="h-3.5 w-3.5" /> Manage
+            <Settings className="h-3.5 w-3.5" /> Settings
           </Link>
         </div>
       </div>
       {scanMsg && <p className="text-[11px] text-muted-foreground">{scanMsg}</p>}
+      {scanRunning && scanLog && (
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-2 text-[10px] leading-relaxed text-muted-foreground">
+          {scanLog}
+        </pre>
+      )}
     </div>
   );
 
@@ -368,7 +402,7 @@ export function VisibilityPanel() {
         {topBar}
         <Card>
           <CardContent className="p-5 text-xs text-muted-foreground">
-            No listings tracked yet. Open <span className="text-foreground">Manage</span> to add a
+            No listings tracked yet. Open <span className="text-foreground">Settings</span> to add a
             profile and your listings, then hit <span className="text-foreground">Run scan</span>.
           </CardContent>
         </Card>

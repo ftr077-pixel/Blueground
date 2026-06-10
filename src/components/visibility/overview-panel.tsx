@@ -51,7 +51,6 @@ const SUBTABS = [
   { href: "/visibility", label: "Search & Profit" },
   { href: "/visibility/analytics", label: "Position Trends" },
   { href: "/visibility/pricing", label: "Pricing vs Rank" },
-  { href: "/visibility/portfolio", label: "Portfolio" },
 ];
 
 export function OverviewPanel() {

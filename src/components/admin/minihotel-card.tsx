@@ -46,6 +46,15 @@ interface Pull {
   vat?: number;
   test?: number;
 }
+interface AriOcc {
+  ok: boolean;
+  message?: string;
+  bookings?: number;
+  rooms?: number;
+  thisMonth?: string;
+  occupancy?: number;
+  bookedNights?: number;
+}
 
 export function MiniHotelCard() {
   const [env, setEnv] = useState<"sandbox" | "production">("sandbox");
@@ -65,6 +74,8 @@ export function MiniHotelCard() {
   const [saved, setSaved] = useState(false);
   const [test, setTest] = useState<TestResult | null>(null);
   const [pull, setPull] = useState<Pull | null>(null);
+  const [ari, setAri] = useState<AriOcc | null>(null);
+  const [log, setLog] = useState<string | null>(null);
 
   const apply = useCallback((v: View) => {
     setEnv(v.env);
@@ -175,6 +186,54 @@ export function MiniHotelCard() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Sync occupancy from the ARI server (Room Status) — the bookings that already
+  // work — and store them. No revenue (that's Content & Data); occupancy only.
+  async function tryAri() {
+    setBusy(true);
+    setAri(null);
+    try {
+      const r = await fetch("/api/occupancy/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days: 45 }),
+      }).then((res) => res.json());
+      setAri(r as AriOcc);
+    } catch (e) {
+      setAri({ ok: false, message: e instanceof Error ? e.message : "sync failed" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Probe both MiniHotel APIs and produce a copy-paste report for their support.
+  async function genLog() {
+    setBusy(true);
+    setLog(null);
+    try {
+      const r = await fetch("/api/integrations/minihotel/diagnostics", { method: "POST" }).then((res) =>
+        res.json(),
+      );
+      setLog(r.ok ? r.log : r.message || "Could not generate log.");
+    } catch (e) {
+      setLog(e instanceof Error ? e.message : "Could not generate log.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  function copyLog() {
+    if (log) navigator.clipboard?.writeText(log).catch(() => undefined);
+  }
+  function downloadLog() {
+    if (!log) return;
+    const blob = new Blob([log], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `minihotel-diagnostics-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const configured = hasPassword && !!username && !!hotelId;
@@ -312,9 +371,12 @@ export function MiniHotelCard() {
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DownloadCloud className="h-3.5 w-3.5" />}
             Pull reservations → P&amp;L
           </button>
+          <button type="button" disabled={busy} onClick={tryAri} className={btnGhost}>
+            Sync occupancy (ARI)
+          </button>
           {pull ? (
             pull.ok ? (
-              <span className="text-[11px] text-foreground">
+              <span className="w-full text-[11px] text-foreground">
                 ✓ {pull.parsed} pulled ·{" "}
                 <span className="font-medium">
                   {pull.month}: ₪{(pull.net ?? 0).toLocaleString()} net
@@ -323,14 +385,28 @@ export function MiniHotelCard() {
                 {pull.test ? ` · ${pull.test} test excluded` : ""}
               </span>
             ) : (
-              <span className="text-[11px] text-[hsl(var(--warning))]">Pull failed: {pull.message}</span>
+              <span className="w-full text-[11px] text-[hsl(var(--warning))]">Pull failed: {pull.message}</span>
             )
           ) : (
-            <span className="text-[10px] text-muted-foreground">
-              Pulls actual reservations and drops this month&apos;s net revenue into the P&amp;L. Run from
-              the box (whitelisted with MiniHotel).
+            <span className="w-full text-[10px] text-muted-foreground">
+              <b>Pull reservations → P&amp;L</b> uses the Content &amp; Data API (real revenue, VAT-correct).
+              <b> Sync occupancy (ARI)</b> stores the real bookings from the server that already works —
+              occupancy only, no prices. Run both from the box.
             </span>
           )}
+          {ari ? (
+            ari.ok ? (
+              <span className="w-full text-[11px] text-foreground">
+                ✓ {(ari.bookings ?? 0).toLocaleString()} bookings · {ari.rooms} rooms ·{" "}
+                <span className="font-medium">
+                  {ari.thisMonth} occupancy {Math.round((ari.occupancy ?? 0) * 100)}%
+                </span>{" "}
+                ({(ari.bookedNights ?? 0).toLocaleString()} booked nights)
+              </span>
+            ) : (
+              <span className="w-full text-[11px] text-[hsl(var(--warning))]">Sync failed: {ari.message}</span>
+            )
+          ) : null}
         </div>
 
         {endpoints && (
@@ -364,6 +440,35 @@ export function MiniHotelCard() {
             )}
           </div>
         )}
+
+        <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" disabled={busy} onClick={genLog} className={btnGhost}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Generate MiniHotel support log
+            </button>
+            {log ? (
+              <>
+                <button type="button" onClick={copyLog} className={btnGhost}>
+                  Copy
+                </button>
+                <button type="button" onClick={downloadLog} className={btnGhost}>
+                  Download .txt
+                </button>
+              </>
+            ) : (
+              <span className="text-[10px] text-muted-foreground">
+                Probes both MiniHotel APIs and writes a copy-paste report for their support (password
+                redacted). Run from the box.
+              </span>
+            )}
+          </div>
+          {log ? (
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background px-3 py-2 font-mono text-[10px] leading-relaxed text-foreground">
+              {log}
+            </pre>
+          ) : null}
+        </div>
 
         <p className="text-[10px] text-muted-foreground">
           Stored on this server only. The password is write-only here — it is never shown again after

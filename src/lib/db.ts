@@ -207,6 +207,46 @@ function init(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_results_segment ON search_results(profile_id, nights, check_in, run_id);
     CREATE INDEX IF NOT EXISTS idx_results_ts ON search_results(ts);
 
+    -- Log of deliberate per-listing price changes (operator/agent), so the
+    -- longitudinal learner (Model B) can attribute rank moves to our own moves.
+    -- Observed price drift is read directly from listing_snapshots; this table is
+    -- the rails for intentional changes + the experiment loop.
+    CREATE TABLE IF NOT EXISTS listing_price_changes (
+      id          TEXT PRIMARY KEY,
+      listing_id  TEXT NOT NULL REFERENCES tracked_listings(id),
+      ts          TEXT NOT NULL,
+      old_nightly REAL,
+      new_nightly REAL,
+      source      TEXT NOT NULL,
+      note        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_lpc_listing_ts ON listing_price_changes(listing_id, ts DESC);
+
+    -- Realized booking outcomes pulled from MiniHotel (Content & Data API,
+    -- GetReservationKey). The ground truth the learner ultimately optimizes for:
+    -- what actually booked, when it was booked (lead time = arrival − created_on),
+    -- and at what realized price. id = MiniHotel reservation id (idempotent upsert).
+    CREATE TABLE IF NOT EXISTS bookings (
+      id            TEXT PRIMARY KEY,
+      portal_res_id TEXT,
+      unit_id       TEXT,
+      room_type     TEXT,
+      source        TEXT,
+      status        TEXT,
+      created_on    TEXT,
+      arrival       TEXT,
+      departure     TEXT,
+      nights        INTEGER,
+      guests        INTEGER,
+      total         REAL,
+      nightly       REAL,
+      currency      TEXT,
+      lead_days     INTEGER,
+      synced_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bookings_unit ON bookings(unit_id);
+    CREATE INDEX IF NOT EXISTS idx_bookings_arrival ON bookings(arrival);
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
@@ -267,6 +307,24 @@ function init(db: Database.Database) {
       status      TEXT,
       source      TEXT NOT NULL DEFAULT 'minihotel',
       updated_at  TEXT
+    );
+
+    -- Occupancy backbone from MiniHotel's ARI server (Room Status Inquiry). These
+    -- bookings carry no revenue (that's the Content & Data API), but they're the
+    -- real occupancy: which room is booked which nights. Refreshed as a full
+    -- snapshot each sync. ari_room is the room inventory (the occupancy denominator).
+    CREATE TABLE IF NOT EXISTS ari_booking (
+      res_number  TEXT PRIMARY KEY,
+      room_number TEXT,
+      room_type   TEXT,
+      check_in    TEXT NOT NULL,
+      check_out   TEXT NOT NULL,
+      status      TEXT,
+      updated_at  TEXT
+    );
+    CREATE TABLE IF NOT EXISTS ari_room (
+      room_number TEXT PRIMARY KEY,
+      room_type   TEXT
     );
   `);
 
@@ -402,68 +460,138 @@ function seed(db: Database.Database) {
   void DEPARTMENTS;
 }
 
-export const SEED_UNITS = [
-  {
-    id: "BG-2231",
-    name: "Rothschild 14 · Studio",
-    neighborhood: "Lev HaIr",
-    bedrooms: 0,
-    base_rate: 720,
-    current_rate: 720,
-    occupancy_30d: 0.91,
-    platform: "Blueground",
-  },
-  {
-    id: "BG-2244",
-    name: "Shabazi 41 · 2BR",
-    neighborhood: "Neve Tzedek",
-    bedrooms: 2,
-    base_rate: 1180,
-    current_rate: 1180,
-    occupancy_30d: 0.94,
-    platform: "Blueground",
-  },
-  {
-    id: "BG-2289",
-    name: "Florentin Loft · 1BR",
-    neighborhood: "Florentin",
-    bedrooms: 1,
-    base_rate: 640,
-    current_rate: 640,
-    occupancy_30d: 0.88,
-    platform: "Blueground",
-  },
-  {
-    id: "BG-2305",
-    name: "Allenby 88 · 1BR",
-    neighborhood: "Lev HaIr",
-    bedrooms: 1,
-    base_rate: 690,
-    current_rate: 690,
-    occupancy_30d: 0.83,
-    platform: "Airbnb",
-  },
-  {
-    id: "BG-2330",
-    name: "Kerem HaTeimanim 7 · 2BR",
-    neighborhood: "Kerem HaTeimanim",
-    bedrooms: 2,
-    base_rate: 1020,
-    current_rate: 1020,
-    occupancy_30d: 0.95,
-    platform: "Blueground",
-  },
-  {
-    id: "BG-2351",
-    name: "Dizengoff 142 · Studio",
-    neighborhood: "Lev HaIr",
-    bedrooms: 0,
-    base_rate: 660,
-    current_rate: 660,
-    occupancy_30d: 0.86,
-    platform: "Blueground",
-  },
+// The live Tel-Aviv portfolio. Addresses are the names as they arrive from
+// MiniHotel; the operator identifies each apartment by its internal ID — the
+// number rendered first in the Rates Calendar. IDs are intentionally sparse
+// (some numbers retired), so we key off the explicit id, not array position.
+const APARTMENTS: Array<[number, string]> = [
+  [1, "Florentin 7, 23"],
+  [2, "Herzl 114, 32"],
+  [3, "Herzl 114, 2"],
+  [4, "Herzl 114, 14"],
+  [5, "Herzl 114, 3"],
+  [6, "Rambam 24, 7"],
+  [7, "Rambam 24, 10"],
+  [8, "Rambam 24, 11"],
+  [9, "Rambam 24, 12"],
+  [10, "Rambam 24, 16"],
+  [11, "Rambam 24, 15"],
+  [12, "Markolet 5, 3"],
+  [13, "Halutzim 28, 1"],
+  [14, "Halutzim 28, 2"],
+  [15, "Halutzim 28, 3"],
+  [16, "Halutzim 28, 4"],
+  [17, "Halutzim 28, 5"],
+  [18, "Halutzim 28, 6"],
+  [19, "Halutzim 28, 7"],
+  [20, "Halutzim 28, 8"],
+  [21, "Halutzim 28, 9"],
+  [22, "Trumpeldor 20, 6"],
+  [23, "Levontin 26, 23"],
+  [24, "Markolet 5, 4"],
+  [25, "Markolet 5, 10"],
+  [26, "Markolet 5, 14"],
+  [27, "Rambam 24, 17"],
+  [28, "Rambam 24, 19"],
+  [29, "Harugei Malchut 10, 5"],
+  [30, "Mohaliver Street 31, 2"],
+  [31, "Mohaliver Street 31, 4"],
+  [32, "Mohaliver Street 31, 11"],
+  [33, "Mohaliver Street 31, 12"],
+  [34, "Mohaliver Street 31, 13"],
+  [35, "Mohaliver Street 31, 15"],
+  [36, "Mohaliver Street 31, 16"],
+  [37, "Mohaliver Street 31, 17"],
+  [38, "Trumpeldor 20, 7"],
+  [39, "Dizengoff 282, 4"],
+  [40, "Meitav 5, 140"],
+  [41, "Menachem Begin 158, 166"],
+  [42, "Dizengoff 288, 3"],
+  [43, "Dizengoff 288, 10"],
+  [44, "Markolet 5, 8"],
+  [45, "Rambam 24, 1"],
+  [46, "Levontin 26, 3"],
+  [47, "Rambam 24, 18"],
+  [48, "Herzl 4, 9"],
+  [49, "Dizengoff 288, 9"],
+  [50, "Mohaliver Street 31, 9"],
+  [51, "Nahalat Binyamin 9, 3"],
+  [52, "Nahalat Binyamin 9, 4"],
+  [53, "Nahalat Binyamin 9, 5"],
+  [54, "Nahalat Binyamin 9, 6"],
+  [55, "Nahalat Binyamin 9, 7"],
+  [56, "Nahalat Binyamin 9, 8"],
+  [57, "Nahalat Binyamin 9, 9"],
+  [58, "Nahalat Binyamin 9, 10"],
+  [59, "Menachem Begin 160, 148"],
+  [60, "Wyssotsky 6, 24"],
+  [61, "Wyssotsky 6, 25"],
+  [63, "Rambam 24, 9"],
+  [64, "Shlomo Ibn Gabirol Street 144, 20"],
+  [65, "Derech Menachem Begin 160, 149"],
+  [66, "Jerusalem Boulevard 1, 17"],
+  [67, "Wyssotsky 8, 74"],
+  [68, "Shlomo Ibn Gabirol Street 144, 16"],
+  [70, "HaYarkon Street 276, #2"],
+  [71, "HaYarkon Street 276, #3"],
+  [72, "HaYarkon Street 276, #4"],
+  [73, "HaYarkon Street 276, #5"],
+  [74, "HaYarkon Street 276, #6"],
+  [75, "HaYarkon Street 276, #7"],
+  [76, "Florentin 7, 22"],
+  [77, "Shlomo Ibn Gabirol Street 144, 24"],
+  [78, "Rambam 24, 2"],
+  [79, "Nitzana 9"],
+  [80, "Arlozorov 33, 4A"],
+  [81, "Arlozorov 33, 4B"],
+  [82, "Rembrandt 20, 10"],
+  [83, "Shlomo Ibn Gabirol Street 144, 6"],
+  [84, "Melchett 52, 3"],
+  [85, "Allenby 114, 3"],
+  [86, "Allenby 114, 4"],
+  [87, "Allenby 114, 5"],
+  [88, "Allenby 114, 6"],
+  [89, "Allenby 114, 7"],
+  [90, "Allenby 114, 8"],
+  [91, "Allenby 114, 9"],
+  [92, "Allenby 114, 10"],
+  [93, "Allenby 114, 11"],
+  [94, "Allenby 114, 12"],
+  [95, "Allenby 114, 13"],
+  [96, "Allenby 114, 14"],
+  [97, "Allenby 114, 15"],
+  [98, "Allenby 114, 16"],
+  [99, "Allenby 114, 17"],
+  [100, "Yavnieli 24, 15"],
+  [101, "Trumpeldor 20, 5"],
+  [102, "Rambam 24, 3"],
+  [103, "Trumpeldor 20, 4"],
+  [105, "Rambam 24, 14"],
+  [112, "Yitzhak Elhanan 14, 14"],
+  [113, "HaYarkon 276, 9"],
+  [114, "Levontin 26, 2"],
+  [115, "Totzeret HaAretz 5 apt 289"],
 ];
+
+// Neighborhood grouping = the street (everything before the building number).
+function streetOf(addr: string): string {
+  const m = addr.match(/^(.*?)[\s,]*\d/);
+  return (m ? m[1] : addr).replace(/[,\s]+$/, "").trim() || addr;
+}
+
+export const SEED_UNITS = APARTMENTS.map(([n, address]) => {
+  const baseRate = Math.round((500 + ((n * 137) % 450)) / 10) * 10; // ₪500–950, deterministic
+  return {
+    id: `BG-${n}`,
+    name: address,
+    neighborhood: streetOf(address),
+    bedrooms: 1,
+    base_rate: baseRate,
+    current_rate: baseRate,
+    occupancy_30d: 0.7 + ((n * 11) % 26) / 100, // 0.70–0.95
+    platform: "Blueground",
+  };
+});
 
 function seedProfiles(db: Database.Database) {
   const seeded = db
@@ -631,6 +759,73 @@ function seedLadder(db: Database.Database) {
   tx();
 }
 
+// A handful of synthetic realized bookings (for a seed unit) so the Outcomes
+// surface renders on a fresh DB before the first MiniHotel bookings sync. Spread
+// across lead-time buckets + price points to give a pace distribution and a
+// realized nightly band. Clearly demo data.
+function seedBookings(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_bookings'").get();
+  if (seeded) return;
+
+  const unitId = "BG-2231";
+  const now = new Date().toISOString();
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const dayMs = 86_400_000;
+  // [arrival, leadDays, nightly]
+  const samples: Array<[string, number, number]> = [
+    ["2026-07-05", 12, 720],
+    ["2026-07-12", 9, 700],
+    ["2026-07-20", 22, 760],
+    ["2026-08-01", 34, 820],
+    ["2026-08-10", 28, 800],
+    ["2026-08-18", 47, 880],
+    ["2026-09-01", 55, 900],
+    ["2026-09-12", 41, 860],
+    ["2026-09-20", 18, 740],
+    ["2026-10-01", 63, 940],
+    ["2026-10-10", 30, 810],
+    ["2026-07-28", 6, 690],
+  ];
+
+  const ins = db.prepare(`
+    INSERT INTO bookings
+      (id, portal_res_id, unit_id, room_type, source, status, created_on, arrival, departure,
+       nights, guests, total, nightly, currency, lead_days, synced_at)
+    VALUES
+      (@id, @portal_res_id, @unit_id, @room_type, @source, @status, @created_on, @arrival, @departure,
+       @nights, @guests, @total, @nightly, @currency, @lead_days, @synced_at)
+  `);
+
+  const tx = db.transaction(() => {
+    let i = 0;
+    for (const [arrival, lead, nightly] of samples) {
+      i++;
+      const nights = 30;
+      const arrMs = Date.parse(`${arrival}T00:00:00Z`);
+      ins.run({
+        id: `seed-bk-${i}`,
+        portal_res_id: `PORTAL-${1000 + i}`,
+        unit_id: unitId,
+        room_type: null,
+        source: i % 2 ? "Airbnb" : "Booking.com",
+        status: "OK",
+        created_on: iso(arrMs - lead * dayMs),
+        arrival,
+        departure: iso(arrMs + nights * dayMs),
+        nights,
+        guests: 2,
+        total: nightly * nights,
+        nightly,
+        currency: "ILS",
+        lead_days: lead,
+        synced_at: now,
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_bookings', 'v1')").run();
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (global.__rohubDb) return global.__rohubDb;
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -639,6 +834,7 @@ export function getDb(): Database.Database {
   seed(db);
   seedProfiles(db);
   seedLadder(db);
+  seedBookings(db);
   global.__rohubDb = db;
   return db;
 }
