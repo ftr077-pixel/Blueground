@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { CHART, fmtMoney, nightsLabel } from "@/lib/revenue";
 
 interface Snap {
@@ -83,6 +84,188 @@ const selectCls =
   "rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:border-primary/50";
 
 const uniq = <T,>(xs: T[]) => Array.from(new Set(xs));
+
+// ----------------------------------------------------------- suggestions queue
+interface SuggestionRow {
+  listingId: string;
+  unitId: string | null;
+  label: string;
+  area: string;
+  nights: number;
+  direction: "increase" | "decrease";
+  currentNightly: number;
+  suggestedNightly: number;
+  deltaNightly: number;
+  deltaPct: number;
+  currentPage: number | null;
+  targetPage: number;
+  confidence: "high" | "medium" | "low";
+  n: number;
+  profitDelta: number | null;
+}
+interface SuggestionBatch {
+  scanned: number;
+  hiddenLowConfidence: number;
+  suggestions: SuggestionRow[];
+}
+
+function SuggestionsQueue({
+  targetPage,
+  onInspect,
+}: {
+  targetPage: number;
+  onInspect: (listingId: string) => void;
+}) {
+  const [batch, setBatch] = useState<SuggestionBatch | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [applied, setApplied] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/learning/suggestions?targetPage=${targetPage}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+      .then((b: SuggestionBatch) => setBatch(b))
+      .catch((e) => setErr(e instanceof Error ? e.message : "failed to load"))
+      .finally(() => setLoading(false));
+  }, [targetPage]);
+
+  async function apply(row: SuggestionRow) {
+    setApplying(row.listingId);
+    setErr(null);
+    try {
+      const r = await fetch("/api/learning/apply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ listingId: row.listingId, nights: row.nights, targetPage }),
+      });
+      const b = (await r.json()) as { ok?: boolean; newNightly?: number; error?: string };
+      if (!r.ok || !b.ok) throw new Error(b.error || `apply failed: ${r.status}`);
+      setApplied((m) => ({ ...m, [row.listingId]: b.newNightly ?? row.suggestedNightly }));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "apply failed");
+    } finally {
+      setApplying(null);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <CardTitle>Suggested moves</CardTitle>
+          {batch && (
+            <span className="text-[11px] text-muted-foreground">
+              {batch.suggestions.length} of {batch.scanned} listings have a move ≥2%
+              {batch.hiddenLowConfidence > 0 && ` · ${batch.hiddenLowConfidence} low-confidence hidden`}
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Only listings the model says are mispriced for page {targetPage} — everything else is
+          already about right. Apply logs the change for outcome tracking and updates the mapped
+          unit&apos;s rate.
+        </p>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <p className="text-[11px] text-muted-foreground">Scanning portfolio…</p>
+        ) : !batch || batch.suggestions.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No actionable suggestions right now — prices look aligned with the market
+            {batch && batch.hiddenLowConfidence > 0
+              ? ` (${batch.hiddenLowConfidence} segment(s) still learning).`
+              : "."}
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left">Listing</th>
+                  <th className="px-3 py-2 text-left">Area</th>
+                  <th className="px-3 py-2 text-right">Now ₪/n</th>
+                  <th className="px-3 py-2 text-right">Suggested</th>
+                  <th className="px-3 py-2 text-right">Δ</th>
+                  <th className="px-3 py-2 text-right">Page</th>
+                  <th className="px-3 py-2 text-right">Profit Δ/mo</th>
+                  <th className="px-3 py-2 text-left">Conf.</th>
+                  <th className="px-3 py-2 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batch.suggestions.map((s) => {
+                  const done = applied[s.listingId] != null;
+                  return (
+                    <tr key={s.listingId} className="border-t border-border/60">
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => onInspect(s.listingId)}
+                          className="max-w-[16rem] truncate text-left font-medium hover:text-primary"
+                          title="Open in the inspector below"
+                        >
+                          {s.label}
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">{s.area}</td>
+                      <td className="px-3 py-2 text-right font-mono">₪{s.currentNightly}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold">
+                        ₪{done ? applied[s.listingId] : s.suggestedNightly}
+                      </td>
+                      <td
+                        className={cn(
+                          "px-3 py-2 text-right font-medium",
+                          s.direction === "increase"
+                            ? "text-[hsl(var(--success))]"
+                            : "text-[hsl(var(--danger))]",
+                        )}
+                      >
+                        {s.direction === "increase" ? "▲ +" : "▼ "}
+                        {s.deltaPct.toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-muted-foreground">
+                        {s.currentPage ?? "—"}→{s.targetPage}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {s.profitDelta != null
+                          ? `${s.profitDelta >= 0 ? "+" : ""}₪${s.profitDelta.toLocaleString()}`
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {s.confidence === "high" ? (
+                          <Badge variant="success">high · {s.n}</Badge>
+                        ) : (
+                          <Badge variant="info">med · {s.n}</Badge>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {done ? (
+                          <Badge variant="success">applied ✓</Badge>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => apply(s)}
+                            disabled={applying != null}
+                            className="rounded-md border border-primary/30 bg-primary/15 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+                          >
+                            {applying === s.listingId ? "Applying…" : "Apply"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {err && <p className="mt-2 text-[11px] text-[hsl(var(--danger))]">{err}</p>}
+      </CardContent>
+    </Card>
+  );
+}
 
 export function IntelligencePanel() {
   const [listings, setListings] = useState<Listing[]>([]);
@@ -162,6 +345,8 @@ export function IntelligencePanel() {
 
   return (
     <div className="space-y-6">
+      <SuggestionsQueue targetPage={targetPage} onInspect={(id) => setListingId(id)} />
+
       <div className="flex flex-wrap items-center gap-2">
         <select className={`${selectCls} max-w-[20rem]`} value={listingId} onChange={(e) => setListingId(e.target.value)}>
           {listings.map((l) => (
