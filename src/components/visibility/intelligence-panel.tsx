@@ -62,6 +62,12 @@ interface Elasticity {
     marginBefore: number | null;
     marginAfter: number | null;
   } | null;
+  model: {
+    offsetRank: number;
+    offsetN: number;
+    ownPositionsPerPct: number | null;
+    ownN: number;
+  };
   confidence: {
     level: "high" | "medium" | "low";
     n: number;
@@ -290,6 +296,16 @@ function Recommendation({ data, confBadge }: { data: Elasticity; confBadge: Reac
         </div>
 
         {drop && data.note && <p className="text-[11px] text-muted-foreground">{data.note}</p>}
+        {data.model.offsetN >= 2 && (
+          <p className="text-[11px] text-muted-foreground">
+            Model B: this listing ranks {Math.abs(data.model.offsetRank)} positions{" "}
+            {data.model.offsetRank <= 0 ? "better" : "worse"} than its price implies (from{" "}
+            {data.model.offsetN} appearances)
+            {data.model.ownPositionsPerPct != null &&
+              `; observed own sensitivity ≈ ${data.model.ownPositionsPerPct} pos per 1% cut (n=${data.model.ownN})`}
+            .
+          </p>
+        )}
         <p className="text-[11px] text-muted-foreground">
           Based on {data.confidence.n} market listings
           {data.confidence.freshnessDays != null && ` · scanned ${data.confidence.freshnessDays}d ago`}.

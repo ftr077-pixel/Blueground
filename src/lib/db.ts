@@ -207,6 +207,21 @@ function init(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_results_segment ON search_results(profile_id, nights, check_in, run_id);
     CREATE INDEX IF NOT EXISTS idx_results_ts ON search_results(ts);
 
+    -- Log of deliberate per-listing price changes (operator/agent), so the
+    -- longitudinal learner (Model B) can attribute rank moves to our own moves.
+    -- Observed price drift is read directly from listing_snapshots; this table is
+    -- the rails for intentional changes + the experiment loop.
+    CREATE TABLE IF NOT EXISTS listing_price_changes (
+      id          TEXT PRIMARY KEY,
+      listing_id  TEXT NOT NULL REFERENCES tracked_listings(id),
+      ts          TEXT NOT NULL,
+      old_nightly REAL,
+      new_nightly REAL,
+      source      TEXT NOT NULL,
+      note        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_lpc_listing_ts ON listing_price_changes(listing_id, ts DESC);
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL

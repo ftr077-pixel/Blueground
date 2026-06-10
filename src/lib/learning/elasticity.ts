@@ -6,7 +6,8 @@ import {
   type LeadBucket,
 } from "./config";
 import { evalCurve, invertCurve, isotonicNonDecreasing, type IsoCurve, type IsoInput } from "./isotonic";
-import { listingState, marketObservations } from "./dataset";
+import { listingPriceHistory, listingState, marketObservations } from "./dataset";
+import { listingOffset, ownElasticity } from "./longitudinal";
 import type {
   Confidence,
   CurvePoint,
@@ -133,10 +134,17 @@ export function elasticityForListing(
   // to this listing: how many positions it sits above/below what its price implies
   // (a lightweight stand-in for the longitudinal offset Model B estimates in M4).
   const modeledRankAtCur = cur != null && T && curve.xs.length ? evalCurve(curve, cur) * T : null;
-  const offsetRank =
+  // Model B: prefer a recency-weighted offset from the listing's whole history;
+  // fall back to the single current point, then to none.
+  const history = listingPriceHistory(listingId, nights);
+  const histOffset =
+    T && curve.xs.length ? listingOffset(history, curve, T, LEARNING.halfLifeDays) : null;
+  const singleOffset =
     state.found && state.currentRank != null && modeledRankAtCur != null
       ? state.currentRank - modeledRankAtCur
       : 0;
+  const offsetRank = histOffset && histOffset.n >= 2 ? histOffset.offset : singleOffset;
+  const own = ownElasticity(history);
   // This listing's expected rank at a price = market curve + its offset.
   const listingRankAt = (price: number) =>
     T && curve.xs.length ? Math.max(1, evalCurve(curve, Math.max(1, price)) * T + offsetRank) : null;
@@ -234,6 +242,12 @@ export function elasticityForListing(
     marginal: { positionsPer100Nightly, positionsPerPct },
     revenue: { nights, before, after, delta: before != null && after != null ? after - before : null },
     economics,
+    model: {
+      offsetRank: Math.round(offsetRank),
+      offsetN: histOffset && histOffset.n >= 2 ? histOffset.n : state.found ? 1 : 0,
+      ownPositionsPerPct: own ? round1(own.positionsPerPct) : null,
+      ownN: own?.n ?? 0,
+    },
     confidence: {
       level,
       n,
