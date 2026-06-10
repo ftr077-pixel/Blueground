@@ -206,7 +206,104 @@ export function IntelligencePanel() {
 
       {data && <Recommendation data={data} confBadge={confBadge} />}
       {data && <CurveCard data={data} />}
+      {listingId && <OutcomesCard listingId={listingId} />}
     </div>
+  );
+}
+
+interface Outcomes {
+  scope: "unit" | "portfolio";
+  unitId: string | null;
+  pace: { medianLeadDays: number | null; n: number; histogram: { key: string; label: string; count: number }[] };
+  realizedNightly: { p25: number; p50: number; p75: number; n: number; currency: string | null } | null;
+  recent: Array<{
+    id: string;
+    createdOn: string | null;
+    arrival: string | null;
+    nightly: number | null;
+    source: string | null;
+    status: string | null;
+    leadDays: number | null;
+  }>;
+}
+
+function OutcomesCard({ listingId }: { listingId: string }) {
+  const [o, setO] = useState<Outcomes | null>(null);
+  useEffect(() => {
+    fetch(`/api/learning/outcomes?listingId=${listingId}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then(setO)
+      .catch(() => setO(null));
+  }, [listingId]);
+
+  if (!o) return null;
+  const hasData = (o.realizedNightly?.n ?? 0) > 0 || o.pace.n > 0;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Booking outcomes · MiniHotel</CardTitle>
+          <Badge variant={o.scope === "unit" ? "info" : "muted"}>
+            {o.scope === "unit" ? "this unit" : "portfolio"}
+          </Badge>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          What actually booked — realized price and how far ahead. Our pace is the benchmark to
+          compare against market booking lead times (M5), and the truth behind strategy success (M6).
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!hasData ? (
+          <p className="text-[11px] text-muted-foreground">
+            No bookings synced yet — run the MiniHotel bookings sync (POST
+            /api/integrations/minihotel/bookings).
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-x-10 gap-y-3">
+              {o.realizedNightly && (
+                <Stat
+                  label={`Realized nightly (n=${o.realizedNightly.n})`}
+                  value={`${fmtMoney(o.realizedNightly.p50)}/n`}
+                  sub={`${fmtMoney(o.realizedNightly.p25)}–${fmtMoney(o.realizedNightly.p75)}`}
+                />
+              )}
+              <Stat
+                label={`Our pace (n=${o.pace.n})`}
+                value={o.pace.medianLeadDays != null ? `~${o.pace.medianLeadDays}d out` : "—"}
+                sub="median booking lead"
+              />
+            </div>
+            {o.recent.length > 0 && (
+              <div className="overflow-hidden rounded-lg border border-border">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-2 py-1 text-left">Booked</th>
+                      <th className="px-2 py-1 text-left">Arrival</th>
+                      <th className="px-2 py-1 text-right">Lead</th>
+                      <th className="px-2 py-1 text-right">Nightly</th>
+                      <th className="px-2 py-1 text-left">Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {o.recent.slice(0, 8).map((b) => (
+                      <tr key={b.id} className="border-t border-border/40">
+                        <td className="px-2 py-1 font-mono text-muted-foreground">{b.createdOn ?? "—"}</td>
+                        <td className="px-2 py-1 font-mono">{b.arrival ?? "—"}</td>
+                        <td className="px-2 py-1 text-right">{b.leadDays != null ? `${b.leadDays}d` : "—"}</td>
+                        <td className="px-2 py-1 text-right font-mono">{fmtMoney(b.nightly)}</td>
+                        <td className="px-2 py-1">{b.source ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
