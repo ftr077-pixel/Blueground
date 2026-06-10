@@ -225,6 +225,8 @@ interface Outcomes {
     status: string | null;
     leadDays: number | null;
   }>;
+  marketPace: { medianLeadDays: number | null } | null;
+  paceDeltaDays: number | null;
 }
 
 function OutcomesCard({ listingId }: { listingId: string }) {
@@ -273,7 +275,23 @@ function OutcomesCard({ listingId }: { listingId: string }) {
                 value={o.pace.medianLeadDays != null ? `~${o.pace.medianLeadDays}d out` : "—"}
                 sub="median booking lead"
               />
+              {o.marketPace?.medianLeadDays != null && (
+                <Stat
+                  label="Pace vs market"
+                  value={
+                    o.paceDeltaDays != null
+                      ? `${o.paceDeltaDays === 0 ? "on pace" : `${Math.abs(o.paceDeltaDays)}d ${o.paceDeltaDays < 0 ? "earlier" : "later"}`}`
+                      : "—"
+                  }
+                  sub={`market ~${o.marketPace.medianLeadDays}d out`}
+                />
+              )}
             </div>
+            {o.marketPace?.medianLeadDays == null && (
+              <p className="text-[11px] text-muted-foreground">
+                Add market booking lead times to compare pace (POST /api/learning/market-pace).
+              </p>
+            )}
             {o.recent.length > 0 && (
               <div className="overflow-hidden rounded-lg border border-border">
                 <table className="w-full text-[11px]">
