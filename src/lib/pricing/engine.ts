@@ -170,7 +170,10 @@ export function quoteCurve(
 }
 
 /** A static description of which rules are active — for surfacing in the UI. */
-export function activeRuleSummary(cfg: typeof PRICING_RULES = PRICING_RULES) {
+export function activeRuleSummary(
+  cfg: typeof PRICING_RULES = PRICING_RULES,
+  gatePct: number = PRICING_AGENT.humanGatePct,
+) {
   return [
     { key: "base", label: "Base rate anchor", enabled: true, note: "per-unit base × factors" },
     { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: "monthly market curve" },
@@ -183,6 +186,6 @@ export function activeRuleSummary(cfg: typeof PRICING_RULES = PRICING_RULES) {
     { key: "los", label: "LOS / monthly discount", enabled: cfg.los.enabled, note: "weekly / monthly / quarter" },
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max" },
     { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: "floor → demand → market → far-out → override" },
-    { key: "gate", label: "Human gate", enabled: true, note: `>±${PRICING_AGENT.humanGatePct}% → Action Center` },
+    { key: "gate", label: "Human gate", enabled: true, note: `>±${gatePct}% → Action Center` },
   ];
 }

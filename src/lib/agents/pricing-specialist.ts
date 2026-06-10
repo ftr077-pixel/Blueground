@@ -10,11 +10,11 @@ import {
 } from "@/lib/repos/units";
 import { unitRateAnchors } from "@/lib/repos/rates";
 import { PRICING_AGENT, UNIT_PRICING_DEFAULTS, roundRate } from "@/lib/config/pricing";
+import { effectiveRules, effectiveHumanGatePct } from "@/lib/pricing/rules-config";
 import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { representativeQuote, type FactorResult } from "@/lib/pricing/engine";
 
 const {
-  humanGatePct: HUMAN_GATE_PCT,
   noOpThresholdPct: NO_OP_PCT,
   highBlastRadiusPct: HIGH_BLAST_PCT,
 } = PRICING_AGENT;
@@ -65,6 +65,10 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
   const ranAt = asOf.toISOString();
   const units = listUnits();
   const anchors = unitRateAnchors();
+  // Effective config = code defaults + operator overrides (Settings → Pricing
+  // engine rules), read fresh each pass so saves apply without a redeploy.
+  const cfg = effectiveRules();
+  const gatePct = effectiveHumanGatePct();
   const decisions: PricingDecision[] = [];
   const skipped: string[] = [];
 
@@ -87,7 +91,7 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
       setUnitRateAnchor(unit.id, base, current, minRate, maxRate);
       unit = { ...unit, baseRate: base, currentRate: current, minRate, maxRate };
     }
-    const q = representativeQuote(unit, providers, asOf);
+    const q = representativeQuote(unit, providers, asOf, cfg);
     const newRate = q.rate;
     const deltaPct = ((newRate - unit.currentRate) / unit.currentRate) * 100;
     const absDelta = Math.abs(deltaPct);
@@ -126,7 +130,7 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
 
     let status: PricingDecision["status"] = "applied";
     if (absDelta < NO_OP_PCT) status = "applied"; // no-op-ish; writes skipped below
-    else if (absDelta > HUMAN_GATE_PCT) status = "pending_approval";
+    else if (absDelta > gatePct) status = "pending_approval";
 
     const history = recordPricing({
       unitId: unit.id,
@@ -186,8 +190,8 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
         proposedAction: `Move ${unit.name} from ${decision.oldRate} to ${newRate} ILS (${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}%).`,
         rationale: reason,
         blastRadius: absDelta >= HIGH_BLAST_PCT ? "high" : "medium",
-        amount: `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}% (above ${HUMAN_GATE_PCT}% ceiling)`,
-        rule: `spec.md §5 — pricing move > ±${HUMAN_GATE_PCT}%`,
+        amount: `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}% (above ${gatePct}% ceiling)`,
+        rule: `spec.md §5 — pricing move > ±${gatePct}%`,
       });
       logActivity({
         department: "revenue",

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listUnits, listPricingHistory } from "@/lib/repos/units";
 import { marketRateBands, marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { activeRuleSummary } from "@/lib/pricing/engine";
+import { effectiveRules, effectiveHumanGatePct } from "@/lib/pricing/rules-config";
 import { listMarketSnapshots } from "@/lib/repos/market";
 import { isAirRoiConfigured } from "@/lib/pricing/airroi-client";
 
@@ -16,7 +17,7 @@ export async function GET() {
       bands: marketRateBands(),
       minNights: marketMinNightsBenchmark(),
     },
-    rules: activeRuleSummary(),
+    rules: activeRuleSummary(effectiveRules(), effectiveHumanGatePct()),
     marketData: {
       // "live" once AirROI snapshots exist; the engine then uses them automatically.
       source: snapshots.length > 0 ? "airroi" : "mock",

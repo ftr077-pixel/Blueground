@@ -78,7 +78,24 @@ export interface OccupancyBand {
   label: string;
 }
 
-export const PRICING_RULES = {
+/** The full rule-engine configuration. Code defaults live in PRICING_RULES;
+ *  operator overrides (Settings → Pricing engine rules) are deep-merged over
+ *  them at read time via src/lib/pricing/rules-config.ts. */
+export interface PricingRulesConfig {
+  currentRateLeadDays: number;
+  curveHorizonDays: number;
+  seasonality: { enabled: boolean; monthlyIndex: number[] };
+  demandEvents: { enabled: boolean; cap: number };
+  pacing: { enabled: boolean; sensitivity: number; cap: number };
+  occupancy: { enabled: boolean; bands: OccupancyBand[] };
+  farOut: { enabled: boolean; thresholdDays: number; cap: number; rampDays: number };
+  lastMinute: { enabled: boolean; windowDays: number; maxDiscount: number };
+  dayOfWeek: { enabled: boolean; multiplier: number[] };
+  los: { enabled: boolean; quarterlyMinNights: number; quarterlyDiscountPct: number };
+  minStayHierarchy: { farOutThresholdDays: number; farOutNights: number };
+}
+
+export const PRICING_RULES: PricingRulesConfig = {
   /** Lead-time (days out) at which the headline "current rate" is quoted. 0 = price
    *  as-of-now (intuitive headline); the forward view, incl. far-out premiums, is
    *  in the price curve. Raise it to price a typical booking window instead. */
@@ -145,5 +162,5 @@ export const PRICING_RULES = {
     farOutThresholdDays: 90,
     farOutNights: 60,
   },
-} as const;
+};
 
