@@ -265,6 +265,43 @@ export function getCalendar(from: string, days: number): Calendar {
   };
 }
 
+// --------------------------------------------------------------- rate anchors
+function median(xs: number[]): number {
+  if (!xs.length) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+export interface RateAnchor {
+  base: number; // ₪-rounded median nightly rate over the window (the anchor)
+  current: number;
+  nights: number; // how many priced calendar nights backed it
+}
+
+/**
+ * A per-unit pricing anchor derived from the Rates Calendar (which merges
+ * MiniHotel actuals + manual overrides over the baseline). This is what connects
+ * MiniHotel rates to the pricing engine: the engine has no rates of its own, so
+ * it anchors on the median nightly rate the calendar shows for each unit.
+ */
+export function unitRateAnchors(windowDays = 90): Map<string, RateAnchor> {
+  const cal = getCalendar(new Date().toISOString().slice(0, 10), windowDays);
+  const out = new Map<string, RateAnchor>();
+  for (const row of cal.rows) {
+    // Prefer real rates (MiniHotel actuals / manual edits) over synthetic baseline
+    // cells, so a partial MiniHotel calendar isn't diluted by the ~600 default.
+    // price is nullable (null = not synced yet) — narrow before comparing.
+    const priced = row.cells.filter((c): c is RateCell & { price: number } => c.price != null && c.price > 0);
+    const real = priced.filter((c) => c.source !== "derived").map((c) => c.price);
+    const prices = real.length ? real : priced.map((c) => c.price);
+    if (prices.length === 0) continue;
+    const med = Math.round(median(prices) / 5) * 5;
+    if (med > 0) out.set(row.unit.id, { base: med, current: med, nights: prices.length });
+  }
+  return out;
+}
+
 // -------------------------------------------------------------------- writes
 export function upsertOverride(
   unitId: string,
