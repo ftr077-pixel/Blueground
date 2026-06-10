@@ -33,12 +33,27 @@ export interface RateCell {
   note: string | null;
 }
 
+export interface RankInfo {
+  rank: number | null;
+  total: number | null;
+  page: number | null;
+  ts: string;
+  nights: number;
+  found: boolean;
+}
+
 export interface RateRow {
   unit: Pick<
     Unit,
     "id" | "name" | "neighborhood" | "bedrooms" | "platform" | "currentRate" | "baseRate"
   >;
   cells: RateCell[];
+  /** Occupancy over the next 30/60/90 nights from today (sold ÷ sellable), null when unknown. */
+  occ30: number | null;
+  occ60: number | null;
+  occ90: number | null;
+  /** Latest Airbnb search position for the ~1-month stay, via the linked tracked listing. */
+  airbnbRank: RankInfo | null;
 }
 
 export interface CalendarSummary {
@@ -159,6 +174,11 @@ export function unitExists(id: string): boolean {
   return listUnits().some((u) => u.id === id);
 }
 
+// Hotel-local (Asia/Jerusalem) today; the occupancy horizons always count from
+// today regardless of the window the operator is viewing (PriceLabs semantics).
+const hotelToday = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
+
 export function getCalendar(from: string, days: number): Calendar {
   const units = listUnits();
   const dates: string[] = [];
@@ -172,6 +192,41 @@ export function getCalendar(from: string, days: number): Calendar {
     .all(from, dates[dates.length - 1] ?? from) as OverrideSql[];
   const ov = new Map<string, OverrideSql>();
   for (const r of ovRows) ov.set(r.unit_id + "|" + r.date, r);
+
+  // Overrides for the occupancy horizons (next 90 nights from today) — a
+  // separate span from the viewed window.
+  const occFrom = hotelToday();
+  const occFromIdx = dayIndex(occFrom);
+  const occDates: string[] = [];
+  for (let i = 0; i < 90; i++) occDates.push(isoAddDays(occFrom, i));
+  const ovOccRows = db
+    .prepare("SELECT * FROM rate_calendar WHERE date >= ? AND date <= ?")
+    .all(occFrom, occDates[89]) as OverrideSql[];
+  const ovOcc = new Map<string, OverrideSql>();
+  for (const r of ovOccRows) ovOcc.set(r.unit_id + "|" + r.date, r);
+
+  // Latest ~1-month-stay Airbnb search position per linked unit (the search
+  // the visibility tab tracks; tracked_listings.unit_id is the link).
+  interface RankSql {
+    unit_id: string;
+    rank: number | null;
+    total: number | null;
+    page: number | null;
+    ts: string;
+    nights: number;
+    found: number;
+  }
+  const rankRows = db
+    .prepare(
+      `SELECT tl.unit_id, ls.rank, ls.total, ls.page, ls.ts, ls.nights, ls.found
+       FROM tracked_listings tl
+       JOIN listing_snapshots ls ON ls.listing_id = tl.id
+       WHERE tl.unit_id IS NOT NULL AND tl.active = 1 AND ls.nights BETWEEN 28 AND 31
+       ORDER BY ls.ts`,
+    )
+    .all() as RankSql[];
+  const rankByUnit = new Map<string, RankSql>();
+  for (const r of rankRows) rankByUnit.set(r.unit_id, r); // latest ts wins
 
   const rows: RateRow[] = units.map((unit) => {
     // Only fabricate a baseline for units that actually have a rate (legacy/demo
@@ -220,6 +275,34 @@ export function getCalendar(from: string, days: number): Calendar {
         note: o?.note ?? null,
       };
     });
+    // Occupancy over the next 30/60/90 nights from today: sold ÷ sellable,
+    // closed nights excluded; null when availability is unknown (unsynced).
+    const sold = [0, 0, 0];
+    const open = [0, 0, 0];
+    const occToIdx = occFromIdx + 89;
+    const bookedOcc = hasBaseline ? bookedSet(unit, occToIdx) : new Set<number>();
+    const closedOcc = hasBaseline ? closedSet(unit, occFromIdx, occToIdx) : new Set<number>();
+    for (let i = 0; i < 90; i++) {
+      const idx = occFromIdx + i;
+      let isClosed = closedOcc.has(idx);
+      let isBooked = bookedOcc.has(idx);
+      let available: number | null = hasBaseline ? (isBooked || isClosed ? 0 : 1) : null;
+      const o = ovOcc.get(unit.id + "|" + occDates[i]);
+      if (o) {
+        if (o.closed != null) isClosed = o.closed === 1;
+        if (o.booked != null) isBooked = o.booked === 1;
+        if (o.available != null) available = o.available;
+        else if (o.closed != null || o.booked != null) available = isBooked || isClosed ? 0 : 1;
+      }
+      if (isClosed) continue;
+      const buckets = i < 30 ? [0, 1, 2] : i < 60 ? [1, 2] : [2];
+      if (isBooked) for (const b of buckets) sold[b]++;
+      else if (available === 1) for (const b of buckets) open[b]++;
+    }
+    const occOf = (b: number) => (sold[b] + open[b] > 0 ? sold[b] / (sold[b] + open[b]) : null);
+
+    const rk = rankByUnit.get(unit.id);
+
     return {
       unit: {
         id: unit.id,
@@ -231,6 +314,19 @@ export function getCalendar(from: string, days: number): Calendar {
         baseRate: unit.baseRate,
       },
       cells,
+      occ30: occOf(0),
+      occ60: occOf(1),
+      occ90: occOf(2),
+      airbnbRank: rk
+        ? {
+            rank: rk.rank,
+            total: rk.total,
+            page: rk.page,
+            ts: rk.ts,
+            nights: rk.nights,
+            found: rk.found === 1,
+          }
+        : null,
     };
   });
 
