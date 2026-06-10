@@ -330,10 +330,18 @@ export function RateCalendar() {
             Diagnose
           </button>
           <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
-            <LegendSwatch className="bg-card border border-border" label="Open" />
-            <LegendSwatch className="bg-success/15" label="Booked" />
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="h-3 w-12 rounded-sm"
+                style={{
+                  background:
+                    "linear-gradient(90deg, hsl(25 85% 48%), hsl(84 38% 88%), hsl(142 85% 48%))",
+                }}
+              />
+              Price vs this unit&rsquo;s typical (low → high)
+            </span>
+            <LegendSwatch className="bg-muted/60" label="Sold" />
             <LegendSwatch className="bg-danger/10" label="Closed" />
-            <LegendSwatch className="bg-muted/60" label="Weekend" />
           </div>
         </CardContent>
       </Card>
@@ -461,7 +469,9 @@ export function RateCalendar() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => (
+                {rows.map((row) => {
+                  const typical = typicalRate(row);
+                  return (
                   <tr key={row.unit.id} className="border-t border-border/50">
                     <th className="sticky left-0 z-10 bg-card px-3 py-1.5 text-left align-middle min-w-[12rem]">
                       <div className="font-medium text-foreground leading-tight">
@@ -486,22 +496,30 @@ export function RateCalendar() {
                     {row.cells.map((c) => {
                       const selected = sel?.unitId === row.unit.id && sel?.date === c.date;
                       const monthStart = partsUTC(c.date).day === 1;
+                      const tone =
+                        !c.closed && !c.booked && c.price != null && typical
+                          ? priceTone(c.price, typical)
+                          : null;
                       return (
                         <td key={c.date} className={`p-0 ${monthStart ? "border-l border-border" : ""}`}>
                           <button
                             type="button"
                             onClick={() => setSel({ unitId: row.unit.id, date: c.date })}
-                            className={`relative h-11 w-14 px-1 leading-tight transition-colors ${cellTone(c)} ${
+                            className={`relative h-11 w-14 px-1 leading-tight transition-colors ${tone ? "" : cellTone(c)} ${
                               selected ? "ring-2 ring-primary ring-inset" : "hover:brightness-95"
                             }`}
+                            style={tone ? { backgroundColor: tone.bg, color: tone.fg } : undefined}
                             title={`${apartmentLabel(row.unit)} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
                               c.source !== "derived" ? ` · ${c.source}` : ""
-                            }`}
+                            }${tone && typical ? ` · ${Math.round(((c.price as number) / typical) * 100)}% of typical ₪${typical}` : ""}`}
                           >
                             <div className="font-medium">
                               {c.closed ? <Lock className="mx-auto h-3 w-3" /> : (c.price ?? "—")}
                             </div>
-                            <div className="text-[9px] text-muted-foreground">
+                            <div
+                              className={tone ? "text-[9px]" : "text-[9px] text-muted-foreground"}
+                              style={tone ? { color: tone.faint } : undefined}
+                            >
                               {c.booked ? "sold" : c.closed ? "" : c.minNights !== data.defaultMinNights ? `≥${c.minNights}` : ""}
                             </div>
                             {c.source !== "derived" && (
@@ -516,7 +534,8 @@ export function RateCalendar() {
                       );
                     })}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -534,10 +553,61 @@ export function RateCalendar() {
 
 function cellTone(c: RateCell): string {
   if (c.closed) return "bg-danger/10 text-muted-foreground";
-  if (c.booked) return "bg-success/15 text-foreground";
+  if (c.booked) return "bg-muted/60 text-muted-foreground"; // sold = gray
   if (c.price == null) return "bg-muted/20 text-muted-foreground/50"; // no data yet (not synced)
   if (c.weekend) return "bg-muted/50 text-foreground";
   return "bg-card text-foreground";
+}
+
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+
+/** Typical nightly rate for a unit: its configured rate, else the median of
+ *  the prices visible in the window (covers synced units with rate 0). */
+function typicalRate(row: RateRow): number | null {
+  if (row.unit.currentRate > 0) return row.unit.currentRate;
+  if (row.unit.baseRate > 0) return row.unit.baseRate;
+  const ps = row.cells
+    .filter((c) => !c.booked && !c.closed && c.price != null)
+    .map((c) => c.price as number)
+    .sort((a, b) => a - b);
+  return ps.length ? ps[Math.floor(ps.length / 2)] : null;
+}
+
+// sRGB relative luminance of an HSL color (text contrast must be judged by
+// luminance, not HSL lightness — a 50%-light green is visually bright).
+function hslLuminance(h: number, s: number, l: number): number {
+  s /= 100;
+  l /= 100;
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+  return 0.2126 * lin(f(0)) + 0.7152 * lin(f(8)) + 0.0722 * lin(f(4));
+}
+
+/**
+ * Color for an open night's price RELATIVE TO THIS UNIT's typical rate:
+ * ≤70% of typical → dark orange · 100% → pale neutral · ≥135% → dark green,
+ * interpolated. The text color (white vs near-black) is picked by the
+ * background's real luminance, balanced so the worst-case contrast across the
+ * whole gradient stays ≥ ~4:1 — the number is always readable.
+ */
+function priceTone(price: number, typical: number): { bg: string; fg: string; faint: string } {
+  const ratio = price / typical;
+  const t =
+    ratio <= 1
+      ? 0.5 * clamp01((ratio - 0.7) / 0.3) // 0.70→0 (dark orange) … 1.00→0.5
+      : 0.5 + 0.5 * clamp01((ratio - 1) / 0.35); // 1.00→0.5 … 1.35→1 (dark green)
+  const hue = 25 + t * (142 - 25); // orange → green
+  const intensity = Math.abs(t - 0.5) * 2; // 0 at typical price, 1 at extremes
+  const sat = 38 + intensity * 47;
+  const light = 88 - intensity * 42; // pale center, dark extremes
+  const darkBg = hslLuminance(hue, sat, light) < 0.21;
+  return {
+    bg: `hsl(${hue.toFixed(0)} ${sat.toFixed(0)}% ${light.toFixed(0)}%)`,
+    fg: darkBg ? "#ffffff" : "hsl(224 40% 12%)",
+    faint: darkBg ? "rgba(255,255,255,0.8)" : "hsla(224,30%,12%,0.65)",
+  };
 }
 
 interface DiagResult {
