@@ -264,6 +264,20 @@ function init(db: Database.Database) {
       PRIMARY KEY (run_id, check_in, nights, decile)
     );
 
+    -- External market-demand readings (e.g. market occupancy from a PriceLabs-
+    -- style dashboard), keyed by area + stay date. Stored raw; the learner never
+    -- uses the absolute value — only its percentile within the source's own
+    -- history (ghost listings make absolute market occupancy meaningless).
+    CREATE TABLE IF NOT EXISTS demand_readings (
+      id      TEXT PRIMARY KEY,
+      area    TEXT NOT NULL,
+      date    TEXT NOT NULL,           -- the stay date the reading refers to
+      source  TEXT NOT NULL DEFAULT 'market-occupancy',
+      value   REAL NOT NULL,           -- raw reading (e.g. 30 = 30% occupancy)
+      ts      TEXT NOT NULL            -- when it was read/ingested
+    );
+    CREATE INDEX IF NOT EXISTS idx_demand_area_date ON demand_readings(area, source, date, ts DESC);
+
     -- The market's booking pace (lead-time distribution) per area × stay length,
     -- supplied by the operator. The benchmark we compare our own pace against
     -- ("are we behind/ahead of how the market books?"). lead_cdf is JSON:
@@ -774,6 +788,44 @@ function seedBookings(db: Database.Database) {
   tx();
 }
 
+// Demo market-occupancy readings for the seeded area, reproducing the operator's
+// observed pattern: absolute values look low (ghost listings), but a 30% reading
+// sits at the top of the metric's own range — i.e. relatively, demand is hot.
+function seedDemand(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_demand'").get();
+  if (seeded) return;
+
+  const area = "Tel Aviv · 2 guests"; // matches the seeded profile label
+  const ins = db.prepare(
+    `INSERT INTO demand_readings (id, area, date, source, value, ts)
+     VALUES (@id, @area, @date, 'market-occupancy', @value, @ts)`,
+  );
+  const noise = (k: number) => {
+    const x = Math.sin(k * 7901 + 31337) * 215573;
+    return x - Math.floor(x); // 0..1, deterministic
+  };
+  const tx = db.transaction(() => {
+    // Weekly readings over ~6 months of stay dates: quiet winter/spring readings
+    // 12–22%, climbing into August where 28–31% is the seasonal peak.
+    const start = Date.parse("2026-03-01T00:00:00Z");
+    for (let w = 0; w < 26; w++) {
+      const dms = start + w * 7 * 86_400_000;
+      const date = new Date(dms).toISOString().slice(0, 10);
+      const month = new Date(dms).getUTCMonth() + 1; // 3..9
+      const seasonal = month >= 7 ? 26 + 5 * noise(w) : 12 + 10 * noise(w);
+      ins.run({
+        id: randomUUID(),
+        area,
+        date,
+        value: Math.round(seasonal * 10) / 10,
+        ts: "2026-06-08T09:00:00.000Z",
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_demand', 'v1')").run();
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (global.__rohubDb) return global.__rohubDb;
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -783,6 +835,7 @@ export function getDb(): Database.Database {
   seedProfiles(db);
   seedLadder(db);
   seedBookings(db);
+  seedDemand(db);
   global.__rohubDb = db;
   return db;
 }
