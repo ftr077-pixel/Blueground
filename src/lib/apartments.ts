@@ -144,12 +144,99 @@ export function apartmentIdFromName(name: string): number | null {
   return ADDRESS_BY_ID.has(n) ? n : null;
 }
 
+// ----------------------------------------------------------- address matching
+//
+// Real MiniHotel room names are abbreviated addresses, not numbered labels:
+// "Rambam_24_7", "Yavnieli_24_15", "Wiss_6_24", "Toz_5_289", "T_20_7". The
+// reliable signal is the NUMBER SEQUENCE (building, apartment): it must equal
+// the tail of the canonical address's numbers, and the word in front of it
+// must start with the same letter as a street word (so "Herzel_114_3" → Herzl
+// 114, 3 and never Allenby 114, 3). Anything ambiguous matches nothing — we
+// would rather show a plain name than a wrong ID.
+
+const GENERIC_WORDS = new Set([
+  "street", "st", "road", "rd", "derech", "blvd", "boulevard",
+  "apt", "apartment", "flat", "unit", "no", "number", "dira",
+  "mini", "hotel", "minihotel", "blueground", "blue", "ground",
+]);
+
+const tokensOf = (s: string): string[] =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0590-\u05FF]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+// numeric address tokens, allowing a unit letter: "24", "289", "4a"
+const isNumTok = (t: string) => /^\d+[a-z]?$/.test(t);
+
+interface CanonEntry {
+  id: number;
+  seq: string[]; // numeric tokens of the address, in order
+  initials: Set<string>; // first letters of the street words
+}
+
+let CANON: CanonEntry[] | null = null;
+function canon(): CanonEntry[] {
+  if (!CANON) {
+    CANON = APARTMENTS.map(([id, addr]) => {
+      const toks = tokensOf(addr);
+      return {
+        id,
+        seq: toks.filter(isNumTok),
+        initials: new Set(
+          toks.filter((t) => !isNumTok(t) && !GENERIC_WORDS.has(t)).map((t) => t[0]),
+        ),
+      };
+    });
+  }
+  return CANON;
+}
+
+/** Match a sync name like "Rambam_24_7" / "Wiss_6_24" to its apartment ID. */
+export function apartmentIdFromAddress(name: string): number | null {
+  const toks = tokensOf(name);
+  const nums = toks
+    .map((t, i) => ({ t, i }))
+    .filter((x) => isNumTok(x.t));
+  if (nums.length === 0) return null;
+
+  const hits: number[] = [];
+  for (const c of canon()) {
+    if (c.seq.length === 0 || c.seq.length > nums.length) continue;
+    const tail = nums.slice(nums.length - c.seq.length);
+    if (!tail.every((x, k) => x.t === c.seq[k])) continue;
+    // A number directly in front of the tail means this candidate's sequence
+    // doesn't cover the name's trailing numbers ("Mohaliver_31_9" must not
+    // match "Nitzana 9") — reject it. Otherwise the nearest meaningful word
+    // before the tail must share its first letter with a street word
+    // ("Wiss…" → Wyssotsky; "Herzel_114_3" → Herzl, never Allenby).
+    let letter: string | null = null;
+    let covered = true;
+    for (let i = tail[0].i - 1; i >= 0; i--) {
+      const w = toks[i];
+      if (isNumTok(w)) {
+        if (i === tail[0].i - 1) covered = false;
+        break;
+      }
+      if (GENERIC_WORDS.has(w) || w.length < 2) continue;
+      letter = w[0];
+      break;
+    }
+    if (!covered) continue;
+    if (letter && !c.initials.has(letter)) continue;
+    hits.push(c.id);
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
 /**
- * The apartment ID for a unit. The internal name is authoritative (that's
- * where the ID lives in the operator's sync); seeded units fall back to their
- * "BG-<n>" id, which is the apartment ID by construction. Anything else —
- * e.g. a MiniHotel room-type code like "MH-204" — is NOT an apartment ID, so
- * we return null rather than display a number that means nothing.
+ * The apartment ID for a unit. The internal name is authoritative: first an
+ * explicit ID marker ("1. …", "#12", "TLV 12"), then the seeded "BG-<n>" id,
+ * then the address-component match for raw sync names ("Rambam_24_7").
+ * MiniHotel room-type codes (e.g. "MH-204") are never treated as IDs, and an
+ * ambiguous name gets no number rather than a wrong one.
  */
 export function apartmentIdFromUnit(unit: { id: string; name: string }): number | null {
   const fromName = apartmentIdFromName(unit.name);
@@ -159,7 +246,7 @@ export function apartmentIdFromUnit(unit: { id: string; name: string }): number 
     const n = parseInt(m[1], 10);
     if (ADDRESS_BY_ID.has(n)) return n;
   }
-  return null;
+  return apartmentIdFromAddress(unit.name);
 }
 
 /** "<id> · <address>" when the ID is known; otherwise just the unit's name. */
