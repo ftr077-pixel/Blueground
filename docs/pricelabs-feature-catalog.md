@@ -5,7 +5,7 @@
 > primarily for the **Pricing Specialist** worker and the **Revenue & Yield** department,
 > but also for market-data, analytics, and portfolio-management features elsewhere in the app.
 >
-> **Last updated:** 2026-06-07
+> **Last updated:** 2026-06-10
 
 ---
 
@@ -24,6 +24,11 @@
   use case — a 30–90+ night furnished mid-term-rental (MTR) portfolio in Tel Aviv — where
   monthly/length-of-stay pricing and minimum-stay floors dominate, and nightly last-minute
   discounting, orphan-gap logic, and day-of-week tuning mostly do **not** apply.
+- **2026-06-10 re-check:** swept the [Customizations KB category index](https://help.pricelabs.co/portal/en/kb/pricelabs/dynamic-pricing/customizations)
+  (still HTTP 403 to fetchers; reconstructed via search). Cross-checked Part 1 against the live
+  "List of all PriceLabs Customizations" article and added four items previously missing:
+  **Rounding**, **Smoothing**, **Neighborhood Profile Data Source**, and **adjacent-day
+  min-stay rules** (before/after an unavailable night).
 
 ## How to use this catalog
 
@@ -46,17 +51,20 @@ applies customizations. Prices + minimum-stays recompute daily and sync to chann
 For **our** 30–90+ night furnished portfolio, the takeaways invert the STR defaults:
 
 - **The min-price floor is king.** PriceLabs' single most important MTR knob; it protects the
-  monthly-equivalent economics from being undercut by any discount logic. *We don't have one yet.*
+  monthly-equivalent economics from being undercut by any discount logic. *Built since 06-07:
+  per-unit floor/ceiling plus per-date min/max overrides.*
 - **LOS + weekly/monthly discounts are the real lever.** The effective *monthly* rate wins or
-  loses the booking, not the nightly number. *We model nightly only.*
+  loses the booking, not the nightly number. *Built since 06-07: weekly/monthly/quarterly
+  discounts and a surfaced `effectiveMonthlyRate`.*
 - **Minimum-stay floors define the product.** A "Lowest Min Stay Allowed" of e.g. 30 nights is
-  what makes a unit mid-term rather than short-term. *We track competitors' min-nights (visibility
-  module) but don't set our own.*
+  what makes a unit mid-term rather than short-term. *Built since 06-07: per-unit `minStay` with
+  a 30-night `lowestMinStay` hard floor (competitor min-nights still benchmarked).*
 - **Mostly ignore the STR machinery:** last-minute discounts, orphan/gap-night pricing,
   day-of-week, and high pacing sensitivity are short-stay mechanics with Low MTR relevance.
-- **Date-dimension features need a calendar model we don't have.** Our `Unit` is a single
-  `currentRate` + `occupancy30d`; far-out pricing, date-specific overrides, and a real pricing
-  calendar are a bigger, separate milestone.
+  *The rule engine ships last-minute and day-of-week implemented but OFF by default.*
+- **Date-dimension features are no longer blocked.** The rule engine + Rates Calendar give every
+  unit a per-date price curve (180-day horizon) with Date-Specific Overrides; pricing is no
+  longer a single `currentRate`.
 - **One thing we already do that PriceLabs gates behind enterprise/preview:** a human approval
   queue (our **Action Center**, the ±15% gate). Keep it — it's a differentiator.
 
@@ -64,26 +72,31 @@ For **our** 30–90+ night furnished portfolio, the takeaways invert the STR def
 
 ## What our app already has (and the gaps)
 
+> Snapshot refreshed **2026-06-10** — the rule-engine settings editor (`8daaa9d`), the Rates
+> Calendar with Date-Specific Overrides, and the MiniHotel Pull/Push integration all landed
+> after the original 06-07 sweep, closing most of the ❌ rows below.
+
 | Area | PriceLabs | Our app today | Where | Gap / priority |
 |---|---|---|---|---|
-| Base-price anchor | Base Price (yearly avg) | `Unit.baseRate`; agent prices off base | `units.ts`, `pricing-specialist.ts` | ✅ have |
-| **Min / Max price floor** | Min/Max + "Safety Minimum Price" | none | — | ❌ **High** |
-| Seasonality factor | Seasonality (broad, by month) | folded into mocked `demandIndex` | `pricing-specialist.ts` | ❌ Medium |
-| Demand factor | Demand (events / holidays / DoW) | mocked `demandIndex` per neighborhood | `pricing-specialist.ts` | ⚠️ partial |
-| Pacing factor | Pace vs. historical trend | none | — | ❌ Low (MTR) |
-| Occupancy-based | OBA bands (own + portfolio) | `occTilt` vs. 0.85 target, capped ±0.2 | `pricing-specialist.ts` | ⚠️ basic |
-| Last-minute / far-out | lead-time curves | none | — | ❌ (last-min Low; far-out High but needs calendar) |
-| **LOS / weekly / monthly discount** | LOS tiers + weekly/monthly | none | — | ❌ **High** |
-| **Minimum-stay policy + hierarchy** | default / lowest-allowed / far-out + engine | none on our units; we *track competitors'* `minNights` | `visibility.ts` | ❌ **High** |
+| Base-price anchor | Base Price (yearly avg) | `Unit.baseRate`; agent + rule engine price off base | `units.ts`, `pricing/engine.ts` | ✅ have |
+| Min / Max price floor | Min/Max + "Safety Minimum Price" | per-unit floor/ceiling (`floorPctOfBase` / `ceilingPctOfBase`) + per-date min/max overrides | `config/pricing.ts`, `repos/rates.ts` | ✅ have |
+| Seasonality factor | Seasonality (broad, by month) | monthly-index rule in the engine | `config/pricing.ts`, `pricing/engine.ts` | ✅ have (per-season min/base/max profiles still ❌) |
+| Demand factor | Demand (events / holidays / DoW) | demand-events rule (capped ±15%) over the learned market demand index | `pricing/engine.ts`, `learning/demand.ts` | ✅ have |
+| Pacing factor | Pace vs. historical trend | pacing rule vs. seasonal norm (±10% cap) | `pricing/engine.ts` | ✅ have |
+| Occupancy-based | OBA bands (own + portfolio) | OBA bands in the engine + agent `occTilt` | `config/pricing.ts`, `pricing-specialist.ts` | ✅ have (portfolio-level bands ❌) |
+| Last-minute / far-out | lead-time curves | both rules implemented; last-minute OFF by default (MTR), far-out premium ON | `config/pricing.ts` | ✅ have |
+| LOS / weekly / monthly discount | LOS tiers + weekly/monthly | per-unit weekly/monthly + quarterly LOS tier; effective monthly rate surfaced | `config/pricing.ts`, `agents/pricing-specialist.ts` | ✅ have |
+| Minimum-stay policy + hierarchy | default / lowest-allowed / far-out + engine | per-unit `minStay`, 30-night `lowestMinStay` floor, demand-tier bumps, far-out hierarchy; competitor `minNights` benchmarked | `config/pricing.ts`, `visibility.ts` | ✅ have |
 | Orphan / gap nights | gap pricing + min-stay shaping | none | — | ❌ Low (MTR) |
-| Comp-set / market data | Market Dashboards, Neighborhood Data | home-grown rank + price + min-nights scraper | `visibility.ts`, `scraper/` | ⚠️ partial — strong base to build on |
+| Comp-set / market data | Market Dashboards, Neighborhood Data | scraper + p25/50/75 neighborhood percentile bands (our "Neighborhood Data") | `repos/visibility.ts`, `scraper/` | ✅ have |
 | Multi-listing groups / bulk | Account → Group → Listing | flat unit list | — | ❌ Medium |
-| Sync / Sync-Now / Timed | overnight + manual + real-time | "Run pricing pass" + visibility scan | `api/agents/pricing/run`, `api/visibility/scan` | ⚠️ analog |
+| Sync / Sync-Now / Timed | overnight + manual + real-time | pricing pass + MiniHotel **Pull/Push** with end-to-end write verification | `api/agents/pricing/run`, `integrations/minihotel.ts` | ✅ real PMS sync (MiniHotel) |
 | Analytics / KPIs | Portfolio Analytics, Report Builder + AI | visibility trends/movers + mocked dept KPIs | `analytics-panel.tsx`, `mock-data.ts` | ⚠️ partial |
-| Date-specific overrides | per-date price / min-stay | none (no per-date calendar) | — | ❌ needs calendar |
+| Date-specific overrides | per-date price / min-stay | Rates Calendar **Date Specific Overrides**: fixed price (final), per-date min/max, range apply/clear + stay totals | `repos/rates.ts`, `visibility/rate-calendar.tsx` | ✅ have |
+| Rounding / smoothing | Rounding & Smoothing (Advanced tab) | rates rounded to nearest ₪5 (`roundRate`) | `config/pricing.ts` | ⚠️ cosmetic gap — no charm endings / stay-level smoothing (Low for MTR) |
 | Human gate / preview | Group-Level Preview Prices | **Action Center** approval queue (±15% gate) | `action-center`, `pricing-specialist.ts` | ✅ have (differentiator) |
 | Notifications / nudges | Notification center, Base Price Nudge | Activity Feed | `activity-feed.tsx` | ⚠️ analog |
-| API | Customer API (read rates / write settings) | n/a — real integrations are a non-goal (spec.md §6) | — | ❌ out of scope |
+| API / integrations | Customer API (read rates / write settings) | MiniHotel two-way (pull rates/actuals, push prices) — first real integration | `integrations/minihotel.ts` | ⚠️ partial (no general API surface) |
 
 ---
 
@@ -92,6 +105,12 @@ For **our** 30–90+ night furnished portfolio, the takeaways invert the STR def
 Curated for **impact × fit with our architecture × effort**, and constrained to things we can
 build *inside the current mock/SQLite milestone* (no real PMS/channel integrations — respects
 spec.md §6). Effort: **S** ≈ <½ day, **M** ≈ 1–2 days, **L** ≈ multi-day.
+
+> **Status check 2026-06-10:** #1–#5 have shipped — floor/ceiling + per-date min/max (#1),
+> weekly/monthly/quarterly discounts + effective monthly rate (#2), first-class min-stay with a
+> 30-night hard floor (#3), p25/50/75 neighborhood percentile bands (#4), and per-date factor
+> decomposition in the rule engine (#5). Still open: #6 (base-price drift nudge), #7 (seasonal
+> profiles with per-season min/base/max), #8 (group-level preview).
 
 | # | Feature | Impact | Fit | Effort | What changes |
 |---|---|---|---|---|---|
@@ -108,6 +127,8 @@ spec.md §6). Effort: **S** ≈ <½ day, **M** ≈ 1–2 days, **L** ≈ multi-d
 discounts, orphan/gap-night pricing, day-of-week / "define your own weekend", high pacing
 sensitivity, real PMS/channel sync + Customer API (spec §6 non-goal), and true per-date
 date-specific overrides (needs a full pricing-calendar model — a separate, larger milestone).
+Likewise charm-price rounding and multi-night smoothing (Advanced-tab cosmetics; we already
+round to ₪5 steps).
 
 ---
 ---
@@ -184,6 +205,9 @@ Hovering a date shows a tooltip explaining the rate: market factors detected (Se
 - **Orphan Day / Gap pricing** — Discounts (or prices) short 1–2 night gaps between bookings; default 20% on gaps of ≤2 nights, and if an orphan is also last-minute, the larger discount applies. *Key settings:* up to 5 ascending gap-length ranges, each Fixed or % discount. *MTR relevance:* Low — 1–2 night orphan gaps are an STR turnover artifact.
 - **Default Discounts and Premiums (account/group level)** — Apply standard discounts/premiums uniformly across all listings under a PMS/channel or a group. *Key settings:* account- vs. group-level scope; offset/premium/discount percentages; group membership. *MTR relevance:* Medium — efficient way to push a consistent monthly-discount or floor policy across similar units.
 - **Pricing Offsets (mapped listings)** — Account-level adjustment nudging all (or mapped) listings' prices up/down by a set amount/percentage. *Key settings:* offset value, scope. *MTR relevance:* Medium — portfolio-wide trims/uplifts for standardizing a building's pricing posture.
+- **Rounding (Advanced tab)** — Rounds final recommended prices to end with a chosen digit (e.g. $99 / $109 / $299) for charm/psychological pricing, applied after all other adjustments. *Key settings:* target price ending; under Customizations → Advanced. *MTR relevance:* Low-Medium — cosmetic polish on the quoted nightly rate. *(We already round to the nearest ₪5 via `roundingStep` in `config/pricing.ts`; charm endings would be a small variant.)*
+- **Smoothing (Advanced tab)** — Averages nightly rates across a stay window so guests see one uniform nightly price instead of date-by-date variation (e.g. $123 Fri + $107 Sat → $115 for both nights). *Key settings:* toggle; under Customizations → Advanced. *MTR relevance:* Low — a 30–90 night quote already collapses to a single effective rate, so per-night display variance barely shows.
+- **Neighborhood Profile Data Source** — Choose which comp-data profile drives a listing's recommendations (the default "Nearby Listings" pool vs. an alternative market/custom profile). *Key settings:* per-listing data-source selector. *MTR relevance:* Medium — steering the comp pool toward furnished/long-stay supply is one of the few levers to de-STR the market signal.
 
 ### Sources (Part 1)
 
@@ -204,6 +228,8 @@ Hovering a date shows a tooltip explaining the rate: market factors detected (Se
 - [How to Get Seasonal Prices Right in PriceLabs?](https://help.pricelabs.co/portal/en/kb/articles/how-to-get-seasonal-prices-right-in-pricelabs)
 - [Setting pricing customizations in PriceLabs](https://help.pricelabs.co/portal/en/kb/articles/pricing-customizations)
 - [List of all PriceLabs Customizations](https://help.pricelabs.co/portal/en/kb/articles/list-of-all-pricelabs-customizations)
+- [Customizations — KB category index](https://help.pricelabs.co/portal/en/kb/pricelabs/dynamic-pricing/customizations)
+- [Rounding and Smoothing](https://help.pricelabs.co/portal/en/kb/articles/rounding-and-smoothing)
 - [Occupancy Based Adjustments](https://help.pricelabs.co/portal/en/kb/articles/occupancy-based-adjustments)
 - [Portfolio Occupancy Based Adjustments](https://help.pricelabs.co/portal/en/kb/articles/portfolio-occupancy-based-adjustments)
 - [Date-Specific Overrides](https://help.pricelabs.co/portal/en/kb/articles/date-specific-overrides)
@@ -232,6 +258,7 @@ where monthly/LOS pricing and minimum-stay floors dominate.
 - **Last-Minute Minimum Stay Adjustments** — Automatically reduces the minimum stay as check-in approaches. *Key settings:* up to 3 last-minute rules, each with a lead-time window and reduced minimum. *MTR relevance:* Low-Medium — mostly an STR conversion tactic; conflicts with strict 30+ night floors (and is overridden by Lowest Minimum Stay Allowed).
 - **Minimum Stay for Far-Out Bookings** — Set a (typically higher) minimum length for bookings far in advance. *Key settings:* minimum nights; "far-out" horizon (days ahead). *MTR relevance:* Medium — require longer commitments for advance bookings, reinforcing longer stays on the far horizon.
 - **Day-of-Week Minimum Stay Restrictions** — Adjusts minimum stays by check-in day of week. *Key settings:* per-weekday minimum values. *MTR relevance:* Low — day-of-week tuning is largely irrelevant to 30–90+ night stays.
+- **Adjacent-Day Minimum Stay (before/after an unavailable night)** — Sets a different minimum stay for dates immediately before or after existing unavailable/booked nights, with separate rules for the before- and after- side. *Key settings:* min-stay value per side. *MTR relevance:* Low — gap-shaping around bookings is mostly an STR tool (and Lowest Min Stay Allowed still floors it), though it can tidy month-boundary gaps.
 - **Minimum Stay on Arrival (MLOS) vs. Minimum Stay Through** — Two restriction types: on Arrival applies only to reservations that *start* on a date; Through applies to any booking that *spans* that date. *MTR relevance:* Medium — matters when blocking short bookings around fixed dates, but more impactful for STR gap management.
 - **Hierarchy of Minimum-Stay Restrictions** — Which rule wins. "Lowest Minimum Stay Allowed" is the ultimate override; an orphan/gap rule outranks a last-minute rule when both apply; for scope, listing-level beats group-level beats account-level; date-specific overrides take precedence over most customizations. *MTR relevance:* High — knowing listing-level beats group/account and that Lowest Min Stay Allowed is the master floor is essential to guarantee MTR minimums are never undercut.
 
