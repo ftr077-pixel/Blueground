@@ -15,7 +15,11 @@ export async function GET(req: Request) {
   const checkIn = searchParams.get("checkIn");
 
   if (profileId && nights && checkIn) {
-    const ladder = latestLadder(profileId, Number(nights), checkIn);
+    const n = Number(nights);
+    if (!Number.isFinite(n)) {
+      return NextResponse.json({ error: "bad 'nights' (number required)" }, { status: 400 });
+    }
+    const ladder = latestLadder(profileId, n, checkIn);
     return NextResponse.json({ ladder });
   }
   return NextResponse.json({ runs: searchResultsStats() });

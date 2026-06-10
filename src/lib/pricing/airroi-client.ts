@@ -36,10 +36,15 @@ function headers(): Record<string, string> {
   };
 }
 
+// The market sync makes up to 5 sequential calls per neighborhood; without a
+// timeout one stalled connection wedges the whole /api/market/sync request for
+// undici's multi-minute default. Same 20s budget as the MiniHotel client.
+const TIMEOUT_MS = 20000;
+
 async function get<T>(path: string, params: Record<string, string>): Promise<T> {
   const url = new URL(path, BASE_URL);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await fetch(url, { headers: headers() });
+  const res = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) throw new Error(`AirROI GET ${path} -> ${res.status} ${await res.text().catch(() => "")}`);
   return (await res.json()) as T;
 }
@@ -49,6 +54,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     method: "POST",
     headers: headers(),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`AirROI POST ${path} -> ${res.status} ${await res.text().catch(() => "")}`);
   return (await res.json()) as T;

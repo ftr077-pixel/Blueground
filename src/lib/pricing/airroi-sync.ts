@@ -7,6 +7,7 @@ import { listUnits } from "@/lib/repos/units";
 import { getSetting } from "@/lib/repos/visibility";
 import {
   upsertMarketSnapshot,
+  getMarketSnapshot,
   type AirRoiMarket,
   type PacingPoint,
   type MinNightsPoint,
@@ -30,6 +31,8 @@ export interface SyncedArea {
   occupancy: number | null;
   pacingPoints: number;
   metricsMonths: number;
+  /** Individual dataset calls that failed this sync (their cached values were kept). */
+  errors?: string[];
 }
 
 export interface MarketSyncResult {
@@ -85,26 +88,34 @@ export async function syncMarketData(): Promise<MarketSyncResult> {
 
       const errs: string[] = [];
       let summary = null;
+      let summaryOk = false;
       let metrics: MetricsPoint[] = [];
+      let metricsOk = false;
       let pacing: PacingPoint[] = [];
+      let pacingOk = false;
       let minNights: MinNightsPoint[] = [];
+      let minNightsOk = false;
       try {
         summary = await getMarketSummary(market, opts);
+        summaryOk = true;
       } catch (e) {
         errs.push(`summary: ${msg(e)}`);
       }
       try {
         metrics = await getMarketAllMetrics(market, opts);
+        metricsOk = true;
       } catch (e) {
         errs.push(`metrics: ${msg(e)}`);
       }
       try {
         pacing = await getMarketFuturePacing(market, opts);
+        pacingOk = true;
       } catch (e) {
         errs.push(`pacing: ${msg(e)}`);
       }
       try {
         minNights = await getMarketMinNights(market, opts);
+        minNightsOk = true;
       } catch (e) {
         errs.push(`min-nights: ${msg(e)}`);
       }
@@ -115,6 +126,18 @@ export async function syncMarketData(): Promise<MarketSyncResult> {
           error: `"${market.full_name ?? query}" returned no data${errs.length ? ` — ${errs.join("; ")}` : ""}`,
         });
         continue;
+      }
+
+      // On a partial failure, keep the previously-cached value for the dataset
+      // whose call failed — the upsert replaces every column, so writing the
+      // empty default would erase good data (pay-per-call: not refetchable for
+      // free). A call that *succeeded* with an empty result still overwrites.
+      const prev = errs.length ? getMarketSnapshot(neighborhood) : null;
+      if (prev) {
+        if (!summaryOk) summary = prev.summary;
+        if (!metricsOk) metrics = prev.metrics;
+        if (!pacingOk) pacing = prev.pacing;
+        if (!minNightsOk) minNights = prev.minNights;
       }
 
       upsertMarketSnapshot({
@@ -133,6 +156,7 @@ export async function syncMarketData(): Promise<MarketSyncResult> {
         occupancy: summary?.occupancy ?? null,
         pacingPoints: pacing.length,
         metricsMonths: metrics.length,
+        ...(errs.length ? { errors: errs } : {}),
       });
     } catch (e) {
       failed.push({ neighborhood, error: msg(e) });

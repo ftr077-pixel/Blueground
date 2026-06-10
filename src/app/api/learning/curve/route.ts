@@ -12,6 +12,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "profileId required" }, { status: 400 });
   }
   const nights = Number(searchParams.get("nights") ?? "30");
+  if (!Number.isFinite(nights)) {
+    return NextResponse.json({ error: "bad 'nights' (number required)" }, { status: 400 });
+  }
   const leadBucket = searchParams.get("leadBucket") ?? "15-30";
   return NextResponse.json(segmentCurve(profileId, nights, leadBucket));
 }
