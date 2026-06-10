@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
-import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
+import { insertSearchResults, pruneLadder, type SearchResultsInput } from "@/lib/repos/search-results";
 import type { CostDefaults } from "@/lib/revenue";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
@@ -627,6 +627,13 @@ export function recordRun(input: RecordRunInput): number {
     }
   });
   tx();
+  // Housekeeping: downsample+delete raw ladder rows past retention (daily guard;
+  // never let it break an ingest).
+  try {
+    pruneLadder();
+  } catch {
+    // ignore — retention is best-effort
+  }
   return input.snapshots.length;
 }
 

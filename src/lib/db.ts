@@ -247,6 +247,22 @@ function init(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_bookings_unit ON bookings(unit_id);
     CREATE INDEX IF NOT EXISTS idx_bookings_arrival ON bookings(arrival);
 
+    -- Downsampled history for pruned ladder rows (design §4.3): per search × rank
+    -- decile, the nightly-price percentiles. Keeps long-horizon trend analysis
+    -- possible after raw rows beyond the retention window are deleted.
+    CREATE TABLE IF NOT EXISTS search_ladder_summary (
+      profile_id TEXT NOT NULL,
+      nights     INTEGER NOT NULL,
+      check_in   TEXT NOT NULL,
+      run_id     TEXT NOT NULL,
+      ts         TEXT NOT NULL,
+      decile     INTEGER NOT NULL,
+      n          INTEGER NOT NULL,
+      p10 REAL, p25 REAL, p50 REAL, p75 REAL, p90 REAL,
+      currency   TEXT,
+      PRIMARY KEY (run_id, check_in, nights, decile)
+    );
+
     -- The market's booking pace (lead-time distribution) per area × stay length,
     -- supplied by the operator. The benchmark we compare our own pace against
     -- ("are we behind/ahead of how the market books?"). lead_cdf is JSON:
