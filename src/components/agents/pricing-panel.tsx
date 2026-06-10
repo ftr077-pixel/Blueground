@@ -188,8 +188,16 @@ export function PricingPanel() {
       <CardContent className="space-y-5">
         {rules.length > 0 && (
           <div>
-            <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-              Pricing rule engine · {rules.filter((r) => r.enabled).length}/{rules.length} active
+            <div className="mb-2 flex items-baseline justify-between gap-2">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Pricing rule engine · {rules.filter((r) => r.enabled).length}/{rules.length} active
+              </span>
+              <a
+                href="/settings#engine-rules"
+                className="text-[10px] text-primary hover:underline"
+              >
+                Configure →
+              </a>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {rules.map((r) => (

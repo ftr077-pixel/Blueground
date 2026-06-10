@@ -3,6 +3,7 @@ import { ManagePanel } from "@/components/visibility/manage-panel";
 import { UpdateCard } from "@/components/admin/update-card";
 import { CostDefaultsCard } from "@/components/admin/cost-defaults-card";
 import { PricingRulesCard } from "@/components/admin/pricing-rules-card";
+import { EngineRulesCard } from "@/components/admin/engine-rules-card";
 import { MiniHotelCard } from "@/components/admin/minihotel-card";
 import { MiniHotelMappingCard } from "@/components/admin/minihotel-mapping-card";
 import { RateCodeFinderCard } from "@/components/admin/ratecode-finder-card";
@@ -27,6 +28,7 @@ export default function SettingsPage() {
       <ManagePanel />
       <CostDefaultsCard />
       <PricingRulesCard />
+      <EngineRulesCard />
       <MiniHotelCard />
       <RateCodeFinderCard />
       <MiniHotelMappingCard />
