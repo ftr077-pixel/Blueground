@@ -206,7 +206,7 @@ export function IntelligencePanel() {
 
       {data && <Recommendation data={data} confBadge={confBadge} />}
       {data && <CurveCard data={data} />}
-      {listingId && <OutcomesCard listingId={listingId} />}
+      {listingId && <OutcomesCard listingId={listingId} nights={nights} />}
       <StrategyCard />
     </div>
   );
@@ -230,14 +230,14 @@ interface Outcomes {
   paceDeltaDays: number | null;
 }
 
-function OutcomesCard({ listingId }: { listingId: string }) {
+function OutcomesCard({ listingId, nights }: { listingId: string; nights: number }) {
   const [o, setO] = useState<Outcomes | null>(null);
   useEffect(() => {
-    fetch(`/api/learning/outcomes?listingId=${listingId}`, { cache: "no-store" })
+    fetch(`/api/learning/outcomes?listingId=${listingId}&nights=${nights}`, { cache: "no-store" })
       .then((r) => r.json())
       .then(setO)
       .catch(() => setO(null));
-  }, [listingId]);
+  }, [listingId, nights]);
 
   if (!o) return null;
   const hasData = (o.realizedNightly?.n ?? 0) > 0 || o.pace.n > 0;
