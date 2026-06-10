@@ -219,7 +219,7 @@ export function RateCalendar() {
     if (!sel || !data) return null;
     const row = data.rows.find((r) => r.unit.id === sel.unitId);
     const cell = row?.cells.find((c) => c.date === sel.date);
-    return row && cell ? { unit: row.unit, cell } : null;
+    return row && cell ? { unit: row.unit, cell, cells: row.cells } : null;
   }, [sel, data]);
 
   // Apply a Date Specific Override (range shape). Throws on failure so the
@@ -552,6 +552,9 @@ export function RateCalendar() {
           unitId={selCell.unit.id}
           unitName={apartmentLabel(selCell.unit)}
           cell={selCell.cell}
+          cells={selCell.cells}
+          windowFrom={data.from}
+          windowDays={data.days}
           defaultMinNights={data.defaultMinNights}
           busy={busy}
           onClose={() => setSel(null)}
@@ -941,6 +944,9 @@ function OverridePanel({
   unitId,
   unitName,
   cell,
+  cells,
+  windowFrom,
+  windowDays,
   defaultMinNights,
   busy,
   onApply,
@@ -949,6 +955,10 @@ function OverridePanel({
   unitId: string;
   unitName: string;
   cell: RateCell;
+  /** The unit's cells for the currently loaded window (for range totals). */
+  cells: RateCell[];
+  windowFrom: string;
+  windowDays: number;
   defaultMinNights: number;
   busy: boolean;
   onApply: (body: Record<string, unknown>) => Promise<number>;
@@ -979,15 +989,85 @@ function OverridePanel({
     return n;
   }, [start, end, dowOn, dow]);
 
+  // Nightly prices for the selected range. Inside the loaded window we use the
+  // cells we already have; a range reaching beyond it is fetched (debounced,
+  // capped at the API's 120-day window) so the totals stay correct.
+  const [rangeCells, setRangeCells] = useState<{ date: string; price: number | null }[] | null>(
+    cells.length ? cells : null,
+  );
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  useEffect(() => {
+    const a = Date.parse(start + "T00:00:00Z");
+    const b = Date.parse(end + "T00:00:00Z");
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) {
+      setRangeCells(null);
+      return;
+    }
+    const winA = Date.parse(windowFrom + "T00:00:00Z");
+    const winB = winA + (windowDays - 1) * 86400000;
+    if (a >= winA && b <= winB) {
+      setRangeCells(cells);
+      return;
+    }
+    setQuoteLoading(true);
+    const span = Math.min(120, Math.round((b - a) / 86400000) + 1);
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/rates?from=${start}&days=${span}`, { cache: "no-store" });
+        const j = (await r.json()) as { rows?: { unit: { id: string }; cells: RateCell[] }[] };
+        const row = j.rows?.find((x) => x.unit.id === unitId);
+        setRangeCells(row ? row.cells : null);
+      } catch {
+        setRangeCells(null);
+      } finally {
+        setQuoteLoading(false);
+      }
+    }, 350);
+    return () => {
+      clearTimeout(t);
+      setQuoteLoading(false);
+    };
+  }, [start, end, windowFrom, windowDays, cells, unitId]);
+
   const pct = priceMode === "pct" ? parseFloat(priceVal) : NaN;
-  const previewPrice =
-    priceVal.trim() === ""
-      ? null
-      : priceMode === "fixed"
-        ? Math.max(0, Math.round(parseFloat(priceVal) || 0))
-        : cell.price != null && Number.isFinite(pct)
-          ? Math.max(0, Math.round(cell.price * (1 + pct / 100)))
-          : null;
+  const fixedPrice =
+    priceMode === "fixed" && priceVal.trim() !== "" ? Math.max(0, Math.round(parseFloat(priceVal) || 0)) : null;
+
+  // Stay quote over the selected nights: current sum/avg and — once a fixed or
+  // percent price is entered — the new sum/avg. "The final output price."
+  const quote = useMemo(() => {
+    if (nights === 0 || !rangeCells) return null;
+    const inRange = rangeCells.filter(
+      (c) => c.date >= start && c.date <= end && (!dowOn || dow[new Date(c.date + "T00:00:00Z").getUTCDay()]),
+    );
+    const priced = inRange.filter((c) => c.price != null) as { date: string; price: number }[];
+    const covered = inRange.length; // nights we have data for (may be < nights if capped)
+    const curTotal = priced.reduce((s, c) => s + c.price, 0);
+    let newTotal: number | null = null;
+    if (fixedPrice != null) {
+      newTotal = fixedPrice * covered; // a fixed price applies to every selected night
+    } else if (priceMode === "pct" && priceVal.trim() !== "" && Number.isFinite(pct)) {
+      newTotal = priced.reduce((s, c) => s + Math.max(0, Math.round(c.price * (1 + pct / 100))), 0);
+    }
+    return {
+      covered,
+      pricedCount: priced.length,
+      curTotal,
+      curAvg: priced.length ? curTotal / priced.length : null,
+      newTotal,
+      newAvg:
+        newTotal == null
+          ? null
+          : fixedPrice != null
+            ? covered
+              ? newTotal / covered
+              : null
+            : priced.length
+              ? newTotal / priced.length
+              : null,
+      capped: covered < nights,
+    };
+  }, [nights, rangeCells, start, end, dowOn, dow, fixedPrice, priceMode, priceVal, pct]);
 
   function buildBody(clear: boolean): Record<string, unknown> | string {
     if (nights === 0) return "Pick a valid date range.";
@@ -1234,16 +1314,36 @@ function OverridePanel({
             <div className="text-[11px] text-muted-foreground">
               <div>
                 {nights} night{nights === 1 ? "" : "s"} selected
-              </div>
-              <div>
-                Current: {cell.price != null ? fmtILS(cell.price) : "—"}
-                {previewPrice != null && (
-                  <>
-                    <span className="mx-1">→</span>
-                    <span className="font-medium text-foreground">{fmtILS(previewPrice)}</span>
-                  </>
+                {quote && quote.pricedCount < quote.covered && (
+                  <span> · {quote.covered - quote.pricedCount} without data</span>
                 )}
+                {quote?.capped && <span> · totals cover first {quote.covered}</span>}
               </div>
+              {quoteLoading ? (
+                <div>Calculating totals…</div>
+              ) : quote && (quote.pricedCount > 0 || quote.newTotal != null) ? (
+                <>
+                  <div>
+                    Current:{" "}
+                    {quote.pricedCount > 0 ? (
+                      <>
+                        {fmtILS(quote.curAvg ?? 0)}/night ·{" "}
+                        <span className="font-medium text-foreground">{fmtILS(quote.curTotal)} total</span>
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </div>
+                  {quote.newTotal != null && (
+                    <div>
+                      New: {quote.newAvg != null ? `${fmtILS(quote.newAvg)}/night · ` : ""}
+                      <span className="font-semibold text-foreground">{fmtILS(quote.newTotal)} total</span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div>Current: — (no priced nights in range)</div>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <button
