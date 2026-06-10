@@ -291,8 +291,10 @@ export function unitRateAnchors(windowDays = 90): Map<string, RateAnchor> {
   for (const row of cal.rows) {
     // Prefer real rates (MiniHotel actuals / manual edits) over synthetic baseline
     // cells, so a partial MiniHotel calendar isn't diluted by the ~600 default.
-    const real = row.cells.filter((c) => c.source !== "derived" && c.price > 0).map((c) => c.price);
-    const prices = real.length ? real : row.cells.map((c) => c.price).filter((p) => p > 0);
+    // price is nullable (null = not synced yet) — narrow before comparing.
+    const priced = row.cells.filter((c): c is RateCell & { price: number } => c.price != null && c.price > 0);
+    const real = priced.filter((c) => c.source !== "derived").map((c) => c.price);
+    const prices = real.length ? real : priced.map((c) => c.price);
     if (prices.length === 0) continue;
     const med = Math.round(median(prices) / 5) * 5;
     if (med > 0) out.set(row.unit.id, { base: med, current: med, nights: prices.length });
