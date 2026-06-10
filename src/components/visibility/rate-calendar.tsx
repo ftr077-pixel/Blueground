@@ -272,6 +272,7 @@ export function RateCalendar() {
         repriced?: number;
         pushed?: number;
         units?: number;
+        unmappedUnits?: number;
         days?: number;
         errors?: string[];
         message?: string;
@@ -279,7 +280,9 @@ export function RateCalendar() {
       if (d.ok) {
         setSyncMsg({
           ok: true,
-          text: `Pushed ${d.pushed ?? 0} night(s) across ${d.units ?? 0} apartment(s) to MiniHotel (${d.days ?? days}-day horizon).`,
+          text: `Pushed ${d.pushed ?? 0} night(s) across ${d.units ?? 0} apartment(s) to MiniHotel (${d.days ?? days}-day horizon).${
+            d.unmappedUnits ? ` ${d.unmappedUnits} apartment(s) skipped — not mapped to a room type (Settings).` : ""
+          }`,
         });
       } else {
         const reason =
@@ -347,7 +350,11 @@ export function RateCalendar() {
     setDiagnosing(true);
     setDiag(null);
     try {
-      const r = await fetch("/api/rates/diagnose", { method: "POST" });
+      const r = await fetch("/api/rates/diagnose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ testPush: true }),
+      });
       setDiag((await r.json()) as DiagResult);
     } catch (e) {
       setDiag({ ok: false, message: e instanceof Error ? e.message : "diagnose failed" });
@@ -531,6 +538,31 @@ export function RateCalendar() {
                   availability-search room ids:{" "}
                   <span className="font-mono text-foreground">{diag.guests.sample.join(", ")}</span>
                 </p>
+              )}
+            </div>
+          )}
+          {diag.pushTest && (
+            <div className="mt-1 border-t border-border/60 pt-1.5">
+              <p
+                className={
+                  diag.pushTest.applied
+                    ? "text-[hsl(var(--success))]"
+                    : "text-[hsl(var(--warning))]"
+                }
+              >
+                Push test: {diag.pushTest.message}
+              </p>
+              {diag.pushTest.attempted && (
+                <p className="text-muted-foreground">
+                  {diag.pushTest.roomType} · {diag.pushTest.date} · ₪{diag.pushTest.before} → pushed ₪
+                  {diag.pushTest.pushedValue} → feed read{" "}
+                  {diag.pushTest.readBack != null ? `₪${diag.pushTest.readBack}` : "—"}
+                  {diag.pushTest.reverted ? " · reverted" : " · REVERT FAILED — check this night"}
+                  {diag.pushTest.requestId ? ` · req ${diag.pushTest.requestId}` : ""}
+                </p>
+              )}
+              {diag.pushTest.pushErrors && diag.pushTest.pushErrors.length > 0 && (
+                <p className="text-[hsl(var(--danger))]">{diag.pushTest.pushErrors.join(" | ")}</p>
               )}
             </div>
           )}
@@ -830,6 +862,19 @@ interface DiagResult {
   unmatchedRoomTypes?: string[];
   errors?: string[];
   guests?: { roomTypes: number; priced: number; sample: string[]; errors: string[] };
+  pushTest?: {
+    attempted: boolean;
+    message: string;
+    roomType?: string;
+    date?: string;
+    before?: number;
+    pushedValue?: number;
+    requestId?: string;
+    pushErrors?: string[];
+    readBack?: number | null;
+    applied?: boolean;
+    reverted?: boolean;
+  };
   rawHead?: string;
 }
 

@@ -44,6 +44,7 @@ export async function POST(req: Request) {
   let repriced = 0;
   let pushed = 0;
   let unitsPushed = 0;
+  let unmappedUnits = 0;
   const warnings: string[] = [];
   const errors: string[] = [];
 
@@ -59,10 +60,11 @@ export async function POST(req: Request) {
     if (items.length === 0) continue;
     const res = await pushRatesToMiniHotel(items);
     pushed += res.pushed;
+    unmappedUnits += res.unmappedUnits;
     warnings.push(...res.warnings);
     errors.push(...res.errors);
-    if (!res.ok && res.message) {
-      // Configuration-level failure (e.g. nothing mapped) — surface and stop.
+    if (!res.ok && res.message && res.roomTypes === 0 && res.unmappedUnits === 0) {
+      // Configuration-level failure — surface and stop.
       errors.push(res.message);
       break;
     }
@@ -71,14 +73,16 @@ export async function POST(req: Request) {
   const ok = errors.length === 0 && pushed > 0;
   const message =
     pushed === 0 && errors.length === 0
-      ? "Nothing to push — no apartments with a Base price and open future nights."
+      ? unmappedUnits > 0
+        ? `Nothing pushed — ${unmappedUnits} apartment(s) aren't mapped to MiniHotel room types (Settings → apartment mapping).`
+        : "Nothing to push — no apartments with a Base price and open future nights."
       : undefined;
   logActivity({
     department: "revenue",
     worker: "Pricing Specialist",
     message: `Rates Calendar · push to MiniHotel: ${pushed}/${repriced} night(s) across ${unitsPushed} apartment(s), ${days}-day horizon${
-      errors.length ? ` — ${errors.length} error(s): ${errors.slice(0, 2).join(" | ")}` : ""
-    }.`,
+      unmappedUnits ? ` — ${unmappedUnits} apartment(s) unmapped` : ""
+    }${errors.length ? ` — ${errors.length} error(s): ${errors.slice(0, 2).join(" | ")}` : ""}.`,
     level: ok ? "success" : "warning",
   });
 
@@ -87,6 +91,7 @@ export async function POST(req: Request) {
     repriced,
     pushed,
     units: unitsPushed,
+    unmappedUnits,
     days,
     warnings: warnings.slice(0, 5),
     errors: errors.slice(0, 5),
