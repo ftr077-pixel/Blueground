@@ -23,6 +23,29 @@ export const LEARNING = {
   staleAfterDays: 10,
 } as const;
 
+/** Raw-ladder retention (design §4.3): keep full-resolution search_results for
+ *  rawDays, then downsample older runs to per-decile percentile summaries. */
+export const LADDER_RETENTION = {
+  rawDays: 120,
+  /** Prune runs at most this often (guarded via meta, called from recordRun). */
+  pruneEveryHours: 24,
+} as const;
+
+/** Demand-index knobs. External market readings (e.g. a PriceLabs-style market
+ *  occupancy) are treated as RELATIVE: ghost/zombie listings depress the absolute
+ *  level, so a reading only means something against its own history — its
+ *  percentile within the rolling window below, not its face value. */
+export const DEMAND = {
+  /** Rolling window the percentile is computed against (days of readings). */
+  historyDays: 365,
+  /** Need at least this many readings before the index is trusted at all. */
+  minReadings: 8,
+  /** Index ≥ this ⇒ "hot"; ≤ −this ⇒ "cold" (linear −1..+1 from percentile). */
+  hotThreshold: 0.5,
+  /** ± days around a stay date when measuring our own realized occupancy. */
+  ourOccSpanDays: 3,
+} as const;
+
 export interface LeadBucket {
   key: string;
   min: number;

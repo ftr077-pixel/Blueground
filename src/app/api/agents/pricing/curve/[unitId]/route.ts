@@ -6,8 +6,10 @@ import { effectiveRules } from "@/lib/pricing/rules-config";
 
 export const dynamic = "force-dynamic";
 
-// Forward price + min-stay curve for one unit, computed live by the rule engine
-// (live market providers when synced, operator rule overrides applied).
+// Forward price + min-stay curve for one unit, computed live by the rule engine.
+// Uses the same providers as the pricing pass (live AirROI when synced, mock
+// otherwise) so the curve agrees with the rates the pass actually applies, with
+// operator rule overrides (Settings → Pricing engine rules) applied.
 export async function GET(_req: Request, { params }: { params: { unitId: string } }) {
   const unit = listUnits().find((u) => u.id === params.unitId);
   if (!unit) return NextResponse.json({ error: "unit not found" }, { status: 404 });

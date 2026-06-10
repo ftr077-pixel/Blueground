@@ -27,6 +27,19 @@ export interface RateCell {
   booked: boolean;
   weekend: boolean;
   source: "derived" | "manual" | "minihotel";
+  /** Per-date price floor/ceiling overrides (clamp the derived price). */
+  minPrice: number | null;
+  maxPrice: number | null;
+  note: string | null;
+}
+
+export interface RankInfo {
+  rank: number | null;
+  total: number | null;
+  page: number | null;
+  ts: string;
+  nights: number;
+  found: boolean;
 }
 
 export interface RateRow {
@@ -35,6 +48,12 @@ export interface RateRow {
     "id" | "name" | "neighborhood" | "bedrooms" | "platform" | "currentRate" | "baseRate"
   >;
   cells: RateCell[];
+  /** Occupancy over the next 30/60/90 nights from today (sold ÷ sellable), null when unknown. */
+  occ30: number | null;
+  occ60: number | null;
+  occ90: number | null;
+  /** Latest Airbnb search position for the ~1-month stay, via the linked tracked listing. */
+  airbnbRank: RankInfo | null;
 }
 
 export interface CalendarSummary {
@@ -64,6 +83,9 @@ export interface OverridePatch {
   minNights?: number | null;
   closed?: boolean | null;
   booked?: boolean | null;
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  note?: string | null;
 }
 
 interface OverrideSql {
@@ -76,6 +98,9 @@ interface OverrideSql {
   booked: number | null;
   source: string;
   updated_at: string | null;
+  min_price: number | null;
+  max_price: number | null;
+  note: string | null;
 }
 
 // ---------------------------------------------------------------- deterministic
@@ -149,6 +174,11 @@ export function unitExists(id: string): boolean {
   return listUnits().some((u) => u.id === id);
 }
 
+// Hotel-local (Asia/Jerusalem) today; the occupancy horizons always count from
+// today regardless of the window the operator is viewing (PriceLabs semantics).
+const hotelToday = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
+
 export function getCalendar(from: string, days: number): Calendar {
   const units = listUnits();
   const dates: string[] = [];
@@ -162,6 +192,41 @@ export function getCalendar(from: string, days: number): Calendar {
     .all(from, dates[dates.length - 1] ?? from) as OverrideSql[];
   const ov = new Map<string, OverrideSql>();
   for (const r of ovRows) ov.set(r.unit_id + "|" + r.date, r);
+
+  // Overrides for the occupancy horizons (next 90 nights from today) — a
+  // separate span from the viewed window.
+  const occFrom = hotelToday();
+  const occFromIdx = dayIndex(occFrom);
+  const occDates: string[] = [];
+  for (let i = 0; i < 90; i++) occDates.push(isoAddDays(occFrom, i));
+  const ovOccRows = db
+    .prepare("SELECT * FROM rate_calendar WHERE date >= ? AND date <= ?")
+    .all(occFrom, occDates[89]) as OverrideSql[];
+  const ovOcc = new Map<string, OverrideSql>();
+  for (const r of ovOccRows) ovOcc.set(r.unit_id + "|" + r.date, r);
+
+  // Latest ~1-month-stay Airbnb search position per linked unit (the search
+  // the visibility tab tracks; tracked_listings.unit_id is the link).
+  interface RankSql {
+    unit_id: string;
+    rank: number | null;
+    total: number | null;
+    page: number | null;
+    ts: string;
+    nights: number;
+    found: number;
+  }
+  const rankRows = db
+    .prepare(
+      `SELECT tl.unit_id, ls.rank, ls.total, ls.page, ls.ts, ls.nights, ls.found
+       FROM tracked_listings tl
+       JOIN listing_snapshots ls ON ls.listing_id = tl.id
+       WHERE tl.unit_id IS NOT NULL AND tl.active = 1 AND ls.nights BETWEEN 28 AND 31
+       ORDER BY ls.ts`,
+    )
+    .all() as RankSql[];
+  const rankByUnit = new Map<string, RankSql>();
+  for (const r of rankRows) rankByUnit.set(r.unit_id, r); // latest ts wins
 
   const rows: RateRow[] = units.map((unit) => {
     // Only fabricate a baseline for units that actually have a rate (legacy/demo
@@ -183,6 +248,11 @@ export function getCalendar(from: string, days: number): Calendar {
       const o = ov.get(unit.id + "|" + date);
       if (o) {
         if (o.price != null) price = o.price;
+        // A fixed override price is final; min/max clamp only the derived price.
+        else if (price != null) {
+          if (o.min_price != null && price < o.min_price) price = o.min_price;
+          if (o.max_price != null && price > o.max_price) price = o.max_price;
+        }
         if (o.min_nights != null) minNights = o.min_nights;
         if (o.closed != null) isClosed = o.closed === 1;
         if (o.booked != null) isBooked = o.booked === 1;
@@ -200,8 +270,39 @@ export function getCalendar(from: string, days: number): Calendar {
         booked: isBooked,
         weekend: weekdayUTC(date) === 5 || weekdayUTC(date) === 6,
         source,
+        minPrice: o?.min_price ?? null,
+        maxPrice: o?.max_price ?? null,
+        note: o?.note ?? null,
       };
     });
+    // Occupancy over the next 30/60/90 nights from today: sold ÷ sellable,
+    // closed nights excluded; null when availability is unknown (unsynced).
+    const sold = [0, 0, 0];
+    const open = [0, 0, 0];
+    const occToIdx = occFromIdx + 89;
+    const bookedOcc = hasBaseline ? bookedSet(unit, occToIdx) : new Set<number>();
+    const closedOcc = hasBaseline ? closedSet(unit, occFromIdx, occToIdx) : new Set<number>();
+    for (let i = 0; i < 90; i++) {
+      const idx = occFromIdx + i;
+      let isClosed = closedOcc.has(idx);
+      let isBooked = bookedOcc.has(idx);
+      let available: number | null = hasBaseline ? (isBooked || isClosed ? 0 : 1) : null;
+      const o = ovOcc.get(unit.id + "|" + occDates[i]);
+      if (o) {
+        if (o.closed != null) isClosed = o.closed === 1;
+        if (o.booked != null) isBooked = o.booked === 1;
+        if (o.available != null) available = o.available;
+        else if (o.closed != null || o.booked != null) available = isBooked || isClosed ? 0 : 1;
+      }
+      if (isClosed) continue;
+      const buckets = i < 30 ? [0, 1, 2] : i < 60 ? [1, 2] : [2];
+      if (isBooked) for (const b of buckets) sold[b]++;
+      else if (available === 1) for (const b of buckets) open[b]++;
+    }
+    const occOf = (b: number) => (sold[b] + open[b] > 0 ? sold[b] / (sold[b] + open[b]) : null);
+
+    const rk = rankByUnit.get(unit.id);
+
     return {
       unit: {
         id: unit.id,
@@ -213,6 +314,19 @@ export function getCalendar(from: string, days: number): Calendar {
         baseRate: unit.baseRate,
       },
       cells,
+      occ30: occOf(0),
+      occ60: occOf(1),
+      occ90: occOf(2),
+      airbnbRank: rk
+        ? {
+            rank: rk.rank,
+            total: rk.total,
+            page: rk.page,
+            ts: rk.ts,
+            nights: rk.nights,
+            found: rk.found === 1,
+          }
+        : null,
     };
   });
 
@@ -325,15 +439,175 @@ export function upsertOverride(
     min_nights: patch.minNights !== undefined ? patch.minNights : (existing?.min_nights ?? null),
     closed: boolCol(patch.closed, existing?.closed ?? null),
     booked: boolCol(patch.booked, existing?.booked ?? null),
+    min_price: patch.minPrice !== undefined ? patch.minPrice : (existing?.min_price ?? null),
+    max_price: patch.maxPrice !== undefined ? patch.maxPrice : (existing?.max_price ?? null),
+    note: patch.note !== undefined ? patch.note : (existing?.note ?? null),
     source,
     updated_at: new Date().toISOString(),
   };
 
   db.prepare(
-    `INSERT INTO rate_calendar (unit_id, date, price, available, min_nights, closed, booked, source, updated_at)
-     VALUES (@unit_id, @date, @price, @available, @min_nights, @closed, @booked, @source, @updated_at)
+    `INSERT INTO rate_calendar (unit_id, date, price, available, min_nights, closed, booked, min_price, max_price, note, source, updated_at)
+     VALUES (@unit_id, @date, @price, @available, @min_nights, @closed, @booked, @min_price, @max_price, @note, @source, @updated_at)
      ON CONFLICT(unit_id, date) DO UPDATE SET
        price = @price, available = @available, min_nights = @min_nights,
-       closed = @closed, booked = @booked, source = @source, updated_at = @updated_at`,
+       closed = @closed, booked = @booked, min_price = @min_price, max_price = @max_price,
+       note = @note, source = @source, updated_at = @updated_at`,
   ).run(merged);
+}
+
+// ------------------------------------------------------------- base-rate rebase
+//
+// When the operator changes a unit's Base, the whole forward calendar must
+// follow (PriceLabs semantics) — including nights currently showing a price
+// synced from MiniHotel, which would otherwise outrank the rebuilt baseline.
+// Manual pins (fixed prices set in Date Specific Overrides), sold nights, and
+// closed nights are left alone. Returns the repriced nights so the caller can
+// push them to MiniHotel.
+
+export function rebaseFuturePrices(
+  unitId: string,
+  horizonDays = 90,
+): { date: string; price: number }[] {
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit) throw new Error("unknown unit");
+  // No anchor -> nothing to derive from. Without this, basePrice() would fall
+  // back to its ₪600 default and a bulk push would flatten real PMS prices.
+  if (!((unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0)) return [];
+
+  const from = hotelToday();
+  const fromIdx = dayIndex(from);
+  const toIdx = fromIdx + horizonDays - 1;
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ?")
+    .all(unitId, from, isoAddDays(from, horizonDays - 1)) as OverrideSql[];
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+  const bookedS = bookedSet(unit, toIdx);
+  const closedS = closedSet(unit, fromIdx, toIdx);
+
+  const out: { date: string; price: number }[] = [];
+  const clearPrice = db.prepare(
+    "UPDATE rate_calendar SET price = NULL, updated_at = ? WHERE unit_id = ? AND date = ?",
+  );
+  const tx = db.transaction(() => {
+    for (let i = 0; i < horizonDays; i++) {
+      const date = isoAddDays(from, i);
+      const idx = fromIdx + i;
+      const o = byDate.get(date);
+      // A manual fixed price is the operator's pin — never rebased.
+      if (o && o.price != null && o.source === "manual") continue;
+      let isBooked = bookedS.has(idx);
+      let isClosed = closedS.has(idx);
+      if (o) {
+        if (o.booked != null) isBooked = o.booked === 1;
+        if (o.closed != null) isClosed = o.closed === 1;
+      }
+      if (isBooked || isClosed) continue;
+
+      let price = basePrice(unit, date, idx); // unit already carries the new base
+      if (o) {
+        if (o.min_price != null && price < o.min_price) price = o.min_price;
+        if (o.max_price != null && price > o.max_price) price = o.max_price;
+        // Synced price is superseded by the new anchor; the derived price shows.
+        if (o.price != null) clearPrice.run(new Date().toISOString(), unitId, date);
+      }
+      out.push({ date, price });
+    }
+    // Rows left with no payload at all are noise (stale source dots) — drop them.
+    db.prepare(
+      `DELETE FROM rate_calendar WHERE unit_id = ? AND price IS NULL AND available IS NULL
+       AND min_nights IS NULL AND closed IS NULL AND booked IS NULL
+       AND min_price IS NULL AND max_price IS NULL AND note IS NULL`,
+    ).run(unitId);
+  });
+  tx();
+  return out;
+}
+
+// ------------------------------------------------------- date-range overrides
+//
+// The Date Specific Overrides panel (PriceLabs-style): one request applies a
+// patch to every night in [from..to], optionally restricted to days of the
+// week. Price can be fixed (final) or a percent adjustment of each night's
+// derived baseline. `clear` removes the overrides instead.
+
+export interface RangeOverride {
+  unitId: string;
+  from: string;
+  to: string;
+  /** 0=Sun .. 6=Sat; omitted/empty = every day. */
+  daysOfWeek?: number[];
+  /** Fixed final nightly price (null clears the price field). */
+  price?: number | null;
+  /** Percent adjustment vs each night's derived price, e.g. -10 or 15. */
+  pricePct?: number;
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  minNights?: number | null;
+  closed?: boolean | null;
+  note?: string | null;
+  /** Remove overrides for the matching nights instead of writing. */
+  clear?: boolean;
+}
+
+export const MAX_RANGE_NIGHTS = 370;
+
+/** A night actually written by applyOverrideRange — enough to push to MiniHotel. */
+export interface AppliedCell {
+  date: string;
+  price?: number | null;
+  minNights?: number | null;
+  closed?: boolean | null;
+}
+
+export function applyOverrideRange(o: RangeOverride): { nights: number; written: AppliedCell[] } {
+  const unit = listUnits().find((u) => u.id === o.unitId);
+  if (!unit) throw new Error("unknown unit");
+
+  const fromIdx = dayIndex(o.from);
+  const toIdx = dayIndex(o.to);
+  if (toIdx < fromIdx) throw new Error("'to' is before 'from'");
+  if (toIdx - fromIdx + 1 > MAX_RANGE_NIGHTS) throw new Error(`range too long (max ${MAX_RANGE_NIGHTS} nights)`);
+
+  const dow = o.daysOfWeek && o.daysOfWeek.length ? new Set(o.daysOfWeek) : null;
+  const dates: string[] = [];
+  for (let i = 0; i <= toIdx - fromIdx; i++) {
+    const date = isoAddDays(o.from, i);
+    if (!dow || dow.has(weekdayUTC(date))) dates.push(date);
+  }
+
+  const db = getDb();
+  let nights = 0;
+  const written: AppliedCell[] = [];
+  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  const del = db.prepare("DELETE FROM rate_calendar WHERE unit_id = ? AND date = ?");
+
+  const tx = db.transaction(() => {
+    for (const date of dates) {
+      if (o.clear) {
+        nights += del.run(o.unitId, date).changes;
+        continue;
+      }
+      const patch: OverridePatch = {};
+      if (o.price !== undefined) patch.price = o.price;
+      else if (o.pricePct !== undefined) {
+        // Percent of the night's derived baseline; units with no baseline yet
+        // (unsynced imports) have nothing to take a percent of — skip those.
+        if (!hasBaseline) continue;
+        patch.price = Math.max(0, Math.round(basePrice(unit, date, dayIndex(date)) * (1 + o.pricePct / 100)));
+      }
+      if (o.minPrice !== undefined) patch.minPrice = o.minPrice;
+      if (o.maxPrice !== undefined) patch.maxPrice = o.maxPrice;
+      if (o.minNights !== undefined) patch.minNights = o.minNights;
+      if (o.closed !== undefined) patch.closed = o.closed;
+      if (o.note !== undefined) patch.note = o.note;
+      if (Object.keys(patch).length === 0) continue;
+      upsertOverride(o.unitId, date, patch, "manual");
+      written.push({ date, price: patch.price, minNights: patch.minNights, closed: patch.closed });
+      nights++;
+    }
+  });
+  tx();
+  return { nights, written };
 }

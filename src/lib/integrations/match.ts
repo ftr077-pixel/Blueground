@@ -16,6 +16,12 @@ export interface MatchProposal {
   score: number;
 }
 
+// Minimum Jaccard score before a pairing is even proposed (and auto-applied).
+// Without a floor, ANY shared token — a street name, a bare "14" — produced a
+// nonzero score and automatch linked it, wiring the wrong apartment to a
+// listing and poisoning everything keyed on the mapping.
+const MIN_SCORE = 0.3;
+
 // "TLV1" -> ["tlv1"], "TLV10 Rothschild 14" -> ["tlv10","rothschild","14"].
 function tokenize(s: string): string[] {
   return (s ?? "").toLowerCase().match(/[a-z]+\d+|\d+|[a-z]{2,}/g) ?? [];
@@ -47,7 +53,7 @@ export function suggestMatches(): MatchProposal[] {
     const aptText = `${u.name} ${u.minihotelRoomType ?? ""}`;
     for (const l of openListings) {
       const s = score(aptText, `${l.label} ${l.address ?? ""}`);
-      if (s > 0) {
+      if (s >= MIN_SCORE) {
         pairs.push({ unitId: u.id, unitName: u.name, listingId: l.id, listingLabel: l.label, score: s });
       }
     }

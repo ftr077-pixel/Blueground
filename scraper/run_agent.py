@@ -23,12 +23,15 @@ import json
 import os
 import socket
 import time
+import urllib.error
 import urllib.request
 import uuid
 
 import pyairbnb
 
-# Hard cap so a hung proxy / Airbnb connection can't block the whole run forever.
+# Cap for our own urllib calls to the dashboard. NOTE: pyairbnb does its HTTP
+# through curl_cffi, which ignores this default and applies its own timeouts
+# (30s default, 60s on calendar calls) -- this is not a global safety net.
 socket.setdefaulttimeout(120)
 
 APP_URL = os.environ.get("APP_URL", "http://localhost:3000").rstrip("/")
@@ -44,8 +47,10 @@ STAY_LABELS = {7: "1 week", 14: "2 weeks", 30: "1 month", 60: "2 months", 90: "3
 
 
 # -------------------------------------------------------------------- http
-def http_get_json(url):
+def http_get_json(url, headers=None):
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read().decode())
 
@@ -58,6 +63,30 @@ def http_post_json(url, payload, headers=None):
         req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read().decode())
+
+
+def post_with_retry(url, payload, headers=None, attempts=3):
+    """POST with retries on transient failures only.
+
+    A 30+ minute scan must not be dropped over one connection blip; but a 4xx
+    (bad key, bad payload) won't get better by retrying, and a retry after the
+    server already committed would double-insert -- so only connection errors
+    and 5xx (which roll back server-side) are retried.
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return http_post_json(url, payload, headers)
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise
+            last = e
+        except Exception as e:  # URLError / timeout / connection reset
+            last = e
+        if i < attempts - 1:
+            print(f"  [warn] post attempt {i + 1}/{attempts} failed ({last}); retrying...")
+            time.sleep(5 * (i + 1))
+    raise last
 
 
 # -------------------------------------------------------------------- helpers
@@ -100,13 +129,18 @@ def _calendar_price(day):
 
 
 def fetch_calendar(airbnb_id):
-    """date -> {min, available, price} from the listing calendar (best effort)."""
+    """date -> {min, available, price} from the listing calendar.
+
+    Returns None when the FETCH failed (proxy/network/Airbnb error) -- callers
+    must not confuse that with {} = "calendar fetched, nothing open": posting a
+    failed fetch as "unavailable" marks a healthy listing as fully booked.
+    """
     try:
         api_key = pyairbnb.get_api_key(PROXY_URL)
         months = pyairbnb.get_calendar(api_key=api_key, room_id=str(airbnb_id), proxy_url=PROXY_URL)
     except Exception as e:
         print(f"    [warn] calendar fetch failed for {airbnb_id} ({e})")
-        return {}
+        return None
     out = {}
     for m in months or []:
         for d in (m.get("days") or []):
@@ -194,16 +228,21 @@ def result_price(r):
 
 
 def build_rankmap(results):
-    """airbnb_id -> (page, position, rank, price) for one search's results."""
+    """airbnb_id -> (page, position, rank, price) for one search's results.
+
+    Airbnb pagination can repeat a listing across pages; keep the FIRST (best)
+    occurrence -- the proof scripts do the same, and last-wins would silently
+    pessimize the rank metric.
+    """
     out = {}
     for i, r in enumerate(results):
         if isinstance(r, dict) and r.get("room_id") is not None:
-            out[str(r["room_id"])] = (
+            out.setdefault(str(r["room_id"]), (
                 i // WEB_PAGE_SIZE + 1,
                 i % WEB_PAGE_SIZE + 1,
                 i + 1,
                 result_price(r),
-            )
+            ))
     return out
 
 
@@ -274,12 +313,17 @@ def scan_profile(profile, availability_days=90):
     #    Fetched every run because availability changes as bookings come in.
     cals = {}         # listing_id -> {date: {min, available, price}}
     posted_min = {}   # listing_id -> representative min-stay to cache back
+    cal_failed = set()  # listing ids whose calendar FETCH failed (state unknown)
     for l in listings:
         cal = fetch_calendar(l["airbnbId"])
-        cals[l["id"]] = cal
-        mins = [v["min"] for v in cal.values() if v.get("min") is not None]
-        if mins:
-            posted_min[l["id"]] = min(mins)
+        if cal is None:
+            cal_failed.add(l["id"])
+            cals[l["id"]] = {}
+        else:
+            cals[l["id"]] = cal
+            mins = [v["min"] for v in cal.values() if v.get("min") is not None]
+            if mins:
+                posted_min[l["id"]] = min(mins)
         time.sleep(1)
 
     def min_for(l, date):
@@ -307,6 +351,11 @@ def scan_profile(profile, availability_days=90):
     for l in listings:
         g = eff_guests(l)
         cal = cals.get(l["id"], {})
+        # Calendar fetch failed -> state unknown. Emit NOTHING for this listing
+        # this run (a missing run is handled fine downstream) instead of posting
+        # false "unavailable / vanished" rows that become its latest state.
+        if l["id"] in cal_failed:
+            continue
         # Availability rule: don't waste a scrape on a listing with no opening soon.
         if not has_availability_within(cal, availability_days):
             skipped += 1
@@ -373,9 +422,14 @@ def scan_profile(profile, availability_days=90):
         try:
             results = search_with_retry(box, d, check_out, g, currency)
         except Exception as e:
-            print(f"  [error] search g{g} {d} {n}n: {e}")
+            # A search that failed after retries says nothing about the
+            # listings in it -- emitting found:false rows here records an
+            # outage as "disappeared from search" (rank collapse, movers
+            # "left"). Skip the window; absent cells are handled downstream.
+            print(f"  [error] search g{g} {d} {n}n: {e} -- skipping window")
             error_count += 1
-            results = []
+            time.sleep(PAUSE)
+            continue
         rankmap = build_rankmap(results)
         total = len(results)
         if results:
@@ -406,9 +460,13 @@ def scan_profile(profile, availability_days=90):
         time.sleep(PAUSE)
     if skipped:
         print(f"  skipped {skipped} listing(s) with no availability in {availability_days}d")
+    if cal_failed:
+        print(f"  {len(cal_failed)} listing(s) had calendar fetch failures (no rows emitted for them)")
     return snapshots, posted_min, search_results, {
         "found": found_total,
-        "errors": error_count,
+        # Calendar fetch failures count too, so the all-failed no-post guard in
+        # main() also catches the "every calendar failed -> zero searches" case.
+        "errors": error_count + len(cal_failed),
         "searches": len(searches),
         "skipped": skipped,
     }
@@ -417,7 +475,9 @@ def scan_profile(profile, availability_days=90):
 def main():
     print(f"APP_URL={APP_URL}  proxy={'yes' if PROXY_URL else 'no'}  "
           f"key={'set' if SCRAPER_API_KEY else 'MISSING'}")
-    cfg = http_get_json(f"{APP_URL}/api/visibility/config")
+    headers = {"x-scraper-key": SCRAPER_API_KEY} if SCRAPER_API_KEY else {}
+    # The config endpoint requires the same key (it maps addresses to listing ids).
+    cfg = http_get_json(f"{APP_URL}/api/visibility/config", headers)
     profiles = cfg.get("profiles", [])
     availability_days = cfg.get("availabilityDays", 90)
     print(f"{len(profiles)} active profile(s), availability filter {availability_days}d\n" + "=" * 60)
@@ -425,7 +485,6 @@ def main():
     scope = {x.strip() for x in SCAN_LISTING_IDS.split(",") if x.strip()}
     if scope:
         print(f"scope: only {len(scope)} selected listing(s)")
-    headers = {"x-scraper-key": SCRAPER_API_KEY} if SCRAPER_API_KEY else {}
     for profile in profiles:
         if scope:
             profile["listings"] = [
@@ -452,7 +511,7 @@ def main():
             "searchResults": search_results,
         }
         try:
-            res = http_post_json(f"{APP_URL}/api/visibility/snapshot", payload, headers)
+            res = post_with_retry(f"{APP_URL}/api/visibility/snapshot", payload, headers)
             print(f"  -> posted {res.get('recorded')} snapshots for "
                   f"{len(profile['listings'])} listings (run {run_id[:8]})\n")
         except Exception as e:

@@ -105,6 +105,22 @@ export function setUnitRate(unitId: string, newRate: number, ts: string) {
   ).run(newRate, ts, unitId);
 }
 
+/** Operator sets the unit's base (anchor) rate — every derived nightly price
+ *  rebuilds from it, and the price floor/ceiling follow proportionally. */
+export function setUnitBaseRate(unitId: string, rate: number) {
+  const db = getDb();
+  db.prepare(
+    "UPDATE units SET base_rate = ?, current_rate = ?, min_rate = ?, max_rate = ?, last_rate_change_at = ? WHERE id = ?",
+  ).run(
+    rate,
+    rate,
+    roundRate(rate * UNIT_PRICING_DEFAULTS.floorPctOfBase),
+    roundRate(rate * UNIT_PRICING_DEFAULTS.ceilingPctOfBase),
+    new Date().toISOString(),
+    unitId,
+  );
+}
+
 export function setUnitMinStay(unitId: string, minStay: number) {
   const db = getDb();
   db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);
@@ -158,6 +174,7 @@ export function deleteUnitsByIdPrefix(prefix: string): number {
     db.prepare("DELETE FROM pricing_history WHERE unit_id LIKE ?").run(like);
     db.prepare("UPDATE tracked_searches SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
     db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
+    db.prepare("UPDATE reservation SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
     db.prepare("DELETE FROM units WHERE id LIKE ?").run(like);
   });
   tx();
@@ -214,6 +231,12 @@ export function recordPricing(
     status: row.status,
   });
   return row;
+}
+
+/** Flip a history row's status when its escalation is decided (approved/rejected). */
+export function setPricingStatus(historyId: string, status: PricingHistoryRow["status"]): void {
+  const db = getDb();
+  db.prepare("UPDATE pricing_history SET status = ? WHERE id = ?").run(status, historyId);
 }
 
 export function listPricingHistory(unitId?: string, limit = 50): PricingHistoryRow[] {

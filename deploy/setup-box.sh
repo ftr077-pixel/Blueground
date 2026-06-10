@@ -96,6 +96,14 @@ if [ -n "$AIRROI_API_KEY" ]; then
   sed -i '/^AIRROI_API_KEY=/d; /^AIRROI_REGION_HINT=/d' "$ENV_FILE"
   printf 'AIRROI_API_KEY=%s\nAIRROI_REGION_HINT=%s\n' "$AIRROI_API_KEY" "$AIRROI_REGION_HINT" >> "$ENV_FILE"
 fi
+# The app's "Run scan now" button falls back to env PROXY_URL when no proxy is
+# saved in the UI — keep .env.local in step with the cron so a fresh box can
+# scan from the dashboard immediately.
+if [ -n "$PROXY_URL" ]; then
+  sed -i '/^PROXY_URL=/d' "$ENV_FILE"
+  printf 'PROXY_URL=%s\n' "$PROXY_URL" >> "$ENV_FILE"
+fi
+chmod 0600 "$ENV_FILE"
 
 log "Building the dashboard"
 npm install
@@ -112,7 +120,10 @@ WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
 Environment=PORT=$APP_PORT
 EnvironmentFile=$ENV_FILE
-ExecStart=$(command -v npm) run start
+# Behind Caddy the app must listen on loopback only — bound to 0.0.0.0 the
+# raw port would serve the whole dashboard around Caddy's HTTPS + login.
+# (The scraper cron and market sync already talk to localhost.)
+ExecStart=$(command -v npm) run start${DOMAIN:+ -- -H 127.0.0.1}
 Restart=always
 User=root
 
@@ -130,11 +141,15 @@ python3 -m venv .venv
 
 if [ -n "$PROXY_URL" ]; then
   log "Daily scan cron ($CRON_SCHEDULE)"
+  # In crontab syntax an unescaped % ends the command (the rest becomes stdin),
+  # and proxy credentials are routinely URL-encoded — escape them.
+  PROXY_CRON="${PROXY_URL//%/\\%}"
   cat >/etc/cron.d/visibility-scan <<CRON
 SHELL=/bin/bash
-$CRON_SCHEDULE root cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT SCRAPER_API_KEY=$SCRAPER_API_KEY PROXY_URL='$PROXY_URL' ./.venv/bin/python run_agent.py >> /var/log/visibility-scan.log 2>&1
+$CRON_SCHEDULE root cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT SCRAPER_API_KEY=$SCRAPER_API_KEY PROXY_URL='$PROXY_CRON' ./.venv/bin/python run_agent.py >> /var/log/visibility-scan.log 2>&1
 CRON
-  chmod 0644 /etc/cron.d/visibility-scan
+  # Root-only: the file embeds the API key and proxy credentials.
+  chmod 0600 /etc/cron.d/visibility-scan
 else
   log "No PROXY_URL — daily scan left OFF (dashboard-only)"
   rm -f /etc/cron.d/visibility-scan
@@ -148,7 +163,7 @@ if [ -n "$AIRROI_API_KEY" ]; then
 SHELL=/bin/bash
 $MARKET_CRON_SCHEDULE root curl -fsS -H "x-scraper-key: $SCRAPER_API_KEY" -X POST http://localhost:$APP_PORT/api/market/sync >> /var/log/market-sync.log 2>&1
 CRON
-  chmod 0644 /etc/cron.d/market-sync
+  chmod 0600 /etc/cron.d/market-sync
 else
   log "No AIRROI_API_KEY — market sync left OFF (engine uses built-in sample signals)"
   rm -f /etc/cron.d/market-sync
@@ -174,12 +189,15 @@ if [ -n "$DOMAIN" ]; then
 else
   echo "Dashboard:  http://<box-ip>:$APP_PORT   (NO login — set DOMAIN for HTTPS + auth)"
 fi
-echo "SCRAPER_API_KEY (in $ENV_FILE): $SCRAPER_API_KEY"
+# Don't echo the key/proxy themselves — this output lands in shell history,
+# CI logs and scrollback. They live root-readable in $ENV_FILE / /etc/cron.d.
+echo "SCRAPER_API_KEY: stored in $ENV_FILE"
 echo
 if [ -n "$PROXY_URL" ]; then
   echo "Run a scan right now:"
   echo "  cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT \\"
-  echo "    SCRAPER_API_KEY=$SCRAPER_API_KEY PROXY_URL='$PROXY_URL' \\"
+  echo "    SCRAPER_API_KEY=\"\$(grep '^SCRAPER_API_KEY=' $ENV_FILE | cut -d= -f2-)\" \\"
+  echo "    PROXY_URL=\"\$(grep '^PROXY_URL=' $ENV_FILE | cut -d= -f2-)\" \\"
   echo "    ./.venv/bin/python run_agent.py"
 else
   echo "Scanning is OFF (no proxy). Get a residential proxy, then re-run this"

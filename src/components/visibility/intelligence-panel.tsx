@@ -76,8 +76,26 @@ interface Elasticity {
     ciNightlyHigh: number | null;
     freshnessDays: number | null;
   };
+  demand: DemandSignal | null;
   curve: CurvePoint[];
   note: string | null;
+}
+
+interface DemandComponent {
+  index: number;
+  percentile: number;
+  raw: number;
+  n: number;
+}
+interface DemandSignal {
+  area: string;
+  date: string;
+  index: number | null;
+  label: "hot" | "firm" | "soft" | "cold" | null;
+  market: DemandComponent | null;
+  supply: DemandComponent | null;
+  ourOccupancy: number | null;
+  readingTs: string | null;
 }
 
 const selectCls =
@@ -314,7 +332,11 @@ export function IntelligencePanel() {
     setCheckIn((c) => (checkIns.includes(c) ? c : checkIns[0] ?? ""));
   }, [checkIns]);
 
-  // Fetch the recommendation whenever the selection changes.
+  // Fetch the recommendation whenever the selection changes. Selection changes
+  // fire this twice in quick succession (listing change → stay reset), so stale
+  // responses are dropped; errors clear on the next success rather than
+  // replacing the whole panel (which would unmount the very selectors needed
+  // to recover from e.g. a transient 500).
   useEffect(() => {
     if (!listingId) return;
     const params = new URLSearchParams({
@@ -323,14 +345,25 @@ export function IntelligencePanel() {
       targetPage: String(targetPage),
     });
     if (checkIn) params.set("checkIn", checkIn);
+    let stale = false;
     fetch(`/api/learning/elasticity?${params}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
-      .then((b: Elasticity) => setData(b))
-      .catch((e) => setErr(e instanceof Error ? e.message : "failed to load"));
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`request failed (${r.status})`))))
+      .then((b: Elasticity) => {
+        if (stale) return;
+        setData(b);
+        setErr(null);
+      })
+      .catch((e) => {
+        if (!stale) setErr(e instanceof Error ? e.message : "failed to load");
+      });
+    return () => {
+      stale = true;
+    };
   }, [listingId, nights, checkIn, targetPage]);
 
   if (loading) return <p className="text-xs text-muted-foreground">Loading…</p>;
-  if (err) return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
+  if (err && !listings.length)
+    return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
   if (!listings.length)
     return <p className="text-[11px] text-muted-foreground">No listings tracked yet.</p>;
 
@@ -389,9 +422,16 @@ export function IntelligencePanel() {
         </label>
       </div>
 
+      {err && (
+        <p className="text-[11px] text-[hsl(var(--danger))]">
+          Couldn’t load the recommendation ({err}) — change the selection to retry.
+        </p>
+      )}
       {data && <Recommendation data={data} confBadge={confBadge} />}
+      {data && <DemandCard demand={data.demand} area={data.segment.area} />}
       {data && <CurveCard data={data} />}
-      {listingId && <OutcomesCard listingId={listingId} />}
+      {listingId && <OutcomesCard listingId={listingId} nights={nights} />}
+      <StrategyCard />
     </div>
   );
 }
@@ -410,16 +450,18 @@ interface Outcomes {
     status: string | null;
     leadDays: number | null;
   }>;
+  marketPace: { medianLeadDays: number | null } | null;
+  paceDeltaDays: number | null;
 }
 
-function OutcomesCard({ listingId }: { listingId: string }) {
+function OutcomesCard({ listingId, nights }: { listingId: string; nights: number }) {
   const [o, setO] = useState<Outcomes | null>(null);
   useEffect(() => {
-    fetch(`/api/learning/outcomes?listingId=${listingId}`, { cache: "no-store" })
+    fetch(`/api/learning/outcomes?listingId=${listingId}&nights=${nights}`, { cache: "no-store" })
       .then((r) => r.json())
       .then(setO)
       .catch(() => setO(null));
-  }, [listingId]);
+  }, [listingId, nights]);
 
   if (!o) return null;
   const hasData = (o.realizedNightly?.n ?? 0) > 0 || o.pace.n > 0;
@@ -458,7 +500,23 @@ function OutcomesCard({ listingId }: { listingId: string }) {
                 value={o.pace.medianLeadDays != null ? `~${o.pace.medianLeadDays}d out` : "—"}
                 sub="median booking lead"
               />
+              {o.marketPace?.medianLeadDays != null && (
+                <Stat
+                  label="Pace vs market"
+                  value={
+                    o.paceDeltaDays != null
+                      ? `${o.paceDeltaDays === 0 ? "on pace" : `${Math.abs(o.paceDeltaDays)}d ${o.paceDeltaDays < 0 ? "earlier" : "later"}`}`
+                      : "—"
+                  }
+                  sub={`market ~${o.marketPace.medianLeadDays}d out`}
+                />
+              )}
             </div>
+            {o.marketPace?.medianLeadDays == null && (
+              <p className="text-[11px] text-muted-foreground">
+                Add market booking lead times to compare pace (POST /api/learning/market-pace).
+              </p>
+            )}
             {o.recent.length > 0 && (
               <div className="overflow-hidden rounded-lg border border-border">
                 <table className="w-full text-[11px]">
@@ -509,7 +567,10 @@ function Recommendation({ data, confBadge }: { data: Elasticity; confBadge: Reac
             {data.segment.area} · {nightsLabel(data.nights)} ·{" "}
             {data.leadDays != null ? `${data.leadDays}d lead` : "—"} ({data.segment.leadBucket})
           </CardTitle>
-          {confBadge}
+          <span className="flex items-center gap-1.5">
+            {data.demand?.label && <DemandBadge label={data.demand.label} />}
+            {confBadge}
+          </span>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -606,6 +667,223 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
       {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
     </div>
+  );
+}
+
+interface AttributionReport {
+  strategies: Array<{
+    strategy: "after-drop" | "after-raise" | "no-change";
+    n: number;
+    medianRealizedPctOfAsking: number | null;
+    medianLeadDays: number | null;
+    medianDaysFromChange: number | null;
+  }>;
+  followThrough: { windowDays: number; drops: number; dropsBooked: number; raises: number; raisesBooked: number };
+  unattributed: number;
+}
+
+const STRATEGY_LABELS: Record<string, string> = {
+  "after-drop": "▼ After a drop",
+  "after-raise": "▲ After a raise",
+  "no-change": "No recent change",
+};
+
+// Portfolio-wide: how bookings closed relative to asking, grouped by the price
+// action that preceded them — the "success rate over strategy" view.
+function StrategyCard() {
+  const [r, setR] = useState<AttributionReport | null>(null);
+  useEffect(() => {
+    fetch("/api/learning/attribution", { cache: "no-store" })
+      .then((res) => res.json())
+      .then(setR)
+      .catch(() => setR(null));
+  }, []);
+
+  if (!r) return null;
+  const total = r.strategies.reduce((s, x) => s + x.n, 0);
+  const ft = r.followThrough;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Strategy outcomes · portfolio</CardTitle>
+          <Badge variant="muted">{total} attributed</Badge>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Each booking joined to the asking price, search position, and price action live when it
+          was booked — how each strategy actually converts.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {total === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No attributable bookings yet — sync MiniHotel bookings and map listings to units in
+            Manage so they join up.
+            {r.unattributed > 0 && ` (${r.unattributed} booking(s) lack a listing↔unit link.)`}
+          </p>
+        ) : (
+          <>
+            <div className="overflow-hidden rounded-lg border border-border">
+              <table className="w-full text-[11px]">
+                <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 text-left">Strategy</th>
+                    <th className="px-2 py-1 text-right">Bookings</th>
+                    <th className="px-2 py-1 text-right">Realized vs asking</th>
+                    <th className="px-2 py-1 text-right">Lead</th>
+                    <th className="px-2 py-1 text-right">Days from move</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {r.strategies.map((s) => (
+                    <tr key={s.strategy} className="border-t border-border/40">
+                      <td className="px-2 py-1">{STRATEGY_LABELS[s.strategy] ?? s.strategy}</td>
+                      <td className="px-2 py-1 text-right font-mono">{s.n}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {s.medianRealizedPctOfAsking != null ? `${Math.round(s.medianRealizedPctOfAsking)}%` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {s.medianLeadDays != null ? `${Math.round(s.medianLeadDays)}d` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {s.medianDaysFromChange != null ? `${Math.round(s.medianDaysFromChange)}d` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {ft.drops > 0
+                ? `Follow-through: ${ft.dropsBooked}/${ft.drops} logged drops were followed by a booking within ${ft.windowDays}d` +
+                  (ft.raises > 0 ? `; raises ${ft.raisesBooked}/${ft.raises}.` : ".")
+                : `No logged price moves yet — log them (POST /api/learning/price-changes) when you change a price, and conversions get attributed to the move.`}
+              {r.unattributed > 0 && ` ${r.unattributed} booking(s) couldn't be attributed (no listing↔unit link).`}
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DemandBadge({ label }: { label: NonNullable<DemandSignal["label"]> }) {
+  const v =
+    label === "hot" ? "danger" : label === "firm" ? "success" : label === "soft" ? "info" : "muted";
+  return <Badge variant={v}>demand {label}</Badge>;
+}
+
+// Relative demand for the selected check-in. The point of this card: the raw
+// market number is NOT trusted at face value (ghost listings sink it); it's read
+// against its own range, with our realized occupancy beside it as the anchor.
+function DemandCard({ demand, area }: { demand: DemandSignal | null; area: string }) {
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function submit() {
+    setMsg(null);
+    try {
+      const res = await fetch("/api/learning/demand", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ area, text }),
+      });
+      const b = (await res.json()) as { recorded?: number; error?: string };
+      setMsg(res.ok ? `recorded ${b.recorded} reading(s) — refresh to see them applied` : b.error ?? "failed");
+      if (res.ok) setText("");
+    } catch {
+      setMsg("failed to post readings");
+    }
+  }
+
+  const m = demand?.market ?? null;
+  const s = demand?.supply ?? null;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Demand · {demand?.date ?? "—"}</CardTitle>
+          {demand?.label ? <DemandBadge label={demand.label} /> : <Badge variant="muted">no data</Badge>}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Market readings are treated as <span className="text-foreground">relative</span> — ghost
+          listings make the absolute level meaningless, so each reading is scored against its own
+          history for this area.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap gap-x-10 gap-y-3 text-sm">
+          {m ? (
+            <Stat
+              label="Market reading"
+              value={`${m.raw}%`}
+              sub={`p${m.percentile} of its own range (n=${m.n}) → ${
+                demand?.label ?? "—"
+              }`}
+            />
+          ) : (
+            <Stat label="Market reading" value="—" sub="paste readings below to enable" />
+          )}
+          {s && (
+            <Stat
+              label="Listings on market"
+              value={String(s.raw)}
+              sub={`p${s.percentile} for this lead window — ${
+                s.index > 0 ? "thinner than usual (hot)" : s.index < 0 ? "fatter than usual (soft)" : "typical"
+              }`}
+            />
+          )}
+          {demand?.ourOccupancy != null && (
+            <Stat
+              label="Our occupancy"
+              value={`${Math.round(demand.ourOccupancy * 100)}%`}
+              sub="realized, around this date (MiniHotel)"
+            />
+          )}
+        </div>
+        {m && demand?.ourOccupancy != null && (
+          <p className="text-[11px] text-muted-foreground">
+            Calibration: the dashboard says {m.raw}% while we run{" "}
+            {Math.round(demand.ourOccupancy * 100)}% — whenever this metric reads at p
+            {m.percentile} of its range, treat the market as{" "}
+            <span className="text-foreground">{demand.label}</span> regardless of the absolute
+            number.
+          </p>
+        )}
+        <div>
+          <button
+            type="button"
+            onClick={() => setPasteOpen((o) => !o)}
+            className="text-[11px] text-primary hover:underline"
+          >
+            {pasteOpen ? "close" : "paste market readings…"}
+          </button>
+          {pasteOpen && (
+            <div className="mt-2 space-y-2">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={4}
+                placeholder={"One per line: YYYY-MM-DD value\n2026-08-01 30\n2026-08-08 28.5"}
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-primary/50"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!text.trim()}
+                  className="rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-60"
+                >
+                  Record for {area}
+                </button>
+                {msg && <span className="text-[11px] text-muted-foreground">{msg}</span>}
+              </div>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

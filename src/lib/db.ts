@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { ACTIVITY_FEED, DEPARTMENTS } from "@/lib/mock-data";
 import { APPROVAL_QUEUE } from "@/lib/action-center-data";
 import { UNIT_PRICING_DEFAULTS, PRICING_AGENT } from "@/lib/config/pricing";
+import { APARTMENTS, streetOf } from "@/lib/apartments";
 import { randomUUID } from "node:crypto";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -247,6 +248,49 @@ function init(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_bookings_unit ON bookings(unit_id);
     CREATE INDEX IF NOT EXISTS idx_bookings_arrival ON bookings(arrival);
 
+    -- Downsampled history for pruned ladder rows (design §4.3): per search × rank
+    -- decile, the nightly-price percentiles. Keeps long-horizon trend analysis
+    -- possible after raw rows beyond the retention window are deleted.
+    CREATE TABLE IF NOT EXISTS search_ladder_summary (
+      profile_id TEXT NOT NULL,
+      nights     INTEGER NOT NULL,
+      check_in   TEXT NOT NULL,
+      run_id     TEXT NOT NULL,
+      ts         TEXT NOT NULL,
+      decile     INTEGER NOT NULL,
+      n          INTEGER NOT NULL,
+      p10 REAL, p25 REAL, p50 REAL, p75 REAL, p90 REAL,
+      currency   TEXT,
+      PRIMARY KEY (run_id, check_in, nights, decile)
+    );
+
+    -- External market-demand readings (e.g. market occupancy from a PriceLabs-
+    -- style dashboard), keyed by area + stay date. Stored raw; the learner never
+    -- uses the absolute value — only its percentile within the source's own
+    -- history (ghost listings make absolute market occupancy meaningless).
+    CREATE TABLE IF NOT EXISTS demand_readings (
+      id      TEXT PRIMARY KEY,
+      area    TEXT NOT NULL,
+      date    TEXT NOT NULL,           -- the stay date the reading refers to
+      source  TEXT NOT NULL DEFAULT 'market-occupancy',
+      value   REAL NOT NULL,           -- raw reading (e.g. 30 = 30% occupancy)
+      ts      TEXT NOT NULL            -- when it was read/ingested
+    );
+    CREATE INDEX IF NOT EXISTS idx_demand_area_date ON demand_readings(area, source, date, ts DESC);
+
+    -- The market's booking pace (lead-time distribution) per area × stay length,
+    -- supplied by the operator. The benchmark we compare our own pace against
+    -- ("are we behind/ahead of how the market books?"). lead_cdf is JSON:
+    -- [{ leadDays, bookedPct }].
+    CREATE TABLE IF NOT EXISTS market_pace (
+      profile_id       TEXT NOT NULL,
+      nights           INTEGER NOT NULL,
+      median_lead_days REAL,
+      lead_cdf         TEXT,
+      updated_at       TEXT NOT NULL,
+      PRIMARY KEY (profile_id, nights)
+    );
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
@@ -374,6 +418,11 @@ function init(db: Database.Database) {
   // MiniHotel connection: each unit maps to a MiniHotel room-type code (names
   // differ between this app and MiniHotel, so we store the link explicitly).
   ensureColumn(db, "units", "minihotel_room_type", "TEXT");
+  // Date-specific overrides (PriceLabs-style panel): optional per-date price
+  // floor/ceiling that clamp the derived nightly price, and an operator note.
+  ensureColumn(db, "rate_calendar", "min_price", "INTEGER");
+  ensureColumn(db, "rate_calendar", "max_price", "INTEGER");
+  ensureColumn(db, "rate_calendar", "note", "TEXT");
   // Floors/ceilings derive from the base rate; backfill any rows still missing
   // them (covers both pre-existing DBs and freshly-seeded rows, which insert
   // only the original columns), ₪-step rounded.
@@ -406,11 +455,42 @@ function init(db: Database.Database) {
   ensureColumn(db, "market_snapshots", "filter", "TEXT");
 }
 
+// Seed version history:
+//   v1 — six fictional demo apartments (later: the portfolio, misspelled).
+//   v2 — the real portfolio from src/lib/apartments.ts.
+const SEED_VERSION = "v2";
+
 function seed(db: Database.Database) {
   const seeded = db
     .prepare("SELECT value FROM meta WHERE key = 'seeded'")
     .get() as { value: string } | undefined;
-  if (seeded?.value === "v1") return;
+  if (seeded?.value === SEED_VERSION) return;
+
+  const insertUnit = db.prepare(`
+    INSERT INTO units (id, name, neighborhood, bedrooms, base_rate, current_rate, occupancy_30d, platform)
+    VALUES (@id, @name, @neighborhood, @bedrooms, @base_rate, @current_rate, @occupancy_30d, @platform)
+  `);
+
+  if (seeded) {
+    // Existing DB on an older seed: replace seed-era units (ids "BG-…" — the
+    // old fictional demos and/or a stale copy of the portfolio) with the
+    // canonical portfolio. Units imported from MiniHotel (ids "MH-…") are the
+    // operator's real data and are never touched; when they exist, we don't
+    // re-add seed apartments alongside them. Calendar overrides are keyed by
+    // unit id, so overrides made on portfolio units (BG-1…BG-115) survive.
+    const migrate = db.transaction(() => {
+      const imported = (
+        db.prepare("SELECT COUNT(*) AS c FROM units WHERE id NOT LIKE 'BG-%'").get() as { c: number }
+      ).c;
+      db.prepare("DELETE FROM units WHERE id LIKE 'BG-%'").run();
+      if (imported === 0) {
+        for (const u of SEED_UNITS) insertUnit.run(u);
+      }
+      db.prepare("UPDATE meta SET value = ? WHERE key = 'seeded'").run(SEED_VERSION);
+    });
+    migrate();
+    return;
+  }
 
   const insertItem = db.prepare(`
     INSERT INTO approval_items (id, department, worker, proposed_action, rationale, blast_radius, amount, raised_at, rule, payload)
@@ -419,10 +499,6 @@ function seed(db: Database.Database) {
   const insertEvent = db.prepare(`
     INSERT INTO activity_events (id, ts, department, worker, message, level)
     VALUES (@id, @ts, @department, @worker, @message, @level)
-  `);
-  const insertUnit = db.prepare(`
-    INSERT INTO units (id, name, neighborhood, bedrooms, base_rate, current_rate, occupancy_30d, platform)
-    VALUES (@id, @name, @neighborhood, @bedrooms, @base_rate, @current_rate, @occupancy_30d, @platform)
   `);
 
   const tx = db.transaction(() => {
@@ -453,130 +529,11 @@ function seed(db: Database.Database) {
     for (const u of SEED_UNITS) {
       insertUnit.run(u);
     }
-    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded', 'v1')").run();
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded', ?)").run(SEED_VERSION);
   });
   tx();
   // suppress unused import warning if departments aren't directly read
   void DEPARTMENTS;
-}
-
-// The live Tel-Aviv portfolio. Addresses are the names as they arrive from
-// MiniHotel; the operator identifies each apartment by its internal ID — the
-// number rendered first in the Rates Calendar. IDs are intentionally sparse
-// (some numbers retired), so we key off the explicit id, not array position.
-const APARTMENTS: Array<[number, string]> = [
-  [1, "Florentin 7, 23"],
-  [2, "Herzl 114, 32"],
-  [3, "Herzl 114, 2"],
-  [4, "Herzl 114, 14"],
-  [5, "Herzl 114, 3"],
-  [6, "Rambam 24, 7"],
-  [7, "Rambam 24, 10"],
-  [8, "Rambam 24, 11"],
-  [9, "Rambam 24, 12"],
-  [10, "Rambam 24, 16"],
-  [11, "Rambam 24, 15"],
-  [12, "Markolet 5, 3"],
-  [13, "Halutzim 28, 1"],
-  [14, "Halutzim 28, 2"],
-  [15, "Halutzim 28, 3"],
-  [16, "Halutzim 28, 4"],
-  [17, "Halutzim 28, 5"],
-  [18, "Halutzim 28, 6"],
-  [19, "Halutzim 28, 7"],
-  [20, "Halutzim 28, 8"],
-  [21, "Halutzim 28, 9"],
-  [22, "Trumpeldor 20, 6"],
-  [23, "Levontin 26, 23"],
-  [24, "Markolet 5, 4"],
-  [25, "Markolet 5, 10"],
-  [26, "Markolet 5, 14"],
-  [27, "Rambam 24, 17"],
-  [28, "Rambam 24, 19"],
-  [29, "Harugei Malchut 10, 5"],
-  [30, "Mohaliver Street 31, 2"],
-  [31, "Mohaliver Street 31, 4"],
-  [32, "Mohaliver Street 31, 11"],
-  [33, "Mohaliver Street 31, 12"],
-  [34, "Mohaliver Street 31, 13"],
-  [35, "Mohaliver Street 31, 15"],
-  [36, "Mohaliver Street 31, 16"],
-  [37, "Mohaliver Street 31, 17"],
-  [38, "Trumpeldor 20, 7"],
-  [39, "Dizengoff 282, 4"],
-  [40, "Meitav 5, 140"],
-  [41, "Menachem Begin 158, 166"],
-  [42, "Dizengoff 288, 3"],
-  [43, "Dizengoff 288, 10"],
-  [44, "Markolet 5, 8"],
-  [45, "Rambam 24, 1"],
-  [46, "Levontin 26, 3"],
-  [47, "Rambam 24, 18"],
-  [48, "Herzl 4, 9"],
-  [49, "Dizengoff 288, 9"],
-  [50, "Mohaliver Street 31, 9"],
-  [51, "Nahalat Binyamin 9, 3"],
-  [52, "Nahalat Binyamin 9, 4"],
-  [53, "Nahalat Binyamin 9, 5"],
-  [54, "Nahalat Binyamin 9, 6"],
-  [55, "Nahalat Binyamin 9, 7"],
-  [56, "Nahalat Binyamin 9, 8"],
-  [57, "Nahalat Binyamin 9, 9"],
-  [58, "Nahalat Binyamin 9, 10"],
-  [59, "Menachem Begin 160, 148"],
-  [60, "Wyssotsky 6, 24"],
-  [61, "Wyssotsky 6, 25"],
-  [63, "Rambam 24, 9"],
-  [64, "Shlomo Ibn Gabirol Street 144, 20"],
-  [65, "Derech Menachem Begin 160, 149"],
-  [66, "Jerusalem Boulevard 1, 17"],
-  [67, "Wyssotsky 8, 74"],
-  [68, "Shlomo Ibn Gabirol Street 144, 16"],
-  [70, "HaYarkon Street 276, #2"],
-  [71, "HaYarkon Street 276, #3"],
-  [72, "HaYarkon Street 276, #4"],
-  [73, "HaYarkon Street 276, #5"],
-  [74, "HaYarkon Street 276, #6"],
-  [75, "HaYarkon Street 276, #7"],
-  [76, "Florentin 7, 22"],
-  [77, "Shlomo Ibn Gabirol Street 144, 24"],
-  [78, "Rambam 24, 2"],
-  [79, "Nitzana 9"],
-  [80, "Arlozorov 33, 4A"],
-  [81, "Arlozorov 33, 4B"],
-  [82, "Rembrandt 20, 10"],
-  [83, "Shlomo Ibn Gabirol Street 144, 6"],
-  [84, "Melchett 52, 3"],
-  [85, "Allenby 114, 3"],
-  [86, "Allenby 114, 4"],
-  [87, "Allenby 114, 5"],
-  [88, "Allenby 114, 6"],
-  [89, "Allenby 114, 7"],
-  [90, "Allenby 114, 8"],
-  [91, "Allenby 114, 9"],
-  [92, "Allenby 114, 10"],
-  [93, "Allenby 114, 11"],
-  [94, "Allenby 114, 12"],
-  [95, "Allenby 114, 13"],
-  [96, "Allenby 114, 14"],
-  [97, "Allenby 114, 15"],
-  [98, "Allenby 114, 16"],
-  [99, "Allenby 114, 17"],
-  [100, "Yavnieli 24, 15"],
-  [101, "Trumpeldor 20, 5"],
-  [102, "Rambam 24, 3"],
-  [103, "Trumpeldor 20, 4"],
-  [105, "Rambam 24, 14"],
-  [112, "Yitzhak Elhanan 14, 14"],
-  [113, "HaYarkon 276, 9"],
-  [114, "Levontin 26, 2"],
-  [115, "Totzeret HaAretz 5 apt 289"],
-];
-
-// Neighborhood grouping = the street (everything before the building number).
-function streetOf(addr: string): string {
-  const m = addr.match(/^(.*?)[\s,]*\d/);
-  return (m ? m[1] : addr).replace(/[,\s]+$/, "").trim() || addr;
 }
 
 export const SEED_UNITS = APARTMENTS.map(([n, address]) => {
@@ -822,6 +779,49 @@ function seedBookings(db: Database.Database) {
       });
     }
     db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_bookings', 'v1')").run();
+    // Link the seeded listing to the seeded unit so the demo bookings attribute
+    // (booking → unit → listing → its scans). Touches only the seed row.
+    db.prepare(
+      "UPDATE tracked_listings SET unit_id = 'BG-2231' WHERE id = 'lst-portmamad' AND unit_id IS NULL",
+    ).run();
+  });
+  tx();
+}
+
+// Demo market-occupancy readings for the seeded area, reproducing the operator's
+// observed pattern: absolute values look low (ghost listings), but a 30% reading
+// sits at the top of the metric's own range — i.e. relatively, demand is hot.
+function seedDemand(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_demand'").get();
+  if (seeded) return;
+
+  const area = "Tel Aviv · 2 guests"; // matches the seeded profile label
+  const ins = db.prepare(
+    `INSERT INTO demand_readings (id, area, date, source, value, ts)
+     VALUES (@id, @area, @date, 'market-occupancy', @value, @ts)`,
+  );
+  const noise = (k: number) => {
+    const x = Math.sin(k * 7901 + 31337) * 215573;
+    return x - Math.floor(x); // 0..1, deterministic
+  };
+  const tx = db.transaction(() => {
+    // Weekly readings over ~6 months of stay dates: quiet winter/spring readings
+    // 12–22%, climbing into August where 28–31% is the seasonal peak.
+    const start = Date.parse("2026-03-01T00:00:00Z");
+    for (let w = 0; w < 26; w++) {
+      const dms = start + w * 7 * 86_400_000;
+      const date = new Date(dms).toISOString().slice(0, 10);
+      const month = new Date(dms).getUTCMonth() + 1; // 3..9
+      const seasonal = month >= 7 ? 26 + 5 * noise(w) : 12 + 10 * noise(w);
+      ins.run({
+        id: randomUUID(),
+        area,
+        date,
+        value: Math.round(seasonal * 10) / 10,
+        ts: "2026-06-08T09:00:00.000Z",
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_demand', 'v1')").run();
   });
   tx();
 }
@@ -835,6 +835,7 @@ export function getDb(): Database.Database {
   seedProfiles(db);
   seedLadder(db);
   seedBookings(db);
+  seedDemand(db);
   global.__rohubDb = db;
   return db;
 }

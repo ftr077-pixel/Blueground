@@ -18,6 +18,7 @@ export function CostDefaultsCard() {
   const [losMo, setLosMo] = useState("0");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/visibility/settings", { cache: "no-store" })
@@ -46,8 +47,11 @@ export function CostDefaultsCard() {
 
   async function save() {
     setBusy(true);
+    setErr(null);
     try {
-      await fetch("/api/visibility/settings", {
+      // A rejected save must not flash "Saved ✓" — these numbers silently
+      // drive all the profit math, so a false success is worse than an error.
+      const res = await fetch("/api/visibility/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -60,8 +64,11 @@ export function CostDefaultsCard() {
           monthlyDiscountPct: parseFloat(losMo) || 0,
         }),
       });
+      if (!res.ok) throw new Error(`save failed (${res.status})`);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "save failed");
     } finally {
       setBusy(false);
     }
@@ -116,6 +123,7 @@ export function CostDefaultsCard() {
           <button type="button" disabled={busy} onClick={save} className={btn}>
             {saved ? "Saved ✓" : "Save"}
           </button>
+          {err && <span className="self-center text-[11px] text-[hsl(var(--danger))]">{err}</span>}
         </div>
       </CardContent>
     </Card>

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { getDb } from "@/lib/db";
+import { LADDER_RETENTION } from "@/lib/learning/config";
 
 // Airbnb's web UI shows ~18 results/page; the scraper uses the same constant so
 // global rank ↔ (page, position) stay consistent across the app.
@@ -87,6 +88,104 @@ export function recordSearchResults(input: RecordLadderInput): number {
   });
   tx();
   return n;
+}
+
+// ---------------------------------------------------------------- retention
+function percentile(sorted: number[], q: number): number {
+  if (!sorted.length) return 0;
+  const i = (sorted.length - 1) * q;
+  const lo = Math.floor(i);
+  const hi = Math.ceil(i);
+  return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo);
+}
+
+// Design §4.3: raw ladder rows older than rawDays are downsampled into
+// search_ladder_summary (nightly-price percentiles per search × rank decile),
+// then deleted. Guarded to run at most once per pruneEveryHours (recordRun calls
+// it after every ingest). Nothing in the learner reads beyond its 21d window, so
+// pruning never affects recommendations — only long-horizon storage.
+export function pruneLadder(opts: { force?: boolean; now?: number } = {}): {
+  summarized: number;
+  deleted: number;
+} | null {
+  const db = getDb();
+  const now = opts.now ?? Date.now();
+  if (!opts.force) {
+    const last = db
+      .prepare("SELECT value FROM meta WHERE key = 'ladder_pruned_at'")
+      .get() as { value: string } | undefined;
+    if (last) {
+      const age = now - new Date(last.value).getTime();
+      if (Number.isFinite(age) && age < LADDER_RETENTION.pruneEveryHours * 3_600_000) return null;
+    }
+  }
+  const cutoff = new Date(now - LADDER_RETENTION.rawDays * 86_400_000).toISOString();
+
+  const old = db
+    .prepare(
+      `SELECT profile_id, nights, check_in, run_id, ts, rank, total, price_nightly, currency
+         FROM search_results WHERE ts < ?`,
+    )
+    .all(cutoff) as Array<{
+    profile_id: string;
+    nights: number;
+    check_in: string;
+    run_id: string;
+    ts: string;
+    rank: number;
+    total: number;
+    price_nightly: number | null;
+    currency: string | null;
+  }>;
+
+  // Group by search × rank decile (1..10 of rank/total).
+  const groups = new Map<
+    string,
+    { head: (typeof old)[number]; decile: number; nightly: number[] }
+  >();
+  for (const r of old) {
+    if (r.price_nightly == null || r.total <= 0) continue;
+    const decile = Math.min(10, Math.max(1, Math.ceil((r.rank / r.total) * 10)));
+    const key = `${r.run_id}|${r.check_in}|${r.nights}|${decile}`;
+    const g = groups.get(key) ?? { head: r, decile, nightly: [] };
+    g.nightly.push(r.price_nightly);
+    groups.set(key, g);
+  }
+
+  const ins = db.prepare(
+    `INSERT OR REPLACE INTO search_ladder_summary
+       (profile_id, nights, check_in, run_id, ts, decile, n, p10, p25, p50, p75, p90, currency)
+     VALUES (@profile_id, @nights, @check_in, @run_id, @ts, @decile, @n, @p10, @p25, @p50, @p75, @p90, @currency)`,
+  );
+  let summarized = 0;
+  let deleted = 0;
+  const tx = db.transaction(() => {
+    for (const g of groups.values()) {
+      const s = [...g.nightly].sort((a, b) => a - b);
+      ins.run({
+        profile_id: g.head.profile_id,
+        nights: g.head.nights,
+        check_in: g.head.check_in,
+        run_id: g.head.run_id,
+        ts: g.head.ts,
+        decile: g.decile,
+        n: s.length,
+        p10: percentile(s, 0.1),
+        p25: percentile(s, 0.25),
+        p50: percentile(s, 0.5),
+        p75: percentile(s, 0.75),
+        p90: percentile(s, 0.9),
+        currency: g.head.currency,
+      });
+      summarized++;
+    }
+    deleted = db.prepare("DELETE FROM search_results WHERE ts < ?").run(cutoff).changes;
+    db.prepare(
+      "INSERT INTO meta (key, value) VALUES ('ladder_pruned_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run(new Date(now).toISOString());
+  });
+  tx();
+  return { summarized, deleted };
 }
 
 // ---------------------------------------------------------------- verification

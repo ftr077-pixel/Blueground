@@ -72,13 +72,15 @@ function resolveMinStay(
     rec = cfg.minStayHierarchy.farOutNights;
     source = "far-out";
   }
-  // Operator date override wins outright
+  rec = Math.max(floor, Math.min(rec, PRICING_AGENT.maxMinStay));
+  // Operator date override wins outright — applied after the floor clamp on
+  // purpose, so it can go below the unit floor (e.g. a short gap-fill between
+  // two long bookings). Only the global cap still applies.
   const ov = market.dateOverride(unit, date);
   if (ov?.minStay != null) {
-    rec = ov.minStay;
+    rec = Math.max(1, Math.min(ov.minStay, PRICING_AGENT.maxMinStay));
     source = "override";
   }
-  rec = Math.max(floor, Math.min(rec, PRICING_AGENT.maxMinStay));
   return { minStay: rec, source };
 }
 

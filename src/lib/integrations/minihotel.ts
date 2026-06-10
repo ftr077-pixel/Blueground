@@ -45,7 +45,11 @@ export interface SyncResult {
   message?: string;
 }
 
-const todayUTC = () => new Date().toISOString().slice(0, 10);
+// "Today" on the hotel's calendar (Asia/Jerusalem), not UTC: between local
+// midnight and 02:00/03:00 the UTC date is still yesterday, which would shift
+// every default sync window a day into the past.
+const todayLocal = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
 const plusDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 
@@ -85,7 +89,9 @@ export function buildBulkAriRequest(
   return (
     '<?xml version="1.0" encoding="UTF-8" ?>' +
     '<AvailRaterq xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
-    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="05" />` +
+    // MinimumNights="YES" is opt-in (omitting = "NO"): without it MiniHotel
+    // returns Minngt="0" for every day and real min-stay restrictions never sync.
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="05" MinimumNights="YES" />` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
     `<DateRange from="${from}" to="${to}" />` +
     roomTypes +
@@ -110,14 +116,17 @@ const truthy = (v: string | null) => v != null && /^(yes|true|1|y)$/i.test(v.tri
 export function parseBulkAri(xml: string): AriCell[] {
   const cells: AriCell[] = [];
   const x = decodeEntities(xml);
-  const rtRe = /<RoomType\b([^>]*)>([\s\S]*?)<\/RoomType>/gi;
+  // Also accept self-closing <RoomType …/> — with the paired-only pattern an
+  // empty self-closed type would swallow its next sibling (everything up to the
+  // sibling's </RoomType>) and attribute that sibling's days to the wrong code.
+  const rtRe = /<RoomType\b([^>]*?)(?:\/>|>([\s\S]*?)<\/RoomType>)/gi;
   let rt: RegExpExecArray | null;
   while ((rt = rtRe.exec(x))) {
     const code = attr(rt[1], "id");
     if (!code) continue;
     const dayRe = /<Day\b([^>]*)>/gi;
     let d: RegExpExecArray | null;
-    while ((d = dayRe.exec(rt[2]))) {
+    while ((d = dayRe.exec(rt[2] ?? ""))) {
       const a = d[1];
       const mdate = attr(a, "Mdate");
       if (!mdate || mdate.length !== 8) continue;
@@ -146,7 +155,9 @@ export function parseBulkAri(xml: string): AriCell[] {
  */
 export function parseAriErrors(xml: string): string[] {
   const out: string[] = [];
-  const re = /ERR\s?\d+[^<\n]*/gi;
+  // Case-sensitive + word boundary: MiniHotel emits "ERR 310 …" (docs §2.7);
+  // a loose match also fires on free text like "Herr 304 wants late checkout".
+  const re = /\bERR\s?\d+[^<\n]*/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml))) out.push(m[0].trim());
   return out;
@@ -159,7 +170,7 @@ export function parseAriErrors(xml: string): string[] {
 export function extractMiniHotelErrors(text: string): string[] {
   const x = decodeEntities(text);
   const out: string[] = [];
-  const errRe = /ERR\s?\d+[^<\n]*/gi;
+  const errRe = /\bERR\s?\d+[^<\n]*/g;
   let m: RegExpExecArray | null;
   while ((m = errRe.exec(x))) out.push(m[0].trim());
   const tagRe = /<Error\b[^>]*?code="([^"]*)"(?:[^>]*?description="([^"]*)")?[^>]*>/gi;
@@ -232,18 +243,20 @@ export interface GuestsAvailRoom {
 /**
  * Parse an Immediate-ARI response:
  *   <RoomType id …><Inventory Allocation maxavail/><price value …/>…</RoomType>
- * Price = the lowest board value (room-only base); availability = maxavail
- * (falling back to Allocation).
+ * Price = the lowest board value (room-only base); availability = Allocation
+ * ("number of available rooms" per the docs — maxavail is the TOTAL room count,
+ * so reading it as availability marks sold-out nights as open), falling back to
+ * maxavail only when Allocation is absent.
  */
 export function parseGuestsAvail(xml: string): GuestsAvailRoom[] {
   const x = decodeEntities(xml);
   const out: GuestsAvailRoom[] = [];
-  const rtRe = /<RoomType\b([^>]*)>([\s\S]*?)<\/RoomType>/gi;
+  const rtRe = /<RoomType\b([^>]*?)(?:\/>|>([\s\S]*?)<\/RoomType>)/gi;
   let rt: RegExpExecArray | null;
   while ((rt = rtRe.exec(x))) {
     const code = attr(rt[1], "id");
     if (!code) continue;
-    const body = rt[2];
+    const body = rt[2] ?? "";
     let price: number | null = null;
     const pRe = /<price\b([^>]*?)\/?>/gi;
     let p: RegExpExecArray | null;
@@ -254,8 +267,8 @@ export function parseGuestsAvail(xml: string): GuestsAvailRoom[] {
     const inv = body.match(/<Inventory\b([^>]*?)\/?>/i);
     let available: number | null = null;
     if (inv) {
-      available = numAttr(inv[1], "maxavail");
-      if (available == null) available = numAttr(inv[1], "Allocation");
+      available = numAttr(inv[1], "Allocation");
+      if (available == null) available = numAttr(inv[1], "maxavail");
     }
     out.push({ roomType: code, price: price != null ? Math.round(price) : null, available });
   }
@@ -334,7 +347,7 @@ export async function syncFromMiniHotel(opts: {
   xml?: string; // optional captured response — parse this instead of calling MiniHotel
 }): Promise<SyncResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(120, opts.days ?? 60));
   const to = plusDays(from, days - 1);
 
@@ -426,6 +439,133 @@ export async function syncFromMiniHotel(opts: {
     errors,
     note,
   };
+}
+
+// ----------------------------------------------------- write (Reverse ARI)
+export interface RatePushItem {
+  unitId: string;
+  date: string; // YYYY-MM-DD
+  price?: number | null; // null clears the price; undefined leaves it untouched
+  minNights?: number | null;
+  closed?: boolean | null;
+  available?: number | null;
+}
+
+export interface PushResult {
+  ok: boolean;
+  pushed: number; // dates MiniHotel accepted (best-effort)
+  roomTypes: number; // distinct room types in the push
+  warnings: string[];
+  errors: string[];
+  requestId?: string; // X-Request-ID — MiniHotel support needs it to trace issues
+  message?: string; // set when we didn't even attempt (not configured / unmapped / no rate code)
+}
+
+/**
+ * Push manual rate/availability/restriction edits INTO MiniHotel via the Reverse
+ * API (§4.2: POST JSON to /AgentsScreenA/api/Agents/ScreenA, header auth). Each
+ * Hub unit is resolved to its MiniHotel RoomTypeCode via the apartment mapping;
+ * the price is written under the saved rate code (PriceList). Per-date problems
+ * come back as Warnings/Errors and are surfaced, not thrown.
+ */
+export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushResult> {
+  const empty = { pushed: 0, roomTypes: 0, warnings: [] as string[], errors: [] as string[] };
+  const conn = getMiniHotelConnection();
+  if (!conn.username || !conn.password || !conn.hotelId)
+    return { ok: false, ...empty, message: "MiniHotel connection isn't configured (Settings)." };
+  if (!conn.rateCode || conn.rateCode.trim() === "")
+    return {
+      ok: false,
+      ...empty,
+      message: "No price-list (rate) code set — Settings → Find rate code. MiniHotel needs the exact code to write a price.",
+    };
+
+  // Hub unit -> MiniHotel RoomTypeCode, then group the edits by room type.
+  const codeByUnit = new Map<string, string>();
+  for (const m of getMiniHotelMapping()) if (m.roomType) codeByUnit.set(m.unitId, m.roomType.trim());
+  const byType = new Map<string, RatePushItem[]>();
+  const unmapped = new Set<string>();
+  for (const it of items) {
+    const code = codeByUnit.get(it.unitId);
+    if (!code) {
+      unmapped.add(it.unitId);
+      continue;
+    }
+    const arr = byType.get(code);
+    if (arr) arr.push(it);
+    else byType.set(code, [it]);
+  }
+  if (byType.size === 0)
+    return {
+      ok: false,
+      ...empty,
+      message: "This apartment isn't mapped to a MiniHotel room type — set its code in Settings → apartment mapping.",
+    };
+
+  const body = [...byType.entries()].map(([RoomTypeCode, list]) => ({
+    RoomTypeCode,
+    Dates: list.map((it) => {
+      // Omit fields we don't want to change (per the API contract).
+      const d: Record<string, unknown> = { Date: it.date };
+      if (it.available != null) d.Availability = it.available;
+      if (it.minNights != null) d.MinimumNights = it.minNights;
+      if (it.closed != null) d.Close = it.closed;
+      if (it.price != null) d.Rates = [{ PriceList: conn.rateCode, Price: it.price }];
+      return d;
+    }),
+  }));
+
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.reverse, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        User: conn.username,
+        Password: conn.password,
+        hotel_id: conn.hotelId,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const requestId = res.headers.get("X-Request-ID") ?? undefined;
+    const text = await res.text();
+    if (!res.ok)
+      return {
+        ok: false,
+        ...empty,
+        roomTypes: byType.size,
+        errors: [`MiniHotel HTTP ${res.status}: ${text.slice(0, 200)}`],
+        requestId,
+      };
+    let warnings: string[] = [];
+    let errors: string[] = [];
+    try {
+      const j = JSON.parse(text);
+      if (Array.isArray(j?.Warnings)) warnings = j.Warnings.map(String);
+      if (Array.isArray(j?.Errors)) errors = j.Errors.map(String);
+    } catch {
+      // Some responses come back as XML; salvage any <Error>/ERR text.
+      errors = extractMiniHotelErrors(text);
+    }
+    const attempted = items.length - unmapped.size;
+    return {
+      ok: errors.length === 0,
+      pushed: errors.length ? Math.max(0, attempted - errors.length) : attempted,
+      roomTypes: byType.size,
+      warnings,
+      errors,
+      requestId,
+    };
+  } catch (e) {
+    const msg =
+      e instanceof Error ? (e.name === "AbortError" ? "MiniHotel timed out" : e.message) : "push failed";
+    return { ok: false, ...empty, roomTypes: byType.size, errors: [msg] };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ----------------------------------------------------- apartment import
@@ -529,7 +669,7 @@ export async function fetchRoomStatus(conn: MiniHotelConnection): Promise<string
     const res = await fetch(ep.ari, {
       method: "POST",
       headers: { "Content-Type": "application/xml" },
-      body: buildRoomStatusRequest(conn, todayUTC(), plusDays(todayUTC(), 1)),
+      body: buildRoomStatusRequest(conn, todayLocal(), plusDays(todayLocal(), 1)),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -639,7 +779,7 @@ export async function pullAriReservations(opts: {
   xml?: string;
 }): Promise<AriReservationsResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(60, opts.days ?? 35));
   const to = plusDays(from, days - 1);
 
@@ -705,7 +845,7 @@ export async function syncAriOccupancy(opts: {
   xml?: string;
 }): Promise<AriOccupancyResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(60, opts.days ?? 45));
   const to = plusDays(from, days - 1);
 
@@ -727,7 +867,25 @@ export async function syncAriOccupancy(opts: {
     status: r.status,
   }));
   const rooms = parseRoomStatusRooms(xml);
-  const stored = storeAriOccupancy(bookings, rooms);
+  // MiniHotel reports failures inside HTTP-200 bodies. A pull that parsed
+  // nothing AND carried errors is a failed pull, not an empty hotel — storing
+  // it would wipe the previous good snapshot and zero the occupancy KPIs.
+  if (bookings.length === 0 && rooms.length === 0 && errors.length > 0) {
+    const occ = occupancyByMonth();
+    return {
+      ok: false,
+      from,
+      to,
+      bookings: 0,
+      rooms: 0,
+      thisMonth: occ.thisMonth,
+      occupancy: occ.current.occupancy,
+      bookedNights: occ.current.bookedNights,
+      errors,
+      message: `MiniHotel returned an error (${errors[0]}) — kept the previous occupancy snapshot.`,
+    };
+  }
+  const stored = storeAriOccupancy(bookings, rooms, { from, to });
   const occ = occupancyByMonth();
   return {
     ok: true,
@@ -809,7 +967,7 @@ export async function importApartmentsFromMiniHotel(opts: {
     const sources: { label: string; run: () => Promise<string> }[] = [
       { label: "getRoomTypes", run: () => fetchRoomTypes(conn) },
       { label: "roomStatus", run: () => fetchRoomStatus(conn) },
-      { label: "bulkAri", run: () => fetchBulkAri(conn, todayUTC(), plusDays(todayUTC(), 1)) },
+      { label: "bulkAri", run: () => fetchBulkAri(conn, todayLocal(), plusDays(todayLocal(), 1)) },
     ];
     for (const src of sources) {
       try {
@@ -929,6 +1087,23 @@ function xmlField(block: string, names: readonly string[]): string | null {
   return null;
 }
 
+/**
+ * Fallback id for rows the PMS sent without one: derived from the row's content,
+ * not its position in the response — positional ids change whenever the query
+ * window shifts, which turns re-syncs of the same booking into duplicate revenue
+ * rows. An occurrence counter keeps genuinely identical rows distinct (and is
+ * stable, since identical rows are interchangeable).
+ */
+function syntheticId(
+  seen: Map<string, number>,
+  parts: Array<string | number | null | undefined>,
+): string {
+  const base = parts.map((p) => (p == null ? "" : String(p))).join("_");
+  const n = (seen.get(base) ?? 0) + 1;
+  seen.set(base, n);
+  return n === 1 ? base : `${base}#${n}`;
+}
+
 function parseReservationsJson(data: unknown): MiniReservation[] {
   let arr: unknown[] = [];
   if (Array.isArray(data)) arr = data;
@@ -938,6 +1113,7 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
     if (k) arr = o[k] as unknown[];
   }
   const out: MiniReservation[] = [];
+  const seen = new Map<string, number>();
   for (const item of arr) {
     if (!item || typeof item !== "object") continue;
     const o = item as Record<string, unknown>;
@@ -946,13 +1122,14 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
     const gross = normNum(pickCI(o, RF.gross) as string | number);
     if (!checkIn || !checkOut || gross == null) continue;
     const id = pickCI(o, RF.id);
+    const roomNumber = (pickCI(o, RF.roomNumber) as string) || undefined;
     out.push({
-      id: id != null ? String(id) : `${checkIn}_${out.length}`,
+      id: id != null ? String(id) : syntheticId(seen, [checkIn, checkOut, roomNumber, gross]),
       checkIn,
       checkOut,
       gross,
       roomType: (pickCI(o, RF.roomType) as string) || undefined,
-      roomNumber: (pickCI(o, RF.roomNumber) as string) || undefined,
+      roomNumber,
       country: (pickCI(o, RF.country) as string) || undefined,
       status: (pickCI(o, RF.status) as string) || undefined,
       currency: (pickCI(o, RF.currency) as string) || undefined,
@@ -972,6 +1149,16 @@ const firstBlock = (re: RegExp, s: string): string => re.exec(s)?.[1] ?? "";
  */
 function parseBookingsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
+  const seen = new Map<string, number>();
+  // A <Total> amount that is present but EMPTY (group bookings ship
+  // <Total AmountAfterTaxes="" …/> at booking level, §2.5) must read as "no
+  // amount", not 0 — Number("") is 0, which would book the whole stay as ₪0.
+  const amountOf = (totalAttrs: string): number | null => {
+    if (!totalAttrs) return null;
+    const after = attr(totalAttrs, "AmountAfterTaxes");
+    const v = after != null && after.trim() !== "" ? after : attr(totalAttrs, "value");
+    return v != null && v.trim() !== "" ? normNum(v) : null;
+  };
   const re = /<Booking\b([^>]*)>([\s\S]*?)<\/Booking>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml))) {
@@ -980,26 +1167,53 @@ function parseBookingsXml(xml: string): MiniReservation[] {
     const ts = firstBlock(/<Timespan\b([^>]*?)\/?>/i, inner) || firstBlock(/<StayDate\b([^>]*?)\/?>/i, inner);
     const checkIn = normDate(attr(ts, "arrival"));
     const checkOut = normDate(attr(ts, "departure"));
-    // Prefer the booking-level total (ResGlobalInfo); fall back to the first RoomStay total.
-    const totalScope = firstBlock(/<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i, inner) || inner;
-    const total = firstBlock(/<Total\b([^>]*?)\/?>/i, totalScope);
-    const gross = normNum(attr(total, "AmountAfterTaxes") ?? attr(total, "value"));
+    // Whole-stay total: the booking-level <ResGlobalInfo> total when it carries
+    // an amount; otherwise the SUM of the per-<RoomStay> totals (multi-room
+    // group bookings put the money on each room and leave the global total
+    // empty — taking just the first <Total> would drop the other rooms' revenue).
+    const globalScope = firstBlock(/<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i, inner);
+    const globalTotal = globalScope ? firstBlock(/<Total\b([^>]*?)\/?>/i, globalScope) : "";
+    let gross = amountOf(globalTotal);
+    let totalAttrs = globalTotal;
+    if (gross == null) {
+      let sum = 0;
+      let found = false;
+      const rsRe = /<RoomStay\b[^>]*?(?:\/>|>([\s\S]*?)<\/RoomStay>)/gi;
+      let rs: RegExpExecArray | null;
+      while ((rs = rsRe.exec(inner))) {
+        const t = firstBlock(/<Total\b([^>]*?)\/?>/i, rs[1] ?? "");
+        const v = amountOf(t);
+        if (v != null) {
+          sum += v;
+          if (!found) totalAttrs = t;
+          found = true;
+        }
+      }
+      if (found) gross = sum;
+    }
+    if (gross == null) {
+      // Last resort (non-standard shapes): the first <Total> anywhere.
+      const t = firstBlock(/<Total\b([^>]*?)\/?>/i, inner);
+      gross = amountOf(t);
+      totalAttrs = t;
+    }
     if (!checkIn || !checkOut || gross == null) continue;
     const stay = firstBlock(/<RoomStay\b([^>]*?)\/?>/i, inner);
     const country = firstBlock(/<Country\b([^>]*?)\/?>/i, inner);
+    const roomNumber = attr(stay, "roomNumber") || undefined;
     out.push({
       id:
         attr(head, "Minihotel_reservation_id") ||
         attr(head, "Portal_reservation_id") ||
-        `${checkIn}_${out.length}`,
+        syntheticId(seen, [checkIn, checkOut, roomNumber, gross]),
       checkIn,
       checkOut,
       gross,
       roomType: attr(stay, "roomTypeId") || attr(stay, "roomTypeID") || undefined,
-      roomNumber: attr(stay, "roomNumber") || undefined,
+      roomNumber,
       country: attr(country, "iso2") || attr(country, "iso3") || attr(country, "CountryName") || undefined,
       vatFlag: attr(country, "Vat") || attr(head, "Vat") || undefined,
-      currency: attr(total, "CurrencyCode") || undefined,
+      currency: attr(totalAttrs, "CurrencyCode") || attr(globalTotal, "CurrencyCode") || undefined,
       status: attr(head, "Status") || undefined,
     });
   }
@@ -1009,6 +1223,7 @@ function parseBookingsXml(xml: string): MiniReservation[] {
 /** Generic <Reservation>/<Booking>/<Res> fallback for non-standard XML shapes. */
 function parseReservationsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
+  const seen = new Map<string, number>();
   const x = decodeEntities(xml);
   const re = /<(Reservation|Booking|Res)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
   let m: RegExpExecArray | null;
@@ -1019,7 +1234,9 @@ function parseReservationsXml(xml: string): MiniReservation[] {
     const gross = normNum(xmlField(block, RF.gross));
     if (!checkIn || !checkOut || gross == null) continue;
     out.push({
-      id: xmlField(block, RF.id) || `${checkIn}_${out.length}`,
+      id:
+        xmlField(block, RF.id) ||
+        syntheticId(seen, [checkIn, checkOut, xmlField(block, RF.roomNumber), gross]),
       checkIn,
       checkOut,
       gross,
@@ -1077,8 +1294,15 @@ export async function fetchReservations(conn: MiniHotelConnection, from: string,
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
-    const err = text.match(/ERR\s?\d+[^<\n]*/i);
-    if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
+    // Treat an embedded ERR code as fatal only when the response carries no
+    // bookings — reservation payloads are full of free text (guest names,
+    // remarks) that a bare substring match would misread as an error and
+    // abort an otherwise-successful pull.
+    const decoded = decodeEntities(text);
+    if (!/<Booking\b/i.test(decoded)) {
+      const err = decoded.match(/\bERR\s?\d+[^<\n]*/);
+      if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
+    }
     return text;
   } finally {
     clearTimeout(timer);
@@ -1106,7 +1330,7 @@ export async function syncReservationsFromMiniHotel(opts: {
   payload?: string; // captured response — parse this instead of calling MiniHotel
 }): Promise<ReservationSyncResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(370, opts.days ?? 120));
   const to = plusDays(from, days - 1);
 

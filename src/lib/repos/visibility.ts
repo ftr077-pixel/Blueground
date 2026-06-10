@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
-import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
+import { insertSearchResults, pruneLadder, type SearchResultsInput } from "@/lib/repos/search-results";
 import type { CostDefaults } from "@/lib/revenue";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
@@ -280,7 +280,15 @@ export function updateProfile(id: string, patch: Partial<ProfileInput>): void {
 export function deleteProfile(id: string): void {
   const db = getDb();
   const tx = db.transaction(() => {
-    db.prepare("DELETE FROM listing_snapshots WHERE profile_id = ?").run(id);
+    // Snapshots are deleted by listing as well as by profile: a listing that was
+    // moved between profiles keeps snapshots stamped with its old profile_id,
+    // and those would block the tracked_listings delete via the FK.
+    db.prepare(
+      "DELETE FROM listing_snapshots WHERE profile_id = ? OR listing_id IN (SELECT id FROM tracked_listings WHERE profile_id = ?)",
+    ).run(id, id);
+    // The competitor price ladder references the profile too — without this the
+    // profile delete always fails the FK check (the seed alone guarantees rows).
+    db.prepare("DELETE FROM search_results WHERE profile_id = ?").run(id);
     db.prepare("DELETE FROM tracked_listings WHERE profile_id = ?").run(id);
     db.prepare("DELETE FROM search_profiles WHERE id = ?").run(id);
   });
@@ -627,6 +635,13 @@ export function recordRun(input: RecordRunInput): number {
     }
   });
   tx();
+  // Housekeeping: downsample+delete raw ladder rows past retention (daily guard;
+  // never let it break an ingest).
+  try {
+    pruneLadder();
+  } catch {
+    // ignore — retention is best-effort
+  }
   return input.snapshots.length;
 }
 
@@ -756,7 +771,11 @@ export function getScanState(): ScanState {
   let running = !!started;
   if (started) {
     const age = Date.now() - new Date(started).getTime();
-    if (Number.isNaN(age) || age > 30 * 60 * 1000) running = false; // stale-run guard
+    // Stale-run guard. Generous on purpose: a full portfolio scan (per-listing
+    // calendar fetches + paced searches) legitimately runs well past 30 minutes,
+    // and declaring it dead lets a second concurrent scraper start against the
+    // same proxy. A genuinely crashed scan is cleared via the Cancel button.
+    if (Number.isNaN(age) || age > 3 * 60 * 60 * 1000) running = false;
   }
   return {
     running,
@@ -1016,6 +1035,9 @@ export function marketRateBands(): RateBand[] {
         currency: r.currency ?? "ILS",
         nightly: [],
       };
+    // Don't mix currencies inside one band — a stray USD snapshot among ILS
+    // rows would skew the percentiles while the band stays labeled ILS.
+    if ((r.currency ?? "ILS") !== g.currency) continue;
     g.nightly.push(r.price / r.nights);
     groups.set(key, g);
   }

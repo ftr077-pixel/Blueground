@@ -34,6 +34,7 @@ export function PricingRulesCard() {
   const [r, setR] = useState<Rules>(DEFAULTS);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/visibility/settings", { cache: "no-store" })
@@ -67,8 +68,9 @@ export function PricingRulesCard() {
 
   async function save() {
     setBusy(true);
+    setErr(null);
     try {
-      await fetch("/api/visibility/settings", {
+      const res = await fetch("/api/visibility/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -84,8 +86,11 @@ export function PricingRulesCard() {
           },
         }),
       });
+      if (!res.ok) throw new Error(`save failed (${res.status})`);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "save failed");
     } finally {
       setBusy(false);
     }
@@ -116,6 +121,7 @@ export function PricingRulesCard() {
           <button type="button" disabled={busy} onClick={save} className={btn}>
             {saved ? "Saved ✓" : "Save"}
           </button>
+          {err && <span className="self-center text-[11px] text-[hsl(var(--danger))]">{err}</span>}
         </div>
       </CardContent>
     </Card>
