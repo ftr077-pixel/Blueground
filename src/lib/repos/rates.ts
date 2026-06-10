@@ -471,6 +471,9 @@ export function rebaseFuturePrices(
 ): { date: string; price: number }[] {
   const unit = listUnits().find((u) => u.id === unitId);
   if (!unit) throw new Error("unknown unit");
+  // No anchor -> nothing to derive from. Without this, basePrice() would fall
+  // back to its ₪600 default and a bulk push would flatten real PMS prices.
+  if (!((unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0)) return [];
 
   const from = hotelToday();
   const fromIdx = dayIndex(from);
