@@ -155,17 +155,20 @@ export function MiniHotelCard() {
     }
   }
 
-  // Pull reservations from MiniHotel into the P&L. Uses a wide arrival window so
-  // stays already in-house this month are caught, then reads back this month's net.
+  // Pull reservations from MiniHotel into the P&L, then read back this month's
+  // net. The window is the server's default (~7 months back through ~4 months
+  // forward) so every booking still shaping the P&L — including in-house stays
+  // that got extended, shortened or re-priced — is re-read, and cancellations
+  // are swept. Don't narrow it here: a client-side window silently re-freezes
+  // old bookings at their first-captured price.
   async function pullReservations() {
     setBusy(true);
     setPull(null);
     try {
-      const from = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
       const sync = await fetch("/api/reservations/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from, days: 150 }),
+        body: JSON.stringify({}),
       }).then((r) => r.json());
       if (!sync.ok) {
         setPull({ ok: false, message: sync.message || "sync failed" });
