@@ -441,6 +441,133 @@ export async function syncFromMiniHotel(opts: {
   };
 }
 
+// ----------------------------------------------------- write (Reverse ARI)
+export interface RatePushItem {
+  unitId: string;
+  date: string; // YYYY-MM-DD
+  price?: number | null; // null clears the price; undefined leaves it untouched
+  minNights?: number | null;
+  closed?: boolean | null;
+  available?: number | null;
+}
+
+export interface PushResult {
+  ok: boolean;
+  pushed: number; // dates MiniHotel accepted (best-effort)
+  roomTypes: number; // distinct room types in the push
+  warnings: string[];
+  errors: string[];
+  requestId?: string; // X-Request-ID — MiniHotel support needs it to trace issues
+  message?: string; // set when we didn't even attempt (not configured / unmapped / no rate code)
+}
+
+/**
+ * Push manual rate/availability/restriction edits INTO MiniHotel via the Reverse
+ * API (§4.2: POST JSON to /AgentsScreenA/api/Agents/ScreenA, header auth). Each
+ * Hub unit is resolved to its MiniHotel RoomTypeCode via the apartment mapping;
+ * the price is written under the saved rate code (PriceList). Per-date problems
+ * come back as Warnings/Errors and are surfaced, not thrown.
+ */
+export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushResult> {
+  const empty = { pushed: 0, roomTypes: 0, warnings: [] as string[], errors: [] as string[] };
+  const conn = getMiniHotelConnection();
+  if (!conn.username || !conn.password || !conn.hotelId)
+    return { ok: false, ...empty, message: "MiniHotel connection isn't configured (Settings)." };
+  if (!conn.rateCode || conn.rateCode.trim() === "")
+    return {
+      ok: false,
+      ...empty,
+      message: "No price-list (rate) code set — Settings → Find rate code. MiniHotel needs the exact code to write a price.",
+    };
+
+  // Hub unit -> MiniHotel RoomTypeCode, then group the edits by room type.
+  const codeByUnit = new Map<string, string>();
+  for (const m of getMiniHotelMapping()) if (m.roomType) codeByUnit.set(m.unitId, m.roomType.trim());
+  const byType = new Map<string, RatePushItem[]>();
+  const unmapped = new Set<string>();
+  for (const it of items) {
+    const code = codeByUnit.get(it.unitId);
+    if (!code) {
+      unmapped.add(it.unitId);
+      continue;
+    }
+    const arr = byType.get(code);
+    if (arr) arr.push(it);
+    else byType.set(code, [it]);
+  }
+  if (byType.size === 0)
+    return {
+      ok: false,
+      ...empty,
+      message: "This apartment isn't mapped to a MiniHotel room type — set its code in Settings → apartment mapping.",
+    };
+
+  const body = [...byType.entries()].map(([RoomTypeCode, list]) => ({
+    RoomTypeCode,
+    Dates: list.map((it) => {
+      // Omit fields we don't want to change (per the API contract).
+      const d: Record<string, unknown> = { Date: it.date };
+      if (it.available != null) d.Availability = it.available;
+      if (it.minNights != null) d.MinimumNights = it.minNights;
+      if (it.closed != null) d.Close = it.closed;
+      if (it.price != null) d.Rates = [{ PriceList: conn.rateCode, Price: it.price }];
+      return d;
+    }),
+  }));
+
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.reverse, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        User: conn.username,
+        Password: conn.password,
+        hotel_id: conn.hotelId,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const requestId = res.headers.get("X-Request-ID") ?? undefined;
+    const text = await res.text();
+    if (!res.ok)
+      return {
+        ok: false,
+        ...empty,
+        roomTypes: byType.size,
+        errors: [`MiniHotel HTTP ${res.status}: ${text.slice(0, 200)}`],
+        requestId,
+      };
+    let warnings: string[] = [];
+    let errors: string[] = [];
+    try {
+      const j = JSON.parse(text);
+      if (Array.isArray(j?.Warnings)) warnings = j.Warnings.map(String);
+      if (Array.isArray(j?.Errors)) errors = j.Errors.map(String);
+    } catch {
+      // Some responses come back as XML; salvage any <Error>/ERR text.
+      errors = extractMiniHotelErrors(text);
+    }
+    const attempted = items.length - unmapped.size;
+    return {
+      ok: errors.length === 0,
+      pushed: errors.length ? Math.max(0, attempted - errors.length) : attempted,
+      roomTypes: byType.size,
+      warnings,
+      errors,
+      requestId,
+    };
+  } catch (e) {
+    const msg =
+      e instanceof Error ? (e.name === "AbortError" ? "MiniHotel timed out" : e.message) : "push failed";
+    return { ok: false, ...empty, roomTypes: byType.size, errors: [msg] };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ----------------------------------------------------- apartment import
 export interface RoomTypeInfo {
   code: string;

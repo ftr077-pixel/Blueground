@@ -6,8 +6,10 @@ import {
   unitExists,
   type OverridePatch,
   type RangeOverride,
+  type AppliedCell,
 } from "@/lib/repos/rates";
 import { logActivity } from "@/lib/repos/activity";
+import { pushRatesToMiniHotel, type PushResult } from "@/lib/integrations/minihotel";
 
 export const dynamic = "force-dynamic";
 
@@ -110,14 +112,26 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "nothing to update" }, { status: 400 });
     }
 
-    let nights: number;
+    let applied: { nights: number; written: AppliedCell[] };
     try {
-      nights = applyOverrideRange(range).nights;
+      applied = applyOverrideRange(range);
     } catch (e) {
       return NextResponse.json(
         { error: e instanceof Error ? e.message : "range update failed" },
         { status: 400 },
       );
+    }
+    const nights = applied.nights;
+
+    // Push the written nights to MiniHotel (Reverse ARI). Skip on clear, and skip
+    // nights that only changed local-only guardrails (min/max price) with nothing
+    // MiniHotel can store. Local save already happened; the push result is surfaced.
+    let push: PushResult | undefined;
+    if (!range.clear) {
+      const items = applied.written
+        .map((w) => ({ unitId, date: w.date, price: w.price, minNights: w.minNights, closed: w.closed }))
+        .filter((w) => w.price != null || w.minNights != null || w.closed != null);
+      if (items.length) push = await pushRatesToMiniHotel(items);
     }
 
     const parts: string[] = [];
@@ -131,14 +145,19 @@ export async function PATCH(req: Request) {
     if (range.closed !== undefined && range.closed !== null)
       parts.push(range.closed ? "closed" : "opened");
     const dowTxt = dow && dow.length ? ` (${dow.map((d) => "SMTWTFS"[d]).join("")})` : "";
+    const pushTxt = !push
+      ? "staged locally"
+      : push.ok
+        ? `pushed ${push.pushed} night(s) to MiniHotel`
+        : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
     logActivity({
       department: "revenue",
       worker: "Pricing Specialist",
-      message: `Rates Calendar · ${unitId} ${from}→${to}${dowTxt}: ${parts.join(", ")} — ${nights} night(s) (staged locally, not yet pushed to MiniHotel).`,
-      level: "info",
+      message: `Rates Calendar · ${unitId} ${from}→${to}${dowTxt}: ${parts.join(", ")} — ${nights} night(s) (${pushTxt}).`,
+      level: push && !push.ok ? "warning" : "success",
     });
 
-    return NextResponse.json({ ok: true, nights });
+    return NextResponse.json({ ok: true, nights, push });
   }
 
   // ---- legacy single-date shape: { unitId, date, ... } ------------------------
@@ -161,16 +180,25 @@ export async function PATCH(req: Request) {
 
   upsertOverride(unitId, date, patch, "manual");
 
+  // Push the edit straight to MiniHotel (Reverse ARI). The local override is
+  // saved regardless; the push result tells the operator whether it went live.
+  const push = await pushRatesToMiniHotel([
+    { unitId, date, price: patch.price, minNights: patch.minNights, closed: patch.closed },
+  ]);
+
   const parts: string[] = [];
   if (patch.price !== undefined && patch.price !== null) parts.push(`rate ₪${patch.price}`);
   if (patch.minNights !== undefined && patch.minNights !== null) parts.push(`min ${patch.minNights}n`);
   if (patch.closed !== undefined) parts.push(patch.closed ? "closed" : "opened");
+  const pushTxt = push.ok
+    ? "pushed to MiniHotel"
+    : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
   logActivity({
     department: "revenue",
     worker: "Pricing Specialist",
-    message: `Rates Calendar · ${unitId} ${date}: ${parts.join(", ")} (manual edit — staged locally, not yet pushed to MiniHotel).`,
-    level: "info",
+    message: `Rates Calendar · ${unitId} ${date}: ${parts.join(", ")} (manual edit — ${pushTxt}).`,
+    level: push.ok ? "success" : "warning",
   });
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, push });
 }

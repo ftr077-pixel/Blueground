@@ -83,6 +83,18 @@ const btnGhost =
   "inline-flex items-center gap-1.5 rounded-md border border-border bg-card h-8 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
 
 const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
+
+// Result of a Reverse-ARI push, as returned by /api/rates.
+type PushInfo = { ok: boolean; pushed?: number; warnings?: string[]; errors?: string[]; message?: string };
+function pushStatusMsg(p: PushInfo): { ok: boolean; text: string } {
+  if (p.ok) {
+    const w = p.warnings && p.warnings.length ? ` (warnings: ${p.warnings.slice(0, 2).join("; ")})` : "";
+    return { ok: true, text: `Pushed ${p.pushed ?? 0} night(s) to MiniHotel${w}.` };
+  }
+  const reason = p.message || (p.errors && p.errors.length ? p.errors.slice(0, 2).join(" | ") : "unknown error");
+  return { ok: false, text: `Saved locally, but NOT pushed to MiniHotel: ${reason}` };
+}
+
 // Hotel-local (Asia/Jerusalem) today — the calendar tracks Tel Aviv nights, and
 // UTC would show yesterday as "today" for the first 2-3 hours of each local day.
 const todayLocal = () =>
@@ -160,8 +172,14 @@ export function RateCalendar() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const d = (await res.json().catch(() => ({}))) as { error?: string; nights?: number };
+      const d = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        nights?: number;
+        push?: PushInfo;
+      };
       if (!res.ok) throw new Error(d.error || `request failed (${res.status})`);
+      // Surface whether the edit actually reached MiniHotel (Reverse ARI).
+      setSyncMsg(d.push ? pushStatusMsg(d.push) : null);
       await refresh();
       return d.nights ?? 0;
     } finally {
@@ -436,8 +454,8 @@ export function RateCalendar() {
           </div>
           <p className="text-[11px] text-muted-foreground">
             Click any night to open Date Specific Overrides — set a fixed or percent price, min/max
-            bounds, minimum stay, or close a whole date range. Edits are staged locally — wiring the
-            push to MiniHotel (Reverse ARI) is the next step.
+            bounds, minimum stay, or close a whole date range. Price, min-nights and closures are
+            pushed straight to MiniHotel (Reverse ARI) on save; min/max bounds are local guardrails.
           </p>
         </CardHeader>
         <CardContent>
