@@ -456,6 +456,8 @@ export interface PushResult {
   ok: boolean;
   pushed: number; // dates MiniHotel accepted (best-effort)
   roomTypes: number; // distinct room types in the push
+  /** Units in the request with no MiniHotel room-type mapping (skipped). */
+  unmappedUnits: number;
   warnings: string[];
   errors: string[];
   requestId?: string; // X-Request-ID — MiniHotel support needs it to trace issues
@@ -470,7 +472,13 @@ export interface PushResult {
  * come back as Warnings/Errors and are surfaced, not thrown.
  */
 export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushResult> {
-  const empty = { pushed: 0, roomTypes: 0, warnings: [] as string[], errors: [] as string[] };
+  const empty = {
+    pushed: 0,
+    roomTypes: 0,
+    unmappedUnits: 0,
+    warnings: [] as string[],
+    errors: [] as string[],
+  };
   const conn = getMiniHotelConnection();
   if (!conn.username || !conn.password || !conn.hotelId)
     return { ok: false, ...empty, message: "MiniHotel connection isn't configured (Settings)." };
@@ -500,6 +508,7 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
     return {
       ok: false,
       ...empty,
+      unmappedUnits: unmapped.size,
       message: "This apartment isn't mapped to a MiniHotel room type — set its code in Settings → apartment mapping.",
     };
 
@@ -538,6 +547,7 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
         ok: false,
         ...empty,
         roomTypes: byType.size,
+        unmappedUnits: unmapped.size,
         errors: [`MiniHotel HTTP ${res.status}: ${text.slice(0, 200)}`],
         requestId,
       };
@@ -551,11 +561,12 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
       // Some responses come back as XML; salvage any <Error>/ERR text.
       errors = extractMiniHotelErrors(text);
     }
-    const attempted = items.length - unmapped.size;
+    const attempted = [...byType.values()].reduce((s, l) => s + l.length, 0);
     return {
       ok: errors.length === 0,
       pushed: errors.length ? Math.max(0, attempted - errors.length) : attempted,
       roomTypes: byType.size,
+      unmappedUnits: unmapped.size,
       warnings,
       errors,
       requestId,
@@ -563,7 +574,7 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
   } catch (e) {
     const msg =
       e instanceof Error ? (e.name === "AbortError" ? "MiniHotel timed out" : e.message) : "push failed";
-    return { ok: false, ...empty, roomTypes: byType.size, errors: [msg] };
+    return { ok: false, ...empty, roomTypes: byType.size, unmappedUnits: unmapped.size, errors: [msg] };
   } finally {
     clearTimeout(timer);
   }
