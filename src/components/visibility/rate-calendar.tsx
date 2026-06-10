@@ -9,8 +9,11 @@ import {
 import {
   Banknote,
   CalendarDays,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronsUpDown,
+  ChevronUp,
   DownloadCloud,
   Loader2,
   Lock,
@@ -124,6 +127,14 @@ const partsUTC = (iso: string) => {
 const apptOrd = (unit: { id: string; name: string }): number =>
   apartmentIdFromUnit(unit) ?? Number.POSITIVE_INFINITY;
 
+// Sortable listing columns (click a header to sort, click again to reverse).
+type SortKey = "listing" | "base" | "occ30" | "occ60" | "occ90" | "rank";
+
+function SortMark({ active, dir }: { active: boolean; dir: 1 | -1 }) {
+  if (!active) return <ChevronsUpDown className="h-3 w-3 opacity-40" />;
+  return dir === 1 ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />;
+}
+
 export function RateCalendar() {
   const [from, setFrom] = useState(todayLocal());
   const [days, setDays] = useState(30);
@@ -135,6 +146,7 @@ export function RateCalendar() {
   const [sel, setSel] = useState<{ unitId: string; date: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "listing", dir: 1 });
   const [diagnosing, setDiagnosing] = useState(false);
   const [diag, setDiag] = useState<DiagResult | null>(null);
 
@@ -156,16 +168,50 @@ export function RateCalendar() {
     return ["all", ...Array.from(s).sort()];
   }, [data]);
 
-  const rows = useMemo(
-    () =>
-      (data?.rows ?? [])
-        .filter((r) => hood === "all" || r.unit.neighborhood === hood)
-        .sort((a, b) => {
-          const d = apptOrd(a.unit) - apptOrd(b.unit);
-          return d !== 0 ? d : a.unit.name.localeCompare(b.unit.name);
-        }),
-    [data, hood],
-  );
+  const toggleSort = (key: SortKey) =>
+    setSort((p) => (p.key === key ? { key, dir: (p.dir * -1) as 1 | -1 } : { key, dir: 1 }));
+
+  const rows = useMemo(() => {
+    // Listing order (apartment ID, unknowns last) is both the default sort and
+    // the tiebreak for every other column.
+    const byListing = (a: RateRow, b: RateRow) => {
+      const an = apptOrd(a.unit);
+      const bn = apptOrd(b.unit);
+      if (an !== bn) return an < bn ? -1 : 1; // Infinity-safe: unnumbered sink last
+      return a.unit.name.localeCompare(b.unit.name);
+    };
+    const val = (r: RateRow): number | null => {
+      switch (sort.key) {
+        case "listing": {
+          const n = apptOrd(r.unit);
+          return Number.isFinite(n) ? n : null; // unnumbered listings always last
+        }
+        case "base": {
+          const b = r.unit.baseRate || r.unit.currentRate;
+          return b > 0 ? b : null;
+        }
+        case "occ30":
+          return r.occ30;
+        case "occ60":
+          return r.occ60;
+        case "occ90":
+          return r.occ90;
+        case "rank":
+          return r.airbnbRank?.found && r.airbnbRank.rank != null ? r.airbnbRank.rank : null;
+      }
+    };
+    return (data?.rows ?? [])
+      .filter((r) => hood === "all" || r.unit.neighborhood === hood)
+      .sort((a, b) => {
+        const va = val(a);
+        const vb = val(b);
+        if (va == null && vb == null) return byListing(a, b);
+        if (va == null) return 1; // missing values sink to the bottom either way
+        if (vb == null) return -1;
+        const d = (va - vb) * sort.dir;
+        return d !== 0 ? d : byListing(a, b);
+      });
+  }, [data, hood, sort]);
 
   const selCell = useMemo(() => {
     if (!sel || !data) return null;
@@ -485,41 +531,82 @@ export function RateCalendar() {
               <thead>
                 <tr>
                   <th className="sticky left-0 z-20 w-48 min-w-[12rem] max-w-[12rem] bg-card px-3 py-2 text-left font-medium text-muted-foreground">
-                    Listing
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 hover:text-foreground"
+                      title="Sort by apartment ID"
+                      onClick={() => toggleSort("listing")}
+                    >
+                      Listing
+                      <SortMark active={sort.key === "listing"} dir={sort.dir} />
+                    </button>
                   </th>
-                  <th
-                    className="sticky left-[12rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
-                    title="Base rate (₪) — the anchor every nightly price builds from"
-                  >
-                    Base
+                  <th className="sticky left-[12rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-0.5 hover:text-foreground"
+                      title="Base rate (₪) — the anchor every nightly price builds from. Click to sort."
+                      onClick={() => toggleSort("base")}
+                    >
+                      Base
+                      <SortMark active={sort.key === "base"} dir={sort.dir} />
+                    </button>
                   </th>
-                  <th
-                    className="sticky left-[17rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
-                    title="Occupancy over the next 30 nights (sold ÷ sellable)"
-                  >
-                    Occ
-                    <div className="text-[9px] font-normal">30N</div>
+                  <th className="sticky left-[17rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                    <button
+                      type="button"
+                      className="inline-flex flex-col items-center hover:text-foreground"
+                      title="Occupancy over the next 30 nights (sold ÷ sellable). Click to sort."
+                      onClick={() => toggleSort("occ30")}
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        Occ
+                        <SortMark active={sort.key === "occ30"} dir={sort.dir} />
+                      </span>
+                      <span className="text-[9px] font-normal">30N</span>
+                    </button>
                   </th>
-                  <th
-                    className="sticky left-[20.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
-                    title="Occupancy over the next 60 nights (sold ÷ sellable)"
-                  >
-                    Occ
-                    <div className="text-[9px] font-normal">60N</div>
+                  <th className="sticky left-[20.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                    <button
+                      type="button"
+                      className="inline-flex flex-col items-center hover:text-foreground"
+                      title="Occupancy over the next 60 nights (sold ÷ sellable). Click to sort."
+                      onClick={() => toggleSort("occ60")}
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        Occ
+                        <SortMark active={sort.key === "occ60"} dir={sort.dir} />
+                      </span>
+                      <span className="text-[9px] font-normal">60N</span>
+                    </button>
                   </th>
-                  <th
-                    className="sticky left-[24rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
-                    title="Occupancy over the next 90 nights (sold ÷ sellable)"
-                  >
-                    Occ
-                    <div className="text-[9px] font-normal">90N</div>
+                  <th className="sticky left-[24rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                    <button
+                      type="button"
+                      className="inline-flex flex-col items-center hover:text-foreground"
+                      title="Occupancy over the next 90 nights (sold ÷ sellable). Click to sort."
+                      onClick={() => toggleSort("occ90")}
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        Occ
+                        <SortMark active={sort.key === "occ90"} dir={sort.dir} />
+                      </span>
+                      <span className="text-[9px] font-normal">90N</span>
+                    </button>
                   </th>
-                  <th
-                    className="sticky left-[27.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground"
-                    title="Latest Airbnb search position for the tracked 1-month stay (visibility tab)"
-                  >
-                    Airbnb
-                    <div className="text-[9px] font-normal">1mo #</div>
+                  <th className="sticky left-[27.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                    <button
+                      type="button"
+                      className="inline-flex flex-col items-center hover:text-foreground"
+                      title="Latest Airbnb search position for the tracked 1-month stay (visibility tab). Click to sort — best position first."
+                      onClick={() => toggleSort("rank")}
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        Airbnb
+                        <SortMark active={sort.key === "rank"} dir={sort.dir} />
+                      </span>
+                      <span className="text-[9px] font-normal">1mo #</span>
+                    </button>
                   </th>
                   {data.dates.map((d) => {
                     const p = partsUTC(d);
