@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  apartmentDisplayParts,
+  apartmentIdFromUnit,
+  apartmentLabel,
+} from "@/lib/apartments";
+import {
   Banknote,
   CalendarDays,
   ChevronLeft,
@@ -82,16 +87,11 @@ const partsUTC = (iso: string) => {
   return { wd: d.getUTCDay(), day: d.getUTCDate(), mon: d.getUTCMonth(), year: d.getUTCFullYear() };
 };
 
-// Each apartment carries an internal ID (encoded in the unit id, e.g. "BG-12")
-// and an address as its name. Show them as "12 · <address>" and order by the ID.
-function apptNum(id: string): number {
-  const m = id.match(/(\d+)/);
-  return m ? parseInt(m[1], 10) : Number.POSITIVE_INFINITY;
-}
-function apptLabel(unit: { id: string; name: string }): string {
-  const n = apptNum(unit.id);
-  return Number.isFinite(n) ? `${n} · ${unit.name}` : unit.name;
-}
+// Rows render as "<apartment ID> · <address>" and sort by that ID. The ID is
+// read from the unit's internal sync name (falling back to the seed id); units
+// whose ID can't be determined show their plain name, unnumbered, at the end.
+const apptOrd = (unit: { id: string; name: string }): number =>
+  apartmentIdFromUnit(unit) ?? Number.POSITIVE_INFINITY;
 
 export function RateCalendar() {
   const [from, setFrom] = useState(todayUTC());
@@ -128,7 +128,7 @@ export function RateCalendar() {
       (data?.rows ?? [])
         .filter((r) => hood === "all" || r.unit.neighborhood === hood)
         .sort((a, b) => {
-          const d = apptNum(a.unit.id) - apptNum(b.unit.id);
+          const d = apptOrd(a.unit) - apptOrd(b.unit);
           return d !== 0 ? d : a.unit.name.localeCompare(b.unit.name);
         }),
     [data, hood],
@@ -312,7 +312,7 @@ export function RateCalendar() {
       {selCell && (
         <EditBar
           key={`${selCell.unit.id}|${selCell.cell.date}`}
-          unitName={apptLabel(selCell.unit)}
+          unitName={apartmentLabel(selCell.unit)}
           cell={selCell.cell}
           defaultMinNights={data.defaultMinNights}
           busy={busy}
@@ -370,10 +370,17 @@ export function RateCalendar() {
                   <tr key={row.unit.id} className="border-t border-border/50">
                     <th className="sticky left-0 z-10 bg-card px-3 py-1.5 text-left align-middle min-w-[12rem]">
                       <div className="font-medium text-foreground leading-tight">
-                        {Number.isFinite(apptNum(row.unit.id)) && (
-                          <span className="mr-1.5 text-muted-foreground tabular-nums">{apptNum(row.unit.id)}</span>
-                        )}
-                        {row.unit.name}
+                        {(() => {
+                          const { num, text } = apartmentDisplayParts(row.unit);
+                          return (
+                            <>
+                              {num != null && (
+                                <span className="mr-1.5 text-muted-foreground tabular-nums">{num}</span>
+                              )}
+                              {text}
+                            </>
+                          );
+                        })()}
                       </div>
                       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         <span>{row.unit.neighborhood}</span>
@@ -392,7 +399,7 @@ export function RateCalendar() {
                             className={`relative h-11 w-14 px-1 leading-tight transition-colors ${cellTone(c)} ${
                               selected ? "ring-2 ring-primary ring-inset" : "hover:brightness-95"
                             }`}
-                            title={`${apptLabel(row.unit)} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
+                            title={`${apartmentLabel(row.unit)} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
                               c.source !== "derived" ? ` · ${c.source}` : ""
                             }`}
                           >
