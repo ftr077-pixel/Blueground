@@ -3,6 +3,7 @@ import {
   getCalendar,
   upsertOverride,
   applyOverrideRange,
+  rebaseFuturePrices,
   unitExists,
   type OverridePatch,
   type RangeOverride,
@@ -73,13 +74,28 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "unknown unit" }, { status: 404 });
     }
     setUnitBaseRate(unitId, rate);
+    // Rebuild every future night from the new anchor (synced prices are
+    // superseded; manual pins and sold/closed nights are left alone), then
+    // push the repriced nights to MiniHotel like any other calendar edit.
+    const repriced = rebaseFuturePrices(unitId);
+    let push: PushResult | undefined;
+    if (repriced.length) {
+      push = await pushRatesToMiniHotel(
+        repriced.map((r) => ({ unitId, date: r.date, price: r.price })),
+      );
+    }
+    const pushTxt = !push
+      ? "no future nights to reprice"
+      : push.ok
+        ? `pushed ${push.pushed} night(s) to MiniHotel`
+        : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
     logActivity({
       department: "revenue",
       worker: "Pricing Specialist",
-      message: `Rates Calendar · ${unitId}: base rate set to ₪${rate} (derived prices and floors/ceilings rebuilt).`,
-      level: "info",
+      message: `Rates Calendar · ${unitId}: base rate set to ₪${rate} — ${repriced.length} future night(s) rebuilt from the new anchor (${pushTxt}).`,
+      level: push && !push.ok ? "warning" : "success",
     });
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, repriced: repriced.length, push });
   }
 
   // ---- range shape: { unitId, from, to, ... } --------------------------------

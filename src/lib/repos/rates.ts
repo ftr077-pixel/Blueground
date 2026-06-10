@@ -456,6 +456,72 @@ export function upsertOverride(
   ).run(merged);
 }
 
+// ------------------------------------------------------------- base-rate rebase
+//
+// When the operator changes a unit's Base, the whole forward calendar must
+// follow (PriceLabs semantics) — including nights currently showing a price
+// synced from MiniHotel, which would otherwise outrank the rebuilt baseline.
+// Manual pins (fixed prices set in Date Specific Overrides), sold nights, and
+// closed nights are left alone. Returns the repriced nights so the caller can
+// push them to MiniHotel.
+
+export function rebaseFuturePrices(
+  unitId: string,
+  horizonDays = 90,
+): { date: string; price: number }[] {
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit) throw new Error("unknown unit");
+
+  const from = hotelToday();
+  const fromIdx = dayIndex(from);
+  const toIdx = fromIdx + horizonDays - 1;
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ?")
+    .all(unitId, from, isoAddDays(from, horizonDays - 1)) as OverrideSql[];
+  const byDate = new Map(rows.map((r) => [r.date, r]));
+  const bookedS = bookedSet(unit, toIdx);
+  const closedS = closedSet(unit, fromIdx, toIdx);
+
+  const out: { date: string; price: number }[] = [];
+  const clearPrice = db.prepare(
+    "UPDATE rate_calendar SET price = NULL, updated_at = ? WHERE unit_id = ? AND date = ?",
+  );
+  const tx = db.transaction(() => {
+    for (let i = 0; i < horizonDays; i++) {
+      const date = isoAddDays(from, i);
+      const idx = fromIdx + i;
+      const o = byDate.get(date);
+      // A manual fixed price is the operator's pin — never rebased.
+      if (o && o.price != null && o.source === "manual") continue;
+      let isBooked = bookedS.has(idx);
+      let isClosed = closedS.has(idx);
+      if (o) {
+        if (o.booked != null) isBooked = o.booked === 1;
+        if (o.closed != null) isClosed = o.closed === 1;
+      }
+      if (isBooked || isClosed) continue;
+
+      let price = basePrice(unit, date, idx); // unit already carries the new base
+      if (o) {
+        if (o.min_price != null && price < o.min_price) price = o.min_price;
+        if (o.max_price != null && price > o.max_price) price = o.max_price;
+        // Synced price is superseded by the new anchor; the derived price shows.
+        if (o.price != null) clearPrice.run(new Date().toISOString(), unitId, date);
+      }
+      out.push({ date, price });
+    }
+    // Rows left with no payload at all are noise (stale source dots) — drop them.
+    db.prepare(
+      `DELETE FROM rate_calendar WHERE unit_id = ? AND price IS NULL AND available IS NULL
+       AND min_nights IS NULL AND closed IS NULL AND booked IS NULL
+       AND min_price IS NULL AND max_price IS NULL AND note IS NULL`,
+    ).run(unitId);
+  });
+  tx();
+  return out;
+}
+
 // ------------------------------------------------------- date-range overrides
 //
 // The Date Specific Overrides panel (PriceLabs-style): one request applies a
