@@ -247,6 +247,19 @@ function init(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_bookings_unit ON bookings(unit_id);
     CREATE INDEX IF NOT EXISTS idx_bookings_arrival ON bookings(arrival);
 
+    -- The market's booking pace (lead-time distribution) per area × stay length,
+    -- supplied by the operator. The benchmark we compare our own pace against
+    -- ("are we behind/ahead of how the market books?"). lead_cdf is JSON:
+    -- [{ leadDays, bookedPct }].
+    CREATE TABLE IF NOT EXISTS market_pace (
+      profile_id       TEXT NOT NULL,
+      nights           INTEGER NOT NULL,
+      median_lead_days REAL,
+      lead_cdf         TEXT,
+      updated_at       TEXT NOT NULL,
+      PRIMARY KEY (profile_id, nights)
+    );
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
@@ -822,6 +835,11 @@ function seedBookings(db: Database.Database) {
       });
     }
     db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_bookings', 'v1')").run();
+    // Link the seeded listing to the seeded unit so the demo bookings attribute
+    // (booking → unit → listing → its scans). Touches only the seed row.
+    db.prepare(
+      "UPDATE tracked_listings SET unit_id = 'BG-2231' WHERE id = 'lst-portmamad' AND unit_id IS NULL",
+    ).run();
   });
   tx();
 }
