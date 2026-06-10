@@ -11,7 +11,10 @@ function median(xs: number[]): number {
 }
 
 // Recency-weighted market ladder observations for a segment (area × stay length ×
-// lead-time bucket) over the training window. Lead = check_in − scan ts.
+// lead-time bucket) over the training window. Lead = check_in − scan DATE: ts is a
+// full timestamp, so without date() the difference is fractional and rows whose
+// calendar lead sits exactly on a bucket boundary (8/15/31/61 days) fall between
+// buckets — and the integer leadBucketOf() used at read time would disagree.
 export function marketObservations(
   seg: SegmentKey,
   bucket: LeadBucket,
@@ -26,8 +29,8 @@ export function marketObservations(
           AND ts >= @cutoff
           AND price_nightly IS NOT NULL AND price_nightly > 0
           AND total > 0
-          AND (julianday(check_in) - julianday(ts)) >= @lmin
-          AND (julianday(check_in) - julianday(ts)) <= @lmax
+          AND (julianday(check_in) - julianday(date(ts))) >= @lmin
+          AND (julianday(check_in) - julianday(date(ts))) <= @lmax
         ORDER BY ts DESC
         LIMIT @cap`,
     )

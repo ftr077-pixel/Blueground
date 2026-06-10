@@ -75,7 +75,10 @@ const btnGhost =
   "inline-flex items-center gap-1.5 rounded-md border border-border bg-card h-8 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
 
 const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
-const todayUTC = () => new Date().toISOString().slice(0, 10);
+// Hotel-local (Asia/Jerusalem) today — the calendar tracks Tel Aviv nights, and
+// UTC would show yesterday as "today" for the first 2-3 hours of each local day.
+const todayLocal = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
 const addDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 const partsUTC = (iso: string) => {
@@ -95,7 +98,7 @@ function apptLabel(unit: { id: string; name: string }): string {
 }
 
 export function RateCalendar() {
-  const [from, setFrom] = useState(todayUTC());
+  const [from, setFrom] = useState(todayLocal());
   const [days, setDays] = useState(30);
   const [hood, setHood] = useState("all");
   const [data, setData] = useState<Calendar | null>(null);
@@ -144,7 +147,7 @@ export function RateCalendar() {
     return row && cell ? { unit: row.unit, cell } : null;
   }, [sel, data]);
 
-  async function save(body: { unitId: string; date: string; price: number; minNights: number; closed: boolean }) {
+  async function save(body: { unitId: string; date: string; price: number | null; minNights: number; closed: boolean }) {
     setBusy(true);
     setError(null);
     try {
@@ -271,7 +274,7 @@ export function RateCalendar() {
         <CardContent className="flex flex-wrap items-end gap-x-4 gap-y-3 p-4">
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             From
-            <input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value || todayUTC())} />
+            <input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value || todayLocal())} />
           </label>
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             Horizon
@@ -297,7 +300,7 @@ export function RateCalendar() {
             <button className={iconBtn} title="Back a week" onClick={() => setFrom((f) => addDays(f, -7))}>
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <button className={`${inputCls} h-8`} onClick={() => setFrom(todayUTC())}>
+            <button className={`${inputCls} h-8`} onClick={() => setFrom(todayLocal())}>
               Today
             </button>
             <button className={iconBtn} title="Forward a week" onClick={() => setFrom((f) => addDays(f, 7))}>
@@ -593,7 +596,7 @@ function EditBar({
   cell: RateCell;
   defaultMinNights: number;
   busy: boolean;
-  onSave: (price: number, minNights: number, closed: boolean) => void;
+  onSave: (price: number | null, minNights: number, closed: boolean) => void;
   onClose: () => void;
 }) {
   const [price, setPrice] = useState(cell.price == null ? "" : String(cell.price));
@@ -602,6 +605,13 @@ function EditBar({
   const num = (s: string, d: number) => {
     const n = parseInt(s, 10);
     return Number.isFinite(n) ? n : d;
+  };
+  // A blank price means "no rate override" (the API clears on null) — NOT ₪0.
+  // Closing an unsynced night used to default the empty field to 0 and stage a
+  // ₪0 nightly rate, with no way back to "no data" from the UI.
+  const priceOrNull = () => {
+    const n = parseInt(price, 10);
+    return Number.isFinite(n) ? Math.max(0, n) : null;
   };
 
   return (
@@ -633,7 +643,7 @@ function EditBar({
           type="button"
           disabled={busy}
           className={btnCls}
-          onClick={() => onSave(Math.max(0, num(price, cell.price ?? 0)), Math.max(1, num(minNights, defaultMinNights)), closed)}
+          onClick={() => onSave(priceOrNull(), Math.max(1, num(minNights, defaultMinNights)), closed)}
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
           Save

@@ -76,13 +76,16 @@ const BEDROOM_OPTS = [
   { v: "4", l: "4+ BR" },
 ];
 
+// Plain YYYY-MM-DD strings are split, not parsed via Date(): new Date("…")
+// is UTC midnight, and local getters west of UTC would shift every label a
+// day (and the month series a month). Same approach as analytics-panel.
 const shortDate = (iso: string) => {
-  const d = new Date(iso);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+  const [, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return m && d ? `${m}/${d}` : iso;
 };
 const monthLabel = (iso: string) => {
-  const d = new Date(iso);
-  return `${d.getMonth() + 1}/${String(d.getFullYear()).slice(2)}`;
+  const [y, m] = iso.slice(0, 10).split("-").map(Number);
+  return y && m ? `${m}/${String(y).slice(2)}` : iso;
 };
 const fmtRel = (iso: string) => {
   const h = Math.round((Date.now() - new Date(iso).getTime()) / 3_600_000);

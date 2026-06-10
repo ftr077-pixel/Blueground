@@ -3,7 +3,15 @@ import type { NextRequest } from "next/server";
 
 // Machine-to-machine endpoints the scraper box calls — these carry their own
 // key auth (or are read-only config) and must bypass the browser login.
-const BYPASS = ["/api/visibility/snapshot", "/api/visibility/config", "/api/rates/snapshot", "/api/market/sync"];
+const BYPASS = [
+  "/api/visibility/snapshot",
+  "/api/visibility/config",
+  "/api/rates/snapshot",
+  // The reservations reader mirrors /api/rates/snapshot (x-scraper-key auth);
+  // without the bypass, Basic auth 401s the box job and revenue actuals never land.
+  "/api/reservations/snapshot",
+  "/api/market/sync",
+];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

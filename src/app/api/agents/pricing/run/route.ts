@@ -4,7 +4,15 @@ import { runPricingPass } from "@/lib/agents/pricing-specialist";
 export const dynamic = "force-dynamic";
 
 export async function POST() {
-  const result = runPricingPass();
+  let result;
+  try {
+    result = runPricingPass();
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "pricing pass failed" },
+      { status: 500 },
+    );
+  }
   return NextResponse.json({
     ranAt: result.ranAt,
     summary: {
@@ -13,6 +21,7 @@ export async function POST() {
       flagged: result.flagged.length,
       noOps: result.noOps.length,
       skipped: result.skipped.length,
+      alreadyPending: result.alreadyPending.length,
     },
     decisions: result.decisions.map((d) => ({
       unit: { id: d.unitId, name: d.unitName, neighborhood: d.neighborhood },

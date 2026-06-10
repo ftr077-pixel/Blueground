@@ -64,9 +64,24 @@ function ListingRow({
   const [rent, setRent] = useState(l.monthlyRent != null ? String(l.monthlyRent) : "");
   const [util, setUtil] = useState(l.utilities != null ? String(l.utilities) : "");
   const [clean, setClean] = useState(l.cleaningFee != null ? String(l.cleaningFee) : "");
+  // Resync drafts when the listing itself changes server-side (e.g. the bulk
+  // "Import rent & address" finished while rows were expanded) — without this,
+  // tabbing through a row would blur-write the stale pre-import values back.
+  useEffect(() => setName(l.label), [l.label]);
+  useEffect(() => setGuests(l.guests != null ? String(l.guests) : ""), [l.guests]);
+  useEffect(() => setDates(l.startDates ? l.startDates.join(", ") : ""), [l.startDates]);
+  useEffect(() => setAddress(l.address ?? ""), [l.address]);
+  useEffect(() => setRent(l.monthlyRent != null ? String(l.monthlyRent) : ""), [l.monthlyRent]);
+  useEffect(() => setUtil(l.utilities != null ? String(l.utilities) : ""), [l.utilities]);
+  useEffect(() => setClean(l.cleaningFee != null ? String(l.cleaningFee) : ""), [l.cleaningFee]);
   const parseNum = (s: string) => {
     const n = parseFloat(s);
     return s.trim() && Number.isFinite(n) ? n : null;
+  };
+  // Only PATCH when the value actually changed — every field used to write (and
+  // trigger a full refresh) on every blur, even just tabbing through.
+  const patchIf = (changed: boolean, body: Record<string, unknown>) => {
+    if (changed) onPatch(l.id, body);
   };
 
   return (
@@ -91,14 +106,17 @@ function ListingRow({
         placeholder="Address"
         title="Address"
         onChange={(e) => setAddress(e.target.value)}
-        onBlur={() => onPatch(l.id, { address: address.trim() || null })}
+        onBlur={() => patchIf((address.trim() || null) !== (l.address ?? null), { address: address.trim() || null })}
       />
       <input
         className={`${input} w-14`}
         value={guests}
         placeholder={profile ? String(profile.guests) : "2"}
         onChange={(e) => setGuests(e.target.value)}
-        onBlur={() => onPatch(l.id, { guests: guests.trim() ? parseInt(guests, 10) : null })}
+        onBlur={() => {
+          const v = guests.trim() ? parseInt(guests, 10) : null;
+          patchIf(v !== l.guests, { guests: v });
+        }}
         title="Guests (blank = profile default)"
       />
       <input
@@ -106,13 +124,10 @@ function ListingRow({
         value={dates}
         placeholder={profile && profile.startDates.length ? profile.startDates.join(", ") : "profile dates"}
         onChange={(e) => setDates(e.target.value)}
-        onBlur={() =>
-          onPatch(l.id, {
-            startDates: dates.trim()
-              ? dates.split(",").map((s) => s.trim()).filter(Boolean)
-              : null,
-          })
-        }
+        onBlur={() => {
+          const v = dates.trim() ? dates.split(",").map((s) => s.trim()).filter(Boolean) : null;
+          patchIf((v?.join(", ") ?? "") !== (l.startDates?.join(", ") ?? ""), { startDates: v });
+        }}
         title="Check-in dates (blank = profile default)"
       />
       <input
@@ -121,7 +136,7 @@ function ListingRow({
         placeholder="Rent/mo"
         title="Monthly rent (your cost)"
         onChange={(e) => setRent(e.target.value)}
-        onBlur={() => onPatch(l.id, { monthlyRent: parseNum(rent) })}
+        onBlur={() => patchIf(parseNum(rent) !== l.monthlyRent, { monthlyRent: parseNum(rent) })}
       />
       <input
         className={`${input} w-20`}
@@ -129,7 +144,7 @@ function ListingRow({
         placeholder={`${defaultUtilities}`}
         title="Monthly utilities (blank = default)"
         onChange={(e) => setUtil(e.target.value)}
-        onBlur={() => onPatch(l.id, { utilities: parseNum(util) })}
+        onBlur={() => patchIf(parseNum(util) !== l.utilities, { utilities: parseNum(util) })}
       />
       <input
         className={`${input} w-20`}
@@ -137,7 +152,7 @@ function ListingRow({
         placeholder={`${defaultCleaning}`}
         title="Cleaning fee per stay (blank = default)"
         onChange={(e) => setClean(e.target.value)}
-        onBlur={() => onPatch(l.id, { cleaningFee: parseNum(clean) })}
+        onBlur={() => patchIf(parseNum(clean) !== l.cleaningFee, { cleaningFee: parseNum(clean) })}
       />
       <button
         type="button"
@@ -232,7 +247,7 @@ export function ManagePanel() {
     setBusy(true);
     setError(null);
     try {
-      await fetch("/api/visibility/settings", {
+      const res = await fetch("/api/visibility/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -241,6 +256,7 @@ export function ManagePanel() {
           primaryStay: parseInt(primaryStay, 10) || 30,
         }),
       });
+      if (!res.ok) throw new Error(`save failed (${res.status})`);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {

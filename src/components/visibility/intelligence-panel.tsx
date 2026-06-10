@@ -125,7 +125,11 @@ export function IntelligencePanel() {
     setCheckIn((c) => (checkIns.includes(c) ? c : checkIns[0] ?? ""));
   }, [checkIns]);
 
-  // Fetch the recommendation whenever the selection changes.
+  // Fetch the recommendation whenever the selection changes. Selection changes
+  // fire this twice in quick succession (listing change → stay reset), so stale
+  // responses are dropped; errors clear on the next success rather than
+  // replacing the whole panel (which would unmount the very selectors needed
+  // to recover from e.g. a transient 500).
   useEffect(() => {
     if (!listingId) return;
     const params = new URLSearchParams({
@@ -134,14 +138,25 @@ export function IntelligencePanel() {
       targetPage: String(targetPage),
     });
     if (checkIn) params.set("checkIn", checkIn);
+    let stale = false;
     fetch(`/api/learning/elasticity?${params}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
-      .then((b: Elasticity) => setData(b))
-      .catch((e) => setErr(e instanceof Error ? e.message : "failed to load"));
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`request failed (${r.status})`))))
+      .then((b: Elasticity) => {
+        if (stale) return;
+        setData(b);
+        setErr(null);
+      })
+      .catch((e) => {
+        if (!stale) setErr(e instanceof Error ? e.message : "failed to load");
+      });
+    return () => {
+      stale = true;
+    };
   }, [listingId, nights, checkIn, targetPage]);
 
   if (loading) return <p className="text-xs text-muted-foreground">Loading…</p>;
-  if (err) return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
+  if (err && !listings.length)
+    return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
   if (!listings.length)
     return <p className="text-[11px] text-muted-foreground">No listings tracked yet.</p>;
 
@@ -198,6 +213,11 @@ export function IntelligencePanel() {
         </label>
       </div>
 
+      {err && (
+        <p className="text-[11px] text-[hsl(var(--danger))]">
+          Couldn’t load the recommendation ({err}) — change the selection to retry.
+        </p>
+      )}
       {data && <Recommendation data={data} confBadge={confBadge} />}
       {data && <CurveCard data={data} />}
     </div>

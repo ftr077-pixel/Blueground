@@ -1,5 +1,5 @@
 import { logActivity } from "@/lib/repos/activity";
-import { createApprovalItem } from "@/lib/repos/action-center";
+import { createApprovalItem, listPending } from "@/lib/repos/action-center";
 import {
   listUnits,
   recordPricing,
@@ -27,7 +27,8 @@ export interface PricingDecision {
   reason: string;
   signals: Record<string, unknown>;
   status: PricingHistoryRow["status"];
-  history: PricingHistoryRow;
+  /** Audit row — absent for no-ops (not written, per config) and for moves already awaiting approval. */
+  history?: PricingHistoryRow;
   /** Whether the price was pinned by the floor/ceiling/override. */
   bound: "floor" | "ceiling" | "override" | null;
   effectiveMonthlyRate: number;
@@ -48,6 +49,8 @@ export interface PricingRunResult {
   noOps: PricingDecision[];
   /** Unit ids skipped because they have no rate yet (imported, not rate-synced). */
   skipped: string[];
+  /** Unit ids whose move was NOT re-filed because an escalation is already awaiting a decision. */
+  alreadyPending: string[];
 }
 
 const fpct = (f: number) => `${f >= 1 ? "+" : ""}${((f - 1) * 100).toFixed(1)}%`;
@@ -64,6 +67,19 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
   const units = listUnits();
   const decisions: PricingDecision[] = [];
   const skipped: string[] = [];
+  const alreadyPending: string[] = [];
+
+  // Units with an escalation still awaiting a decision: re-filing the same move
+  // every pass would stack one duplicate Action-Center item per run. Items carry
+  // the unit id in their payload; the prefix match covers items filed before
+  // payloads existed.
+  const pendingItems = listPending();
+  const hasOpenEscalation = (unitId: string, unitName: string) =>
+    pendingItems.some(
+      (p) =>
+        (p.payload as { kind?: string; unitId?: string } | null)?.unitId === unitId ||
+        (p.worker === "Pricing Specialist" && p.proposedAction.startsWith(`Move ${unitName} from `)),
+    );
 
   for (const unit of units) {
     // Units imported but not yet rate-synced (e.g. fresh MiniHotel imports) have
@@ -110,20 +126,28 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
       lowestMinStay: unit.lowestMinStay,
     };
 
+    const isNoOp = absDelta < NO_OP_PCT;
     let status: PricingDecision["status"] = "applied";
-    if (absDelta < NO_OP_PCT) status = "applied"; // no-op-ish; writes skipped below
-    else if (absDelta > HUMAN_GATE_PCT) status = "pending_approval";
+    if (absDelta > HUMAN_GATE_PCT) status = "pending_approval";
 
-    const history = recordPricing({
-      unitId: unit.id,
-      oldRate: unit.currentRate,
-      newRate,
-      deltaPct,
-      reason,
-      signals,
-      status,
-      ts: ranAt,
-    });
+    const escalationOpen = status === "pending_approval" && hasOpenEscalation(unit.id, unit.name);
+
+    // History is the audit trail of things that happened: no-ops are not written
+    // (per config — nothing moved), and a move already sitting in the Action
+    // Center isn't re-recorded each pass.
+    const history =
+      isNoOp || escalationOpen
+        ? undefined
+        : recordPricing({
+            unitId: unit.id,
+            oldRate: unit.currentRate,
+            newRate,
+            deltaPct,
+            reason,
+            signals,
+            status,
+            ts: ranAt,
+          });
 
     const decision: PricingDecision = {
       unitId: unit.id,
@@ -157,7 +181,7 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
       });
     }
 
-    if (status === "applied" && absDelta >= NO_OP_PCT) {
+    if (status === "applied" && !isNoOp) {
       setUnitRate(unit.id, newRate, ranAt);
       logActivity({
         department: "revenue",
@@ -165,7 +189,10 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
         message: `${unit.name} (${unit.neighborhood}) rate ${decision.oldRate}→${newRate} ILS (${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}%). ${reason}`,
         level: deltaPct >= 0 ? "success" : "info",
       });
-    } else if (status === "pending_approval") {
+    } else if (status === "pending_approval" && escalationOpen) {
+      // Same move, still awaiting the operator — don't re-file or re-log it.
+      alreadyPending.push(unit.id);
+    } else if (status === "pending_approval" && history) {
       const item = createApprovalItem({
         department: "revenue",
         worker: "Pricing Specialist",
@@ -174,6 +201,8 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
         blastRadius: absDelta >= HIGH_BLAST_PCT ? "high" : "medium",
         amount: `${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}% (above ${HUMAN_GATE_PCT}% ceiling)`,
         rule: `spec.md §5 — pricing move > ±${HUMAN_GATE_PCT}%`,
+        // Carries what "approve" must execute — the Action Center applies it on decision.
+        payload: { kind: "pricing_move", unitId: unit.id, newRate, historyId: history.id },
       });
       logActivity({
         department: "revenue",
@@ -191,5 +220,6 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
     applied: decisions.filter((d) => d.status === "applied" && Math.abs(d.deltaPct) >= NO_OP_PCT),
     noOps: decisions.filter((d) => Math.abs(d.deltaPct) < NO_OP_PCT),
     skipped,
+    alreadyPending,
   };
 }

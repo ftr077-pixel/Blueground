@@ -10,13 +10,18 @@ import { logActivity } from "@/lib/repos/activity";
 export const dynamic = "force-dynamic";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const todayUTC = () => new Date().toISOString().slice(0, 10);
+// Hotel-local (Asia/Jerusalem) today — UTC would start the calendar on
+// yesterday for the first 2-3 hours of each Israeli day.
+const todayLocal = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const from = (url.searchParams.get("from") || todayUTC()).slice(0, 10);
+  const from = (url.searchParams.get("from") || todayLocal()).slice(0, 10);
   const days = Math.max(7, Math.min(120, parseInt(url.searchParams.get("days") || "35", 10) || 35));
-  if (!DATE_RE.test(from)) {
+  // Format AND validity: "2026-02-30" passes the regex but Date.parse NaNs,
+  // which would throw deep in the calendar math and surface as a 500.
+  if (!DATE_RE.test(from) || !Number.isFinite(Date.parse(from + "T00:00:00Z"))) {
     return NextResponse.json({ error: "bad 'from' date (YYYY-MM-DD)" }, { status: 400 });
   }
   return NextResponse.json(getCalendar(from, days));

@@ -43,22 +43,39 @@ export async function POST(req: Request) {
     const c = raw as {
       unitId?: string;
       date?: string;
-      price?: number;
-      available?: number;
-      minNights?: number;
-      closed?: boolean;
-      booked?: boolean;
+      price?: number | null;
+      available?: number | null;
+      minNights?: number | null;
+      closed?: boolean | null;
+      booked?: boolean | null;
     };
     if (!c.unitId || !c.date || !DATE_RE.test(c.date) || !unitExists(c.unitId)) {
       skipped++;
       continue;
     }
+    // Coerce/validate every field (mirroring the PATCH handler; null stays an
+    // explicit "clear this override"): the payload is external input, and
+    // binding a string/NaN throws — failing the whole batch — while a NaN that
+    // slips through stores NULL over real data.
     const patch: OverridePatch = {};
-    if (c.price !== undefined) patch.price = c.price;
-    if (c.available !== undefined) patch.available = c.available;
-    if (c.minNights !== undefined) patch.minNights = c.minNights;
-    if (c.closed !== undefined) patch.closed = c.closed;
-    if (c.booked !== undefined) patch.booked = c.booked;
+    if (c.price === null) patch.price = null;
+    else if (c.price !== undefined && Number.isFinite(Number(c.price))) {
+      patch.price = Math.max(0, Math.round(Number(c.price)));
+    }
+    if (c.available === null) patch.available = null;
+    else if (c.available !== undefined && Number.isFinite(Number(c.available))) {
+      patch.available = Math.max(0, Math.round(Number(c.available)));
+    }
+    if (c.minNights === null) patch.minNights = null;
+    else if (c.minNights !== undefined && Number.isFinite(Number(c.minNights))) {
+      patch.minNights = Math.max(1, Math.round(Number(c.minNights)));
+    }
+    if (c.closed !== undefined) patch.closed = c.closed === null ? null : !!c.closed;
+    if (c.booked !== undefined) patch.booked = c.booked === null ? null : !!c.booked;
+    if (Object.keys(patch).length === 0) {
+      skipped++;
+      continue;
+    }
     upsertOverride(c.unitId, c.date, patch, "minihotel");
     recorded++;
   }
