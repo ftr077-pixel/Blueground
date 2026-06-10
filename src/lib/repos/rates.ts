@@ -388,7 +388,15 @@ export interface RangeOverride {
 
 export const MAX_RANGE_NIGHTS = 370;
 
-export function applyOverrideRange(o: RangeOverride): { nights: number } {
+/** A night actually written by applyOverrideRange — enough to push to MiniHotel. */
+export interface AppliedCell {
+  date: string;
+  price?: number | null;
+  minNights?: number | null;
+  closed?: boolean | null;
+}
+
+export function applyOverrideRange(o: RangeOverride): { nights: number; written: AppliedCell[] } {
   const unit = listUnits().find((u) => u.id === o.unitId);
   if (!unit) throw new Error("unknown unit");
 
@@ -406,6 +414,7 @@ export function applyOverrideRange(o: RangeOverride): { nights: number } {
 
   const db = getDb();
   let nights = 0;
+  const written: AppliedCell[] = [];
   const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
   const del = db.prepare("DELETE FROM rate_calendar WHERE unit_id = ? AND date = ?");
 
@@ -430,9 +439,10 @@ export function applyOverrideRange(o: RangeOverride): { nights: number } {
       if (o.note !== undefined) patch.note = o.note;
       if (Object.keys(patch).length === 0) continue;
       upsertOverride(o.unitId, date, patch, "manual");
+      written.push({ date, price: patch.price, minNights: patch.minNights, closed: patch.closed });
       nights++;
     }
   });
   tx();
-  return { nights };
+  return { nights, written };
 }
