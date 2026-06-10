@@ -207,6 +207,46 @@ function init(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_results_segment ON search_results(profile_id, nights, check_in, run_id);
     CREATE INDEX IF NOT EXISTS idx_results_ts ON search_results(ts);
 
+    -- Log of deliberate per-listing price changes (operator/agent), so the
+    -- longitudinal learner (Model B) can attribute rank moves to our own moves.
+    -- Observed price drift is read directly from listing_snapshots; this table is
+    -- the rails for intentional changes + the experiment loop.
+    CREATE TABLE IF NOT EXISTS listing_price_changes (
+      id          TEXT PRIMARY KEY,
+      listing_id  TEXT NOT NULL REFERENCES tracked_listings(id),
+      ts          TEXT NOT NULL,
+      old_nightly REAL,
+      new_nightly REAL,
+      source      TEXT NOT NULL,
+      note        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_lpc_listing_ts ON listing_price_changes(listing_id, ts DESC);
+
+    -- Realized booking outcomes pulled from MiniHotel (Content & Data API,
+    -- GetReservationKey). The ground truth the learner ultimately optimizes for:
+    -- what actually booked, when it was booked (lead time = arrival − created_on),
+    -- and at what realized price. id = MiniHotel reservation id (idempotent upsert).
+    CREATE TABLE IF NOT EXISTS bookings (
+      id            TEXT PRIMARY KEY,
+      portal_res_id TEXT,
+      unit_id       TEXT,
+      room_type     TEXT,
+      source        TEXT,
+      status        TEXT,
+      created_on    TEXT,
+      arrival       TEXT,
+      departure     TEXT,
+      nights        INTEGER,
+      guests        INTEGER,
+      total         REAL,
+      nightly       REAL,
+      currency      TEXT,
+      lead_days     INTEGER,
+      synced_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bookings_unit ON bookings(unit_id);
+    CREATE INDEX IF NOT EXISTS idx_bookings_arrival ON bookings(arrival);
+
     CREATE TABLE IF NOT EXISTS meta (
       key           TEXT PRIMARY KEY,
       value         TEXT NOT NULL
@@ -719,6 +759,73 @@ function seedLadder(db: Database.Database) {
   tx();
 }
 
+// A handful of synthetic realized bookings (for a seed unit) so the Outcomes
+// surface renders on a fresh DB before the first MiniHotel bookings sync. Spread
+// across lead-time buckets + price points to give a pace distribution and a
+// realized nightly band. Clearly demo data.
+function seedBookings(db: Database.Database) {
+  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_bookings'").get();
+  if (seeded) return;
+
+  const unitId = "BG-2231";
+  const now = new Date().toISOString();
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const dayMs = 86_400_000;
+  // [arrival, leadDays, nightly]
+  const samples: Array<[string, number, number]> = [
+    ["2026-07-05", 12, 720],
+    ["2026-07-12", 9, 700],
+    ["2026-07-20", 22, 760],
+    ["2026-08-01", 34, 820],
+    ["2026-08-10", 28, 800],
+    ["2026-08-18", 47, 880],
+    ["2026-09-01", 55, 900],
+    ["2026-09-12", 41, 860],
+    ["2026-09-20", 18, 740],
+    ["2026-10-01", 63, 940],
+    ["2026-10-10", 30, 810],
+    ["2026-07-28", 6, 690],
+  ];
+
+  const ins = db.prepare(`
+    INSERT INTO bookings
+      (id, portal_res_id, unit_id, room_type, source, status, created_on, arrival, departure,
+       nights, guests, total, nightly, currency, lead_days, synced_at)
+    VALUES
+      (@id, @portal_res_id, @unit_id, @room_type, @source, @status, @created_on, @arrival, @departure,
+       @nights, @guests, @total, @nightly, @currency, @lead_days, @synced_at)
+  `);
+
+  const tx = db.transaction(() => {
+    let i = 0;
+    for (const [arrival, lead, nightly] of samples) {
+      i++;
+      const nights = 30;
+      const arrMs = Date.parse(`${arrival}T00:00:00Z`);
+      ins.run({
+        id: `seed-bk-${i}`,
+        portal_res_id: `PORTAL-${1000 + i}`,
+        unit_id: unitId,
+        room_type: null,
+        source: i % 2 ? "Airbnb" : "Booking.com",
+        status: "OK",
+        created_on: iso(arrMs - lead * dayMs),
+        arrival,
+        departure: iso(arrMs + nights * dayMs),
+        nights,
+        guests: 2,
+        total: nightly * nights,
+        nightly,
+        currency: "ILS",
+        lead_days: lead,
+        synced_at: now,
+      });
+    }
+    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_bookings', 'v1')").run();
+  });
+  tx();
+}
+
 export function getDb(): Database.Database {
   if (global.__rohubDb) return global.__rohubDb;
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -727,6 +834,7 @@ export function getDb(): Database.Database {
   seed(db);
   seedProfiles(db);
   seedLadder(db);
+  seedBookings(db);
   global.__rohubDb = db;
   return db;
 }
