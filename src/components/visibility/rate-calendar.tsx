@@ -17,6 +17,7 @@ import {
   Percent,
   RefreshCw,
   Save,
+  Stethoscope,
   TrendingUp,
   X,
 } from "lucide-react";
@@ -82,7 +83,10 @@ const btnGhost =
   "inline-flex items-center gap-1.5 rounded-md border border-border bg-card h-8 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
 
 const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
-const todayUTC = () => new Date().toISOString().slice(0, 10);
+// Hotel-local (Asia/Jerusalem) today — the calendar tracks Tel Aviv nights, and
+// UTC would show yesterday as "today" for the first 2-3 hours of each local day.
+const todayLocal = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
 const addDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 const partsUTC = (iso: string) => {
@@ -97,7 +101,7 @@ const apptOrd = (unit: { id: string; name: string }): number =>
   apartmentIdFromUnit(unit) ?? Number.POSITIVE_INFINITY;
 
 export function RateCalendar() {
-  const [from, setFrom] = useState(todayUTC());
+  const [from, setFrom] = useState(todayLocal());
   const [days, setDays] = useState(30);
   const [hood, setHood] = useState("all");
   const [data, setData] = useState<Calendar | null>(null);
@@ -107,6 +111,8 @@ export function RateCalendar() {
   const [sel, setSel] = useState<{ unitId: string; date: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diag, setDiag] = useState<DiagResult | null>(null);
 
   const refresh = useCallback(async () => {
     const r = await fetch(`/api/rates?from=${from}&days=${days}`, { cache: "no-store" });
@@ -178,18 +184,29 @@ export function RateCalendar() {
         mappedTypes?: number;
         unmappedTypes?: string[];
         errors?: string[];
+        note?: string;
         message?: string;
       };
       if (d.ok) {
-        const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
-        const issues =
-          d.errors && d.errors.length
-            ? ` · ${d.errors.length} MiniHotel issue(s) skipped: ${d.errors.slice(0, 2).join(" | ")}${d.errors.length > 2 ? " …" : ""}`
-            : "";
-        setSyncMsg({
-          ok: !(d.errors && d.errors.length),
-          text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.`,
-        });
+        const errs = d.errors ?? [];
+        const errText = `${errs.slice(0, 2).join(" | ")}${errs.length > 2 ? " …" : ""}`;
+        // Nothing written + an error = MiniHotel's bulk feed aborted on one bad
+        // room type (it can't be told to skip rooms). Say so plainly — "skipped"
+        // would be a lie, since one bad room blocks every room.
+        if ((d.written ?? 0) === 0 && errs.length) {
+          setSyncMsg({
+            ok: false,
+            text: `MiniHotel returned no rates — its feed was blocked by a room-type config error: ${errText}. One misconfigured room stops EVERY room from syncing. In MiniHotel, set that room type's Basic occupancy (or deactivate the room type), then Sync again.`,
+          });
+        } else {
+          const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
+          const issues = errs.length ? ` · ${errs.length} MiniHotel issue(s): ${errText}` : "";
+          const via = d.note ? ` ${d.note}` : "";
+          setSyncMsg({
+            ok: !errs.length || !!d.note,
+            text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.${via}`,
+          });
+        }
         await refresh();
       } else {
         setSyncMsg({ ok: false, text: d.message || "Sync failed." });
@@ -198,6 +215,19 @@ export function RateCalendar() {
       setSyncMsg({ ok: false, text: e instanceof Error ? e.message : "sync failed" });
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function diagnose() {
+    setDiagnosing(true);
+    setDiag(null);
+    try {
+      const r = await fetch("/api/rates/diagnose", { method: "POST" });
+      setDiag((await r.json()) as DiagResult);
+    } catch (e) {
+      setDiag({ ok: false, message: e instanceof Error ? e.message : "diagnose failed" });
+    } finally {
+      setDiagnosing(false);
     }
   }
 
@@ -245,7 +275,7 @@ export function RateCalendar() {
         <CardContent className="flex flex-wrap items-end gap-x-4 gap-y-3 p-4">
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             From
-            <input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value || todayUTC())} />
+            <input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value || todayLocal())} />
           </label>
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             Horizon
@@ -271,7 +301,7 @@ export function RateCalendar() {
             <button className={iconBtn} title="Back a week" onClick={() => setFrom((f) => addDays(f, -7))}>
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <button className={`${inputCls} h-8`} onClick={() => setFrom(todayUTC())}>
+            <button className={`${inputCls} h-8`} onClick={() => setFrom(todayLocal())}>
               Today
             </button>
             <button className={iconBtn} title="Forward a week" onClick={() => setFrom((f) => addDays(f, 7))}>
@@ -290,6 +320,15 @@ export function RateCalendar() {
             {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadCloud className="h-4 w-4" />}
             Sync MiniHotel
           </button>
+          <button
+            className={btnGhost}
+            title="Show exactly what MiniHotel's rate feed returns and why the calendar is empty"
+            disabled={diagnosing}
+            onClick={diagnose}
+          >
+            {diagnosing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Stethoscope className="h-4 w-4" />}
+            Diagnose
+          </button>
           <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
             <LegendSwatch className="bg-card border border-border" label="Open" />
             <LegendSwatch className="bg-success/15" label="Booked" />
@@ -307,6 +346,61 @@ export function RateCalendar() {
         >
           {syncMsg.text}
         </p>
+      )}
+
+      {diag && (
+        <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 px-3 py-2.5 text-[11px]">
+          <p className="font-medium text-foreground">{diagVerdict(diag)}</p>
+          {diag.ok && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+              <span>
+                rate code: <span className="text-foreground">{diag.rateCode}</span>
+              </span>
+              <span>
+                room types in feed: <span className="text-foreground">{diag.roomTypesInFeed}</span>
+              </span>
+              <span>
+                priced nights: <span className="text-foreground">{diag.pricedCells}</span>
+              </span>
+              <span>
+                matched to apartments: <span className="text-foreground">{diag.mappedToUnits}</span>
+              </span>
+            </div>
+          )}
+          {diag.sampleRoomTypeIds && diag.sampleRoomTypeIds.length > 0 && (
+            <p className="text-muted-foreground">
+              ARI room ids: <span className="font-mono text-foreground">{diag.sampleRoomTypeIds.join(", ")}</span>
+            </p>
+          )}
+          {diag.errors && diag.errors.length > 0 && (
+            <p className="text-[hsl(var(--warning))]">errors: {diag.errors.join(" | ")}</p>
+          )}
+          {diag.guests && (
+            <div className="mt-1 border-t border-border/60 pt-1.5">
+              <p
+                className={
+                  diag.guests.roomTypes > 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--warning))]"
+                }
+              >
+                {guestsVerdict(diag.guests)}
+              </p>
+              {diag.guests.sample.length > 0 && (
+                <p className="text-muted-foreground">
+                  availability-search room ids:{" "}
+                  <span className="font-mono text-foreground">{diag.guests.sample.join(", ")}</span>
+                </p>
+              )}
+            </div>
+          )}
+          {diag.rawHead && (
+            <details>
+              <summary className="cursor-pointer text-muted-foreground">raw response</summary>
+              <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all text-[10px] text-muted-foreground">
+                {diag.rawHead}
+              </pre>
+            </details>
+          )}
+        </div>
       )}
 
       {/* Date Specific Overrides panel */}
@@ -444,6 +538,49 @@ function cellTone(c: RateCell): string {
   if (c.price == null) return "bg-muted/20 text-muted-foreground/50"; // no data yet (not synced)
   if (c.weekend) return "bg-muted/50 text-foreground";
   return "bg-card text-foreground";
+}
+
+interface DiagResult {
+  ok: boolean;
+  message?: string;
+  rateCode?: string;
+  roomTypesInFeed?: number;
+  sampleRoomTypeIds?: string[];
+  pricedCells?: number;
+  mappedToUnits?: number;
+  unmatchedRoomTypes?: string[];
+  errors?: string[];
+  guests?: { roomTypes: number; priced: number; sample: string[]; errors: string[] };
+  rawHead?: string;
+}
+
+function diagVerdict(d: DiagResult): string {
+  if (!d.ok) return d.message || "Diagnose failed.";
+  const rt = d.roomTypesInFeed ?? 0;
+  const mapped = d.mappedToUnits ?? 0;
+  const priced = d.pricedCells ?? 0;
+  if (rt === 0) {
+    const e309 = (d.errors || []).find((x) => /ERR\s?309/i.test(x));
+    if (e309 || d.rateCode === "*ALL" || d.rateCode === "(none)")
+      return `MiniHotel returned no room types — the rate code "${d.rateCode}" isn't a valid price list. Set a real one via Settings → Find rate code.`;
+    if (d.errors && d.errors.length) return `MiniHotel returned no room types. It said: ${d.errors.join(" | ")}`;
+    return "MiniHotel returned an empty ARI response (no room types, no error).";
+  }
+  if (mapped === 0)
+    return `ARI returned ${rt} room type(s), but NONE match your apartment mapping — so nothing can fill in. Update the apartment codes to match the ARI ids below.`;
+  if (priced === 0)
+    return `Matched ${mapped} room type(s), but no prices came back${d.errors && d.errors.length ? ` (${d.errors.join("; ")})` : ""} — likely occupancy isn't set on those rooms.`;
+  return `Looks good: ${priced} priced night(s) across ${mapped} matched room type(s). Hit "Sync MiniHotel" to load them.`;
+}
+
+// Verdict for the guests-based fallback probe (only run when the bulk feed is empty).
+function guestsVerdict(g: NonNullable<DiagResult["guests"]>): string {
+  if (g.roomTypes > 0)
+    return `Fallback works: the availability search returned ${g.roomTypes} room type(s)${g.priced ? `, ${g.priced} priced` : ""} despite the bulk feed being blocked — Sync will use it automatically.`;
+  const e310 = (g.errors || []).find((x) => /ERR\s?310/i.test(x));
+  if (e310)
+    return `Fallback can't help either — the availability search hit the same config error (${e310}). This must be fixed in MiniHotel: set the room type's Basic occupancy (or deactivate it).`;
+  return `Fallback returned no rooms${g.errors && g.errors.length ? ` (${g.errors.join("; ")})` : ""} — the broken room must be fixed in MiniHotel.`;
 }
 
 function LegendSwatch({ className, label }: { className: string; label: string }) {

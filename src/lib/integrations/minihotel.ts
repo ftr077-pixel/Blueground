@@ -40,11 +40,16 @@ export interface SyncResult {
   cells: number; // day-rows parsed
   written: number; // overrides written
   unmappedTypes: string[];
-  errors: string[]; // ERR codes MiniHotel reported (non-fatal — skipped, not thrown)
+  errors: string[]; // ERR codes MiniHotel reported (non-fatal — collected, not thrown)
+  note?: string; // e.g. "loaded via availability search after the bulk feed was blocked"
   message?: string;
 }
 
-const todayUTC = () => new Date().toISOString().slice(0, 10);
+// "Today" on the hotel's calendar (Asia/Jerusalem), not UTC: between local
+// midnight and 02:00/03:00 the UTC date is still yesterday, which would shift
+// every default sync window a day into the past.
+const todayLocal = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
 const plusDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 
@@ -70,14 +75,26 @@ function decodeEntities(s: string): string {
     .replace(/&amp;/gi, "&");
 }
 
-export function buildBulkAriRequest(conn: MiniHotelConnection, from: string, to: string): string {
+export function buildBulkAriRequest(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  roomTypeIds?: string[],
+): string {
   const rateCode = conn.rateCode || "USD";
+  const roomTypes =
+    roomTypeIds && roomTypeIds.length
+      ? `<RoomTypes>${roomTypeIds.map((id) => `<RoomType id="${escXml(id)}" />`).join("")}</RoomTypes>`
+      : "";
   return (
     '<?xml version="1.0" encoding="UTF-8" ?>' +
     '<AvailRaterq xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
-    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="05" />` +
+    // MinimumNights="YES" is opt-in (omitting = "NO"): without it MiniHotel
+    // returns Minngt="0" for every day and real min-stay restrictions never sync.
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="05" MinimumNights="YES" />` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
     `<DateRange from="${from}" to="${to}" />` +
+    roomTypes +
     `<Prices rateCode="${escXml(rateCode)}"></Prices>` +
     "</AvailRaterq>"
   );
@@ -99,14 +116,17 @@ const truthy = (v: string | null) => v != null && /^(yes|true|1|y)$/i.test(v.tri
 export function parseBulkAri(xml: string): AriCell[] {
   const cells: AriCell[] = [];
   const x = decodeEntities(xml);
-  const rtRe = /<RoomType\b([^>]*)>([\s\S]*?)<\/RoomType>/gi;
+  // Also accept self-closing <RoomType …/> — with the paired-only pattern an
+  // empty self-closed type would swallow its next sibling (everything up to the
+  // sibling's </RoomType>) and attribute that sibling's days to the wrong code.
+  const rtRe = /<RoomType\b([^>]*?)(?:\/>|>([\s\S]*?)<\/RoomType>)/gi;
   let rt: RegExpExecArray | null;
   while ((rt = rtRe.exec(x))) {
     const code = attr(rt[1], "id");
     if (!code) continue;
     const dayRe = /<Day\b([^>]*)>/gi;
     let d: RegExpExecArray | null;
-    while ((d = dayRe.exec(rt[2]))) {
+    while ((d = dayRe.exec(rt[2] ?? ""))) {
       const a = d[1];
       const mdate = attr(a, "Mdate");
       if (!mdate || mdate.length !== 8) continue;
@@ -135,7 +155,9 @@ export function parseBulkAri(xml: string): AriCell[] {
  */
 export function parseAriErrors(xml: string): string[] {
   const out: string[] = [];
-  const re = /ERR\s?\d+[^<\n]*/gi;
+  // Case-sensitive + word boundary: MiniHotel emits "ERR 310 …" (docs §2.7);
+  // a loose match also fires on free text like "Herr 304 wants late checkout".
+  const re = /\bERR\s?\d+[^<\n]*/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml))) out.push(m[0].trim());
   return out;
@@ -148,7 +170,7 @@ export function parseAriErrors(xml: string): string[] {
 export function extractMiniHotelErrors(text: string): string[] {
   const x = decodeEntities(text);
   const out: string[] = [];
-  const errRe = /ERR\s?\d+[^<\n]*/gi;
+  const errRe = /\bERR\s?\d+[^<\n]*/g;
   let m: RegExpExecArray | null;
   while ((m = errRe.exec(x))) out.push(m[0].trim());
   const tagRe = /<Error\b[^>]*?code="([^"]*)"(?:[^>]*?description="([^"]*)")?[^>]*>/gi;
@@ -159,7 +181,12 @@ export function extractMiniHotelErrors(text: string): string[] {
   return out;
 }
 
-export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
+export async function fetchBulkAri(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  roomTypeIds?: string[],
+): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -167,7 +194,7 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
     const res = await fetch(ep.ari, {
       method: "POST",
       headers: { "Content-Type": "application/xml" },
-      body: buildBulkAriRequest(conn, from, to),
+      body: buildBulkAriRequest(conn, from, to, roomTypeIds),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -180,18 +207,157 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
   }
 }
 
+/**
+ * Build an "Immediate ARI" (guests-based availability search) request. Unlike the
+ * bulk feed, this prices rooms FOR a party of N adults, so MiniHotel typically
+ * just omits a room type with no Basic occupancy instead of aborting the whole
+ * response (ERR 310). Its prices are the TOTAL for the requested stay — call it
+ * with a 1-night range to get a per-night price.
+ */
+export function buildGuestsAvailRequest(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  adults = 2,
+): string {
+  const rateCode = conn.rateCode || "USD";
+  return (
+    '<?xml version="1.0" encoding="UTF-8" ?>' +
+    '<AvailRaterq xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" />` +
+    `<Hotel id="${escXml(conn.hotelId)}" />` +
+    `<DateRange from="${from}" to="${to}" />` +
+    `<Guests adults="${adults}" child="" babies="" />` +
+    '<RoomTypes><RoomType id="*ALL*" /></RoomTypes>' +
+    `<Prices rateCode="${escXml(rateCode)}"><Price boardCode="*ALL*" /></Prices>` +
+    "</AvailRaterq>"
+  );
+}
+
+export interface GuestsAvailRoom {
+  roomType: string;
+  price: number | null; // lowest board value for the requested stay
+  available: number | null;
+}
+
+/**
+ * Parse an Immediate-ARI response:
+ *   <RoomType id …><Inventory Allocation maxavail/><price value …/>…</RoomType>
+ * Price = the lowest board value (room-only base); availability = Allocation
+ * ("number of available rooms" per the docs — maxavail is the TOTAL room count,
+ * so reading it as availability marks sold-out nights as open), falling back to
+ * maxavail only when Allocation is absent.
+ */
+export function parseGuestsAvail(xml: string): GuestsAvailRoom[] {
+  const x = decodeEntities(xml);
+  const out: GuestsAvailRoom[] = [];
+  const rtRe = /<RoomType\b([^>]*?)(?:\/>|>([\s\S]*?)<\/RoomType>)/gi;
+  let rt: RegExpExecArray | null;
+  while ((rt = rtRe.exec(x))) {
+    const code = attr(rt[1], "id");
+    if (!code) continue;
+    const body = rt[2] ?? "";
+    let price: number | null = null;
+    const pRe = /<price\b([^>]*?)\/?>/gi;
+    let p: RegExpExecArray | null;
+    while ((p = pRe.exec(body))) {
+      const v = numAttr(p[1], "value");
+      if (v != null && (price == null || v < price)) price = v;
+    }
+    const inv = body.match(/<Inventory\b([^>]*?)\/?>/i);
+    let available: number | null = null;
+    if (inv) {
+      available = numAttr(inv[1], "Allocation");
+      if (available == null) available = numAttr(inv[1], "maxavail");
+    }
+    out.push({ roomType: code, price: price != null ? Math.round(price) : null, available });
+  }
+  return out;
+}
+
+export async function fetchGuestsAvail(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  adults = 2,
+): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.ari, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildGuestsAvailRequest(conn, from, to, adults),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fallback used when the bulk feed is blocked: walk the window one night at a
+ * time via the guests-based search (its price is per-stay, so a 1-night range =
+ * nightly). Bails immediately if the first night yields nothing, so a dead end
+ * never costs a long loop; capped so even a working fallback stays responsive.
+ */
+async function fetchGuestsFallback(
+  conn: MiniHotelConnection,
+  from: string,
+  days: number,
+): Promise<{ cells: AriCell[]; errors: string[]; nights: number }> {
+  const cells: AriCell[] = [];
+  const errs = new Set<string>();
+  const horizon = Math.min(days, 35);
+  let nights = 0;
+  for (let i = 0; i < horizon; i++) {
+    const d = plusDays(from, i);
+    let rooms: GuestsAvailRoom[];
+    try {
+      const xml = await fetchGuestsAvail(conn, d, plusDays(d, 1));
+      parseAriErrors(xml).forEach((e) => errs.add(e));
+      rooms = parseGuestsAvail(xml);
+    } catch (e) {
+      errs.add(e instanceof Error ? e.message : "availability search failed");
+      if (i === 0) break; // can't even reach it — stop
+      continue;
+    }
+    if (rooms.length === 0) {
+      if (i === 0) break; // this endpoint can't help either — don't loop 35×
+      continue;
+    }
+    nights++;
+    for (const r of rooms) {
+      const cell: AriCell = { roomType: r.roomType, date: d };
+      if (r.price != null) cell.price = r.price;
+      if (r.available != null) cell.available = r.available;
+      cells.push(cell);
+    }
+  }
+  return { cells, errors: [...errs], nights };
+}
+
 export async function syncFromMiniHotel(opts: {
   from?: string;
   days?: number;
   xml?: string; // optional captured response — parse this instead of calling MiniHotel
 }): Promise<SyncResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(120, opts.days ?? 60));
   const to = plusDays(from, days - 1);
 
-  let xml = opts.xml;
-  if (!xml) {
+  let parsed: AriCell[];
+  let errors: string[];
+  let note: string | undefined;
+  if (opts.xml) {
+    parsed = parseBulkAri(opts.xml);
+    errors = parseAriErrors(opts.xml);
+  } else {
     if (!conn.username || !conn.password || !conn.hotelId) {
       return {
         ok: false,
@@ -206,11 +372,26 @@ export async function syncFromMiniHotel(opts: {
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
-    xml = await fetchBulkAri(conn, from, to);
-  }
+    // 1) Whole-hotel bulk feed (per-night grid). It can't be scoped to specific
+    //    rooms, so one room type with missing Basic occupancy aborts it (ERR 310).
+    const xml = await fetchBulkAri(conn, from, to);
+    parsed = parseBulkAri(xml);
+    errors = parseAriErrors(xml);
 
-  const parsed = parseBulkAri(xml);
-  const errors = parseAriErrors(xml);
+    // 2) Bulk feed blocked (no cells but an error)? Fall back to the guests-based
+    //    availability search, which prices per party and usually skips a
+    //    misconfigured room instead of aborting the whole response.
+    if (parsed.length === 0 && errors.length > 0) {
+      const fb = await fetchGuestsFallback(conn, from, days);
+      fb.errors.forEach((e) => {
+        if (!errors.includes(e)) errors.push(e);
+      });
+      if (fb.cells.length > 0) {
+        parsed = fb.cells;
+        note = `Bulk feed was blocked (${errors[0]}); loaded ${fb.nights} night(s) via the availability search instead.`;
+      }
+    }
+  }
 
   // RoomTypeCode -> unit id(s); case-insensitive so codes match regardless of casing.
   const byType = new Map<string, string[]>();
@@ -256,6 +437,7 @@ export async function syncFromMiniHotel(opts: {
     written,
     unmappedTypes: [...unmapped].sort(),
     errors,
+    note,
   };
 }
 
@@ -360,7 +542,7 @@ export async function fetchRoomStatus(conn: MiniHotelConnection): Promise<string
     const res = await fetch(ep.ari, {
       method: "POST",
       headers: { "Content-Type": "application/xml" },
-      body: buildRoomStatusRequest(conn, todayUTC(), plusDays(todayUTC(), 1)),
+      body: buildRoomStatusRequest(conn, todayLocal(), plusDays(todayLocal(), 1)),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -470,7 +652,7 @@ export async function pullAriReservations(opts: {
   xml?: string;
 }): Promise<AriReservationsResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(60, opts.days ?? 35));
   const to = plusDays(from, days - 1);
 
@@ -536,7 +718,7 @@ export async function syncAriOccupancy(opts: {
   xml?: string;
 }): Promise<AriOccupancyResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(60, opts.days ?? 45));
   const to = plusDays(from, days - 1);
 
@@ -558,7 +740,25 @@ export async function syncAriOccupancy(opts: {
     status: r.status,
   }));
   const rooms = parseRoomStatusRooms(xml);
-  const stored = storeAriOccupancy(bookings, rooms);
+  // MiniHotel reports failures inside HTTP-200 bodies. A pull that parsed
+  // nothing AND carried errors is a failed pull, not an empty hotel — storing
+  // it would wipe the previous good snapshot and zero the occupancy KPIs.
+  if (bookings.length === 0 && rooms.length === 0 && errors.length > 0) {
+    const occ = occupancyByMonth();
+    return {
+      ok: false,
+      from,
+      to,
+      bookings: 0,
+      rooms: 0,
+      thisMonth: occ.thisMonth,
+      occupancy: occ.current.occupancy,
+      bookedNights: occ.current.bookedNights,
+      errors,
+      message: `MiniHotel returned an error (${errors[0]}) — kept the previous occupancy snapshot.`,
+    };
+  }
+  const stored = storeAriOccupancy(bookings, rooms, { from, to });
   const occ = occupancyByMonth();
   return {
     ok: true,
@@ -640,7 +840,7 @@ export async function importApartmentsFromMiniHotel(opts: {
     const sources: { label: string; run: () => Promise<string> }[] = [
       { label: "getRoomTypes", run: () => fetchRoomTypes(conn) },
       { label: "roomStatus", run: () => fetchRoomStatus(conn) },
-      { label: "bulkAri", run: () => fetchBulkAri(conn, todayUTC(), plusDays(todayUTC(), 1)) },
+      { label: "bulkAri", run: () => fetchBulkAri(conn, todayLocal(), plusDays(todayLocal(), 1)) },
     ];
     for (const src of sources) {
       try {
@@ -760,6 +960,23 @@ function xmlField(block: string, names: readonly string[]): string | null {
   return null;
 }
 
+/**
+ * Fallback id for rows the PMS sent without one: derived from the row's content,
+ * not its position in the response — positional ids change whenever the query
+ * window shifts, which turns re-syncs of the same booking into duplicate revenue
+ * rows. An occurrence counter keeps genuinely identical rows distinct (and is
+ * stable, since identical rows are interchangeable).
+ */
+function syntheticId(
+  seen: Map<string, number>,
+  parts: Array<string | number | null | undefined>,
+): string {
+  const base = parts.map((p) => (p == null ? "" : String(p))).join("_");
+  const n = (seen.get(base) ?? 0) + 1;
+  seen.set(base, n);
+  return n === 1 ? base : `${base}#${n}`;
+}
+
 function parseReservationsJson(data: unknown): MiniReservation[] {
   let arr: unknown[] = [];
   if (Array.isArray(data)) arr = data;
@@ -769,6 +986,7 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
     if (k) arr = o[k] as unknown[];
   }
   const out: MiniReservation[] = [];
+  const seen = new Map<string, number>();
   for (const item of arr) {
     if (!item || typeof item !== "object") continue;
     const o = item as Record<string, unknown>;
@@ -777,13 +995,14 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
     const gross = normNum(pickCI(o, RF.gross) as string | number);
     if (!checkIn || !checkOut || gross == null) continue;
     const id = pickCI(o, RF.id);
+    const roomNumber = (pickCI(o, RF.roomNumber) as string) || undefined;
     out.push({
-      id: id != null ? String(id) : `${checkIn}_${out.length}`,
+      id: id != null ? String(id) : syntheticId(seen, [checkIn, checkOut, roomNumber, gross]),
       checkIn,
       checkOut,
       gross,
       roomType: (pickCI(o, RF.roomType) as string) || undefined,
-      roomNumber: (pickCI(o, RF.roomNumber) as string) || undefined,
+      roomNumber,
       country: (pickCI(o, RF.country) as string) || undefined,
       status: (pickCI(o, RF.status) as string) || undefined,
       currency: (pickCI(o, RF.currency) as string) || undefined,
@@ -803,6 +1022,16 @@ const firstBlock = (re: RegExp, s: string): string => re.exec(s)?.[1] ?? "";
  */
 function parseBookingsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
+  const seen = new Map<string, number>();
+  // A <Total> amount that is present but EMPTY (group bookings ship
+  // <Total AmountAfterTaxes="" …/> at booking level, §2.5) must read as "no
+  // amount", not 0 — Number("") is 0, which would book the whole stay as ₪0.
+  const amountOf = (totalAttrs: string): number | null => {
+    if (!totalAttrs) return null;
+    const after = attr(totalAttrs, "AmountAfterTaxes");
+    const v = after != null && after.trim() !== "" ? after : attr(totalAttrs, "value");
+    return v != null && v.trim() !== "" ? normNum(v) : null;
+  };
   const re = /<Booking\b([^>]*)>([\s\S]*?)<\/Booking>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml))) {
@@ -811,26 +1040,53 @@ function parseBookingsXml(xml: string): MiniReservation[] {
     const ts = firstBlock(/<Timespan\b([^>]*?)\/?>/i, inner) || firstBlock(/<StayDate\b([^>]*?)\/?>/i, inner);
     const checkIn = normDate(attr(ts, "arrival"));
     const checkOut = normDate(attr(ts, "departure"));
-    // Prefer the booking-level total (ResGlobalInfo); fall back to the first RoomStay total.
-    const totalScope = firstBlock(/<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i, inner) || inner;
-    const total = firstBlock(/<Total\b([^>]*?)\/?>/i, totalScope);
-    const gross = normNum(attr(total, "AmountAfterTaxes") ?? attr(total, "value"));
+    // Whole-stay total: the booking-level <ResGlobalInfo> total when it carries
+    // an amount; otherwise the SUM of the per-<RoomStay> totals (multi-room
+    // group bookings put the money on each room and leave the global total
+    // empty — taking just the first <Total> would drop the other rooms' revenue).
+    const globalScope = firstBlock(/<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i, inner);
+    const globalTotal = globalScope ? firstBlock(/<Total\b([^>]*?)\/?>/i, globalScope) : "";
+    let gross = amountOf(globalTotal);
+    let totalAttrs = globalTotal;
+    if (gross == null) {
+      let sum = 0;
+      let found = false;
+      const rsRe = /<RoomStay\b[^>]*?(?:\/>|>([\s\S]*?)<\/RoomStay>)/gi;
+      let rs: RegExpExecArray | null;
+      while ((rs = rsRe.exec(inner))) {
+        const t = firstBlock(/<Total\b([^>]*?)\/?>/i, rs[1] ?? "");
+        const v = amountOf(t);
+        if (v != null) {
+          sum += v;
+          if (!found) totalAttrs = t;
+          found = true;
+        }
+      }
+      if (found) gross = sum;
+    }
+    if (gross == null) {
+      // Last resort (non-standard shapes): the first <Total> anywhere.
+      const t = firstBlock(/<Total\b([^>]*?)\/?>/i, inner);
+      gross = amountOf(t);
+      totalAttrs = t;
+    }
     if (!checkIn || !checkOut || gross == null) continue;
     const stay = firstBlock(/<RoomStay\b([^>]*?)\/?>/i, inner);
     const country = firstBlock(/<Country\b([^>]*?)\/?>/i, inner);
+    const roomNumber = attr(stay, "roomNumber") || undefined;
     out.push({
       id:
         attr(head, "Minihotel_reservation_id") ||
         attr(head, "Portal_reservation_id") ||
-        `${checkIn}_${out.length}`,
+        syntheticId(seen, [checkIn, checkOut, roomNumber, gross]),
       checkIn,
       checkOut,
       gross,
       roomType: attr(stay, "roomTypeId") || attr(stay, "roomTypeID") || undefined,
-      roomNumber: attr(stay, "roomNumber") || undefined,
+      roomNumber,
       country: attr(country, "iso2") || attr(country, "iso3") || attr(country, "CountryName") || undefined,
       vatFlag: attr(country, "Vat") || attr(head, "Vat") || undefined,
-      currency: attr(total, "CurrencyCode") || undefined,
+      currency: attr(totalAttrs, "CurrencyCode") || attr(globalTotal, "CurrencyCode") || undefined,
       status: attr(head, "Status") || undefined,
     });
   }
@@ -840,6 +1096,7 @@ function parseBookingsXml(xml: string): MiniReservation[] {
 /** Generic <Reservation>/<Booking>/<Res> fallback for non-standard XML shapes. */
 function parseReservationsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
+  const seen = new Map<string, number>();
   const x = decodeEntities(xml);
   const re = /<(Reservation|Booking|Res)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
   let m: RegExpExecArray | null;
@@ -850,7 +1107,9 @@ function parseReservationsXml(xml: string): MiniReservation[] {
     const gross = normNum(xmlField(block, RF.gross));
     if (!checkIn || !checkOut || gross == null) continue;
     out.push({
-      id: xmlField(block, RF.id) || `${checkIn}_${out.length}`,
+      id:
+        xmlField(block, RF.id) ||
+        syntheticId(seen, [checkIn, checkOut, xmlField(block, RF.roomNumber), gross]),
       checkIn,
       checkOut,
       gross,
@@ -908,8 +1167,15 @@ export async function fetchReservations(conn: MiniHotelConnection, from: string,
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
-    const err = text.match(/ERR\s?\d+[^<\n]*/i);
-    if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
+    // Treat an embedded ERR code as fatal only when the response carries no
+    // bookings — reservation payloads are full of free text (guest names,
+    // remarks) that a bare substring match would misread as an error and
+    // abort an otherwise-successful pull.
+    const decoded = decodeEntities(text);
+    if (!/<Booking\b/i.test(decoded)) {
+      const err = decoded.match(/\bERR\s?\d+[^<\n]*/);
+      if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
+    }
     return text;
   } finally {
     clearTimeout(timer);
@@ -937,7 +1203,7 @@ export async function syncReservationsFromMiniHotel(opts: {
   payload?: string; // captured response — parse this instead of calling MiniHotel
 }): Promise<ReservationSyncResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayUTC();
+  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
   const days = Math.max(1, Math.min(370, opts.days ?? 120));
   const to = plusDays(from, days - 1);
 

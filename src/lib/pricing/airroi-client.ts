@@ -12,7 +12,16 @@ import type {
   MarketSummary,
   PacingPoint,
   MinNightsPoint,
+  MetricsPoint,
 } from "@/lib/repos/market";
+
+/** AirROI filter: { field: { eq|gt|gte|lt|lte|range|any|all|none } }, fields ANDed. */
+export type MarketFilter = Record<string, Record<string, unknown>>;
+export interface MarketOpts {
+  currency: string;
+  numMonths?: number;
+  filter?: MarketFilter;
+}
 
 const BASE_URL = process.env.AIRROI_BASE_URL || "https://api.airroi.com";
 
@@ -27,10 +36,15 @@ function headers(): Record<string, string> {
   };
 }
 
+// The market sync makes up to 5 sequential calls per neighborhood; without a
+// timeout one stalled connection wedges the whole /api/market/sync request for
+// undici's multi-minute default. Same 20s budget as the MiniHotel client.
+const TIMEOUT_MS = 20000;
+
 async function get<T>(path: string, params: Record<string, string>): Promise<T> {
   const url = new URL(path, BASE_URL);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await fetch(url, { headers: headers() });
+  const res = await fetch(url, { headers: headers(), signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!res.ok) throw new Error(`AirROI GET ${path} -> ${res.status} ${await res.text().catch(() => "")}`);
   return (await res.json()) as T;
 }
@@ -40,6 +54,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     method: "POST",
     headers: headers(),
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`AirROI POST ${path} -> ${res.status} ${await res.text().catch(() => "")}`);
   return (await res.json()) as T;
@@ -60,7 +75,7 @@ export async function lookupMarket(lat: number, lng: number): Promise<AirRoiMark
   }
 }
 
-function marketBody(market: AirRoiMarket, currency: string, numMonths?: number) {
+function marketBody(market: AirRoiMarket, opts: MarketOpts) {
   const body: Record<string, unknown> = {
     market: {
       country: market.country,
@@ -68,40 +83,38 @@ function marketBody(market: AirRoiMarket, currency: string, numMonths?: number) 
       locality: market.locality,
       district: market.district,
     },
-    currency,
+    currency: opts.currency,
   };
-  if (numMonths != null) body.num_months = numMonths;
+  if (opts.numMonths != null) body.num_months = opts.numMonths;
+  if (opts.filter && Object.keys(opts.filter).length) body.filter = opts.filter;
   return body;
 }
 
-export async function getMarketSummary(
-  market: AirRoiMarket,
-  currency: string,
-  numMonths = 12,
-): Promise<MarketSummary> {
-  const data = await post<MarketSummary>("/markets/summary", marketBody(market, currency, numMonths));
-  return data;
+export async function getMarketSummary(market: AirRoiMarket, opts: MarketOpts): Promise<MarketSummary> {
+  return post<MarketSummary>("/markets/summary", marketBody(market, opts));
 }
 
-export async function getMarketFuturePacing(
-  market: AirRoiMarket,
-  currency: string,
-): Promise<PacingPoint[]> {
+export async function getMarketFuturePacing(market: AirRoiMarket, opts: MarketOpts): Promise<PacingPoint[]> {
   const data = await post<{ results?: PacingPoint[] }>(
     "/markets/metrics/future/pacing",
-    marketBody(market, currency),
+    marketBody(market, opts),
   );
   return data.results ?? [];
 }
 
-export async function getMarketMinNights(
-  market: AirRoiMarket,
-  currency: string,
-  numMonths = 12,
-): Promise<MinNightsPoint[]> {
+export async function getMarketMinNights(market: AirRoiMarket, opts: MarketOpts): Promise<MinNightsPoint[]> {
   const data = await post<{ results?: MinNightsPoint[] }>(
     "/markets/metrics/min-nights",
-    marketBody(market, currency, numMonths),
+    marketBody(market, opts),
+  );
+  return data.results ?? [];
+}
+
+// One call returns the full monthly historical series of every market metric.
+export async function getMarketAllMetrics(market: AirRoiMarket, opts: MarketOpts): Promise<MetricsPoint[]> {
+  const data = await post<{ results?: MetricsPoint[] }>(
+    "/markets/metrics/all",
+    marketBody(market, opts),
   );
   return data.results ?? [];
 }

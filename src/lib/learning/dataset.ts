@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
 import { getListing, getProfile, type TrackedListing } from "@/lib/repos/visibility";
 import { LEARNING, type LeadBucket } from "./config";
+import type { HistPoint } from "./longitudinal";
 import type { Observation, SegmentKey } from "./types";
 
 function median(xs: number[]): number {
@@ -11,7 +13,10 @@ function median(xs: number[]): number {
 }
 
 // Recency-weighted market ladder observations for a segment (area × stay length ×
-// lead-time bucket) over the training window. Lead = check_in − scan ts.
+// lead-time bucket) over the training window. Lead = check_in − scan DATE: ts is a
+// full timestamp, so without date() the difference is fractional and rows whose
+// calendar lead sits exactly on a bucket boundary (8/15/31/61 days) fall between
+// buckets — and the integer leadBucketOf() used at read time would disagree.
 export function marketObservations(
   seg: SegmentKey,
   bucket: LeadBucket,
@@ -26,8 +31,8 @@ export function marketObservations(
           AND ts >= @cutoff
           AND price_nightly IS NOT NULL AND price_nightly > 0
           AND total > 0
-          AND (julianday(check_in) - julianday(ts)) >= @lmin
-          AND (julianday(check_in) - julianday(ts)) <= @lmax
+          AND (julianday(check_in) - julianday(date(ts))) >= @lmin
+          AND (julianday(check_in) - julianday(date(ts))) <= @lmax
         ORDER BY ts DESC
         LIMIT @cap`,
     )
@@ -152,4 +157,74 @@ export function listingState(
     total: row.total,
     found,
   };
+}
+
+// The listing's own (nightly price, rank) time series for a stay length — the
+// substrate Model B (longitudinal.ts) learns from. Found, priced, ranked rows.
+export function listingPriceHistory(
+  listingId: string,
+  nights: number,
+  windowDays = 120,
+): HistPoint[] {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - windowDays * 86_400_000).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT ts, price, total, rank
+         FROM listing_snapshots
+        WHERE listing_id = ? AND nights = ? AND found = 1
+          AND price IS NOT NULL AND total > 0 AND rank IS NOT NULL AND ts >= ?
+        ORDER BY ts ASC`,
+    )
+    .all(listingId, nights, cutoff) as Array<{ ts: string; price: number; total: number; rank: number }>;
+  // Search cards carry the stay total → nightly = price / nights.
+  return rows.map((r) => ({ ts: r.ts, nightly: nights > 0 ? r.price / nights : r.price, rank: r.rank, total: r.total }));
+}
+
+// ---------------------------------------------------------------- experiment log
+export interface PriceChange {
+  id: string;
+  listingId: string;
+  ts: string;
+  oldNightly: number | null;
+  newNightly: number | null;
+  source: string; // 'operator' | 'agent' | 'observed'
+  note: string | null;
+}
+
+export function recordPriceChange(input: {
+  listingId: string;
+  oldNightly?: number | null;
+  newNightly?: number | null;
+  source: string;
+  note?: string | null;
+}): PriceChange {
+  const db = getDb();
+  const row: PriceChange = {
+    id: randomUUID(),
+    listingId: input.listingId,
+    ts: new Date().toISOString(),
+    oldNightly: input.oldNightly ?? null,
+    newNightly: input.newNightly ?? null,
+    source: input.source,
+    note: input.note ?? null,
+  };
+  db.prepare(
+    `INSERT INTO listing_price_changes (id, listing_id, ts, old_nightly, new_nightly, source, note)
+     VALUES (@id, @listingId, @ts, @oldNightly, @newNightly, @source, @note)`,
+  ).run(row);
+  return row;
+}
+
+export function listPriceChanges(listingId: string, limit = 50): PriceChange[] {
+  const db = getDb();
+  return (
+    db
+      .prepare(
+        `SELECT id, listing_id AS listingId, ts, old_nightly AS oldNightly,
+                new_nightly AS newNightly, source, note
+           FROM listing_price_changes WHERE listing_id = ? ORDER BY ts DESC LIMIT ?`,
+      )
+      .all(listingId, limit) as PriceChange[]
+  );
 }

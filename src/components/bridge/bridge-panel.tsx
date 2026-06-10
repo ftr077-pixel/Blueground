@@ -22,8 +22,10 @@ interface Line {
   label: string;
   level: number;
   kind: Kind;
-  monthly: number[];
+  monthly: number[]; // forecast = plan + driver what-ifs
   total: number;
+  plan: number[]; // locked plan of record (no what-ifs)
+  planTotal: number;
   actual: number[];
 }
 interface Driver {
@@ -35,21 +37,23 @@ interface Driver {
   overridden: boolean;
   overrideValue: number | null;
 }
+interface Summary {
+  months: number;
+  revenue: number;
+  ebitda: number;
+  netIncome: number;
+  ebitdaMargin: number;
+  grossMargin: number;
+  peakActiveUnits: number;
+}
 interface View {
   scenario: string;
   period: "month" | "quarter" | "year";
   periods: string[];
   lines: Line[];
   chart: { months: string[]; revenue: number[]; ebitda: number[]; netIncome: number[] };
-  summary: {
-    months: number;
-    revenue: number;
-    ebitda: number;
-    netIncome: number;
-    ebitdaMargin: number;
-    grossMargin: number;
-    peakActiveUnits: number;
-  };
+  summary: Summary;
+  planSummary: Summary;
   drivers: Driver[];
   overrides: Record<string, number>;
   maxBaselineErrorPct: number;
@@ -69,23 +73,21 @@ const tone = (v: number) => (v >= 0 ? "text-[hsl(var(--success))]" : "text-[hsl(
 const inputCls =
   "rounded-md border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50";
 
-export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" }) {
+type TableMode = "plan" | "forecast" | "actual" | "variance";
+
+export function BridgePanel() {
   const [period, setPeriod] = useState<"month" | "quarter" | "year">("year");
-  const [tableMode, setTableMode] = useState<"plan" | "actual" | "variance">("plan");
+  const [tableMode, setTableMode] = useState<TableMode>("forecast");
   const [data, setData] = useState<View | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(
-    async (p: string) => {
-      const baseParam = mode === "plan" ? "&base=1" : "";
-      const r = await fetch(`/api/bridge?period=${p}${baseParam}`, { cache: "no-store" });
-      if (!r.ok) throw new Error(`failed (${r.status})`);
-      setData((await r.json()) as View);
-    },
-    [mode],
-  );
+  const load = useCallback(async (p: string) => {
+    const r = await fetch(`/api/bridge?period=${p}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`failed (${r.status})`);
+    setData((await r.json()) as View);
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -138,27 +140,43 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
         <span>
           {data.scenario} · {summary.months} months
         </span>
-        {mode === "plan" && <Badge variant="muted">plan of record · read-only</Badge>}
-        {hasOverrides && (
-          <Badge variant="info">what-if active · {Object.keys(data.overrides).length} driver(s)</Badge>
+        {hasOverrides ? (
+          <Badge variant="info">
+            forecast ≠ plan · {Object.keys(data.overrides).length} driver(s) adjusted
+          </Badge>
+        ) : (
+          <Badge variant="muted">forecast = plan (no driver adjustments)</Badge>
         )}
       </div>
 
-      {/* summary tiles */}
+      {/* summary tiles — forecast values; the locked plan shows as reference when they differ */}
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile icon={Banknote} label="Revenue (plan)" value={fmtC(summary.revenue)} hint="Sum over horizon" />
+        <StatTile
+          icon={Banknote}
+          label="Revenue (forecast)"
+          value={fmtC(summary.revenue)}
+          hint={hasOverrides ? `plan ${fmtC(data.planSummary.revenue)}` : "Sum over horizon"}
+        />
         <StatTile
           icon={TrendingUp}
-          label="EBITDA (plan)"
+          label="EBITDA (forecast)"
           value={fmtC(summary.ebitda)}
-          hint={`${fmtPct(summary.ebitdaMargin)} margin`}
+          hint={
+            hasOverrides
+              ? `plan ${fmtC(data.planSummary.ebitda)}`
+              : `${fmtPct(summary.ebitdaMargin)} margin`
+          }
           accent={summary.ebitda >= 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--danger))]"}
         />
         <StatTile
           icon={Percent}
-          label="Net income (plan)"
+          label="Net income (forecast)"
           value={fmtC(summary.netIncome)}
-          hint={`gross margin ${fmtPct(summary.grossMargin)}`}
+          hint={
+            hasOverrides
+              ? `plan ${fmtC(data.planSummary.netIncome)}`
+              : `gross margin ${fmtPct(summary.grossMargin)}`
+          }
           accent={summary.netIncome >= 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--danger))]"}
         />
         <StatTile icon={Building2} label="Peak units" value={summary.peakActiveUnits} hint="Active properties" />
@@ -193,24 +211,20 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
         </CardContent>
       </Card>
 
-      {/* driver what-if editor + actuals slot (forecast only) */}
-      {mode === "forecast" && (
-        <>
-          <DriverEditor
-            drivers={data.drivers}
-            busy={busy}
-            hasOverrides={hasOverrides}
-            onSet={(key, value) => postOverride({ key, value })}
-            onReset={() => postOverride({ reset: true })}
-          />
-          <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-            <span className="font-medium text-foreground">Actuals &amp; variance:</span> rental-revenue
-            actuals are wired live from MiniHotel — actual reservations, with room revenue recognized
-            per night across each stay and summed per month — and drop into the Actual column beside
-            the plan. There are no costs in MiniHotel, so cost lines keep coming from the workbook.
-          </p>
-        </>
-      )}
+      {/* forecast driver editor — the plan stays locked; edits here shape the forecast */}
+      <DriverEditor
+        drivers={data.drivers}
+        busy={busy}
+        hasOverrides={hasOverrides}
+        onSet={(key, value) => postOverride({ key, value })}
+        onReset={() => postOverride({ reset: true })}
+      />
+      <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+        <span className="font-medium text-foreground">Actuals &amp; variance:</span> rental-revenue
+        actuals are wired live from MiniHotel — actual reservations, with room revenue recognized
+        per night across each stay and summed per month — and drop into the Actual column beside
+        the plan. There are no costs in MiniHotel, so cost lines keep coming from the workbook.
+      </p>
 
       {/* P&L table */}
       <Card>
@@ -218,22 +232,20 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <CardTitle>P&amp;L — {data.scenario}</CardTitle>
             <div className="flex flex-wrap items-center gap-2">
-              {mode === "forecast" && (
-                <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-[11px]">
-                  {(["plan", "actual", "variance"] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setTableMode(m)}
-                      className={`rounded px-2 py-0.5 capitalize ${
-                        tableMode === m ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {m === "variance" ? "Δ vs plan" : m}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-[11px]">
+                {(["plan", "forecast", "actual", "variance"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setTableMode(m)}
+                    className={`rounded px-2 py-0.5 capitalize ${
+                      tableMode === m ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {m === "variance" ? "Δ actual vs plan" : m}
+                  </button>
+                ))}
+              </div>
               <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-[11px]">
                 {(["year", "quarter", "month"] as const).map((p) => (
                   <button
@@ -251,11 +263,10 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
             </div>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            {mode === "forecast"
-              ? `Plan vs Actual vs variance in one structure — actuals for ${data.actualMonths} month(s)${
-                  data.liveActualMonths ? `, incl. ${data.liveActualMonths} live from MiniHotel` : ""
-                }; the rest fill from production as it syncs. “·” = no actual yet.`
-              : "Driver-derived plan of record. Costs are negative; margins recompute per period."}
+            <b>Plan</b> = locked plan of record · <b>Forecast</b> = plan + your driver adjustments ·{" "}
+            <b>Actual</b> = real data ({data.actualMonths} month(s)
+            {data.liveActualMonths ? `, incl. ${data.liveActualMonths} live from MiniHotel` : ""}) ·{" "}
+            <b>Δ</b> = how actuals align with the plan. “·” = no actual yet.
           </p>
         </CardHeader>
         <CardContent>
@@ -274,7 +285,7 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
               </thead>
               <tbody>
                 {data.lines.map((ln) => (
-                  <LineRow key={ln.id} ln={ln} mode={mode === "forecast" ? tableMode : "plan"} />
+                  <LineRow key={ln.id} ln={ln} mode={tableMode} />
                 ))}
               </tbody>
             </table>
@@ -285,36 +296,47 @@ export function BridgePanel({ mode = "forecast" }: { mode?: "plan" | "forecast" 
   );
 }
 
-function LineRow({ ln, mode }: { ln: Line; mode: "plan" | "actual" | "variance" }) {
+function LineRow({ ln, mode }: { ln: Line; mode: TableMode }) {
   const bold = ln.kind === "total" || ln.kind === "subtotal";
   const isTotal = ln.kind === "total";
   const isRatio = ln.kind === "ratio";
   const pad = { paddingLeft: `${0.25 + ln.level * 0.9}rem` };
   const none = { text: "·", cls: "text-muted-foreground/40" };
 
-  // What each period cell shows, given the active Plan / Actual / Variance mode.
+  // What each period cell shows, given the active Plan / Forecast / Actual / Δ mode.
+  // Plan reads the locked series; Forecast the driver-adjusted one; Δ = actual − plan.
   const cell = (i: number): { text: string; cls: string } => {
-    const plan = ln.monthly[i];
+    const plan = ln.plan?.[i] ?? ln.monthly[i];
+    const fc = ln.monthly[i];
     const act = ln.actual[i] ?? 0;
-    if (isRatio) return { text: mode === "plan" ? fmtPct(plan) : "", cls: "" };
+    if (isRatio) {
+      if (mode === "plan") return { text: fmtPct(plan), cls: "" };
+      if (mode === "forecast") return { text: fmtPct(fc), cls: "" };
+      return { text: "", cls: "" };
+    }
     if (mode === "plan") return { text: fmtC(plan), cls: isTotal ? tone(plan) : "" };
+    if (mode === "forecast") {
+      const changed = Math.abs(fc - plan) > Math.max(1, Math.abs(plan) * 0.001);
+      return { text: fmtC(fc), cls: isTotal ? tone(fc) : changed ? "text-primary" : "" };
+    }
     if (act === 0) return none; // no actual reported for this period
     if (mode === "actual") return { text: fmtC(act), cls: isTotal ? tone(act) : "" };
     const v = act - plan;
     return { text: `${v >= 0 ? "+" : ""}${fmtC(v)}`, cls: tone(v) };
   };
 
-  // Row total: for actual/variance, sum only over periods that have an actual.
+  // Row total: for actual/Δ, sum only over periods that have an actual.
   const totalCell = (): { text: string; cls: string } => {
     if (isRatio) return { text: "", cls: "" };
-    if (mode === "plan") return { text: fmtC(ln.total), cls: isTotal ? tone(ln.total) : "" };
+    if (mode === "plan") return { text: fmtC(ln.planTotal ?? ln.total), cls: isTotal ? tone(ln.planTotal ?? ln.total) : "" };
+    if (mode === "forecast") return { text: fmtC(ln.total), cls: isTotal ? tone(ln.total) : "" };
     let aSum = 0;
     let pSum = 0;
     let any = false;
     ln.actual.forEach((a, i) => {
       if (a !== 0) {
         aSum += a;
-        pSum += ln.monthly[i];
+        pSum += ln.plan?.[i] ?? ln.monthly[i];
         any = true;
       }
     });
@@ -365,7 +387,7 @@ function DriverEditor({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle>What-if drivers</CardTitle>
+          <CardTitle>Forecast drivers (what-if)</CardTitle>
           {hasOverrides && (
             <button
               type="button"
@@ -373,12 +395,13 @@ function DriverEditor({
               onClick={onReset}
               className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground"
             >
-              <RotateCcw className="h-3 w-3" /> Reset to plan
+              <RotateCcw className="h-3 w-3" /> Reset forecast to plan
             </button>
           )}
         </div>
         <p className="text-[11px] text-muted-foreground">
-          Override a driver to hold it flat across the horizon and recompute the whole P&amp;L. Blank = plan.
+          The plan stays locked — editing a driver here reshapes the <b>forecast</b> (hold it flat
+          across the horizon and the whole P&amp;L recomputes). Blank = back to plan.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">

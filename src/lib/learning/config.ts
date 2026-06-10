@@ -23,6 +23,14 @@ export const LEARNING = {
   staleAfterDays: 10,
 } as const;
 
+/** Raw-ladder retention (design §4.3): keep full-resolution search_results for
+ *  rawDays, then downsample older runs to per-decile percentile summaries. */
+export const LADDER_RETENTION = {
+  rawDays: 120,
+  /** Prune runs at most this often (guarded via meta, called from recordRun). */
+  pruneEveryHours: 24,
+} as const;
+
 export interface LeadBucket {
   key: string;
   min: number;

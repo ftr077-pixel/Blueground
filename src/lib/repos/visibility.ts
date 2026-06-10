@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
-import { insertSearchResults, type SearchResultsInput } from "@/lib/repos/search-results";
+import { insertSearchResults, pruneLadder, type SearchResultsInput } from "@/lib/repos/search-results";
 import type { CostDefaults } from "@/lib/revenue";
 
 // A search profile = the *query* (area + dates + guests). Many listings share one.
@@ -280,7 +280,15 @@ export function updateProfile(id: string, patch: Partial<ProfileInput>): void {
 export function deleteProfile(id: string): void {
   const db = getDb();
   const tx = db.transaction(() => {
-    db.prepare("DELETE FROM listing_snapshots WHERE profile_id = ?").run(id);
+    // Snapshots are deleted by listing as well as by profile: a listing that was
+    // moved between profiles keeps snapshots stamped with its old profile_id,
+    // and those would block the tracked_listings delete via the FK.
+    db.prepare(
+      "DELETE FROM listing_snapshots WHERE profile_id = ? OR listing_id IN (SELECT id FROM tracked_listings WHERE profile_id = ?)",
+    ).run(id, id);
+    // The competitor price ladder references the profile too — without this the
+    // profile delete always fails the FK check (the seed alone guarantees rows).
+    db.prepare("DELETE FROM search_results WHERE profile_id = ?").run(id);
     db.prepare("DELETE FROM tracked_listings WHERE profile_id = ?").run(id);
     db.prepare("DELETE FROM search_profiles WHERE id = ?").run(id);
   });
@@ -627,6 +635,13 @@ export function recordRun(input: RecordRunInput): number {
     }
   });
   tx();
+  // Housekeeping: downsample+delete raw ladder rows past retention (daily guard;
+  // never let it break an ingest).
+  try {
+    pruneLadder();
+  } catch {
+    // ignore — retention is best-effort
+  }
   return input.snapshots.length;
 }
 
@@ -756,7 +771,11 @@ export function getScanState(): ScanState {
   let running = !!started;
   if (started) {
     const age = Date.now() - new Date(started).getTime();
-    if (Number.isNaN(age) || age > 30 * 60 * 1000) running = false; // stale-run guard
+    // Stale-run guard. Generous on purpose: a full portfolio scan (per-listing
+    // calendar fetches + paced searches) legitimately runs well past 30 minutes,
+    // and declaring it dead lets a second concurrent scraper start against the
+    // same proxy. A genuinely crashed scan is cleared via the Cancel button.
+    if (Number.isNaN(age) || age > 3 * 60 * 60 * 1000) running = false;
   }
   return {
     running,
@@ -869,6 +888,88 @@ export function computeMovers(limit = 40): Mover[] {
   return movers.slice(0, limit);
 }
 
+// Forward-looking positioning: for weekly check-in dates starting today, where
+// does each apartment place in search results (1 = first)? Scans store
+// snapshots keyed by the check-in date they searched for, so this takes the
+// most recent scan of each (listing, check-in) inside the window, uses the best
+// rank across stay lengths, and snaps it to the nearest weekly date (within
+// half a step). Null = that week wasn't scanned, or the listing didn't appear.
+export interface ForwardRankSeries {
+  listingId: string;
+  label: string;
+  airbnbId: string;
+  ranks: Array<number | null>; // aligned with ForwardRankTrend.dates
+}
+
+export interface ForwardRankTrend {
+  dates: string[]; // weekly check-in dates: today, +7d, … out to `days`
+  series: ForwardRankSeries[];
+}
+
+const DAY_MS = 86400000;
+const isoAddDays = (iso: string, n: number) =>
+  new Date(Date.parse(iso + "T00:00:00Z") + n * DAY_MS).toISOString().slice(0, 10);
+
+export function forwardRankTrend(days = 90, stepDays = 7): ForwardRankTrend {
+  const db = getDb();
+  const start = new Date().toISOString().slice(0, 10);
+  const dates: string[] = [];
+  for (let off = 0; off <= days; off += stepDays) dates.push(isoAddDays(start, off));
+
+  // Best rank across stay lengths, per (listing, check-in, run).
+  const rows = db
+    .prepare(
+      `SELECT listing_id AS listingId, check_in AS checkIn, MAX(ts) AS ts,
+         MIN(CASE WHEN found = 1 THEN rank END) AS bestRank
+       FROM listing_snapshots
+       WHERE check_in >= ? AND check_in <= ?
+       GROUP BY listing_id, check_in, run_id`,
+    )
+    .all(start, isoAddDays(start, days)) as Array<{
+    listingId: string;
+    checkIn: string;
+    ts: string;
+    bestRank: number | null;
+  }>;
+
+  // Most recent run wins per (listing, check-in).
+  const latest = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    const key = `${r.listingId}::${r.checkIn}`;
+    const cur = latest.get(key);
+    if (!cur || r.ts > cur.ts) latest.set(key, r);
+  }
+
+  // Snap each scanned check-in to its nearest weekly date; if several land on
+  // the same week, the closest (then freshest) wins.
+  const startMs = Date.parse(start + "T00:00:00Z");
+  const tolerance = Math.floor(stepDays / 2);
+  const cells = new Map<string, { rank: number | null; dist: number; ts: string }>();
+  for (const r of latest.values()) {
+    const dayOff = Math.round((Date.parse(r.checkIn + "T00:00:00Z") - startMs) / DAY_MS);
+    const idx = Math.round(dayOff / stepDays);
+    if (idx < 0 || idx >= dates.length) continue;
+    const dist = Math.abs(dayOff - idx * stepDays);
+    if (dist > tolerance) continue;
+    const key = `${r.listingId}::${idx}`;
+    const cur = cells.get(key);
+    if (!cur || dist < cur.dist || (dist === cur.dist && r.ts > cur.ts)) {
+      cells.set(key, { rank: r.bestRank, dist, ts: r.ts });
+    }
+  }
+
+  const series: ForwardRankSeries[] = listListings()
+    .filter((l) => l.active)
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map((l) => ({
+      listingId: l.id,
+      label: l.label,
+      airbnbId: l.airbnbId,
+      ranks: dates.map((_, i) => cells.get(`${l.id}::${i}`)?.rank ?? null),
+    }));
+  return { dates, series };
+}
+
 // ---------------------------------------------------------------- comp-set / market data
 // Our home-grown analog to PriceLabs' "Neighborhood Data": percentile nightly
 // rate bands derived from the competitor prices we already scrape. Snapshot
@@ -934,6 +1035,9 @@ export function marketRateBands(): RateBand[] {
         currency: r.currency ?? "ILS",
         nightly: [],
       };
+    // Don't mix currencies inside one band — a stray USD snapshot among ILS
+    // rows would skew the percentiles while the band stays labeled ILS.
+    if ((r.currency ?? "ILS") !== g.currency) continue;
     g.nightly.push(r.price / r.nights);
     groups.set(key, g);
   }

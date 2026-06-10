@@ -110,6 +110,23 @@ export function setUnitMinStay(unitId: string, minStay: number) {
   db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);
 }
 
+// Seed a unit's base/current/floor/ceiling from a rate anchor (e.g. derived from
+// the Rates Calendar / MiniHotel) — only for units that don't have a base rate
+// yet, so we never clobber an existing one.
+export function setUnitRateAnchor(
+  unitId: string,
+  base: number,
+  current: number,
+  minRate: number,
+  maxRate: number,
+) {
+  const db = getDb();
+  db.prepare(
+    `UPDATE units SET base_rate = ?, current_rate = ?, min_rate = ?, max_rate = ?,
+       last_rate_change_at = ? WHERE id = ? AND base_rate <= 0`,
+  ).run(base, current, minRate, maxRate, new Date().toISOString(), unitId);
+}
+
 export function setUnitMiniHotelRoomType(unitId: string, code: string | null) {
   const db = getDb();
   db.prepare("UPDATE units SET minihotel_room_type = ? WHERE id = ?").run(code, unitId);
@@ -141,6 +158,7 @@ export function deleteUnitsByIdPrefix(prefix: string): number {
     db.prepare("DELETE FROM pricing_history WHERE unit_id LIKE ?").run(like);
     db.prepare("UPDATE tracked_searches SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
     db.prepare("UPDATE tracked_listings SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
+    db.prepare("UPDATE reservation SET unit_id = NULL WHERE unit_id LIKE ?").run(like);
     db.prepare("DELETE FROM units WHERE id LIKE ?").run(like);
   });
   tx();
@@ -197,6 +215,12 @@ export function recordPricing(
     status: row.status,
   });
   return row;
+}
+
+/** Flip a history row's status when its escalation is decided (approved/rejected). */
+export function setPricingStatus(historyId: string, status: PricingHistoryRow["status"]): void {
+  const db = getDb();
+  db.prepare("UPDATE pricing_history SET status = ? WHERE id = ?").run(status, historyId);
 }
 
 export function listPricingHistory(unitId?: string, limit = 50): PricingHistoryRow[] {

@@ -101,11 +101,14 @@ export function updatePnlLine(
        monthly_amount=@monthly_amount, growth_pct=@growth_pct, active=@active WHERE id=@id`,
   ).run({
     id,
-    label: (patch.label ?? cur.label).trim() || cur.label,
-    category: patch.category ?? cur.category,
-    section: (patch.section ?? cur.section).trim() || cur.section,
-    monthly_amount: patch.monthlyAmount !== undefined ? patch.monthlyAmount : cur.monthly_amount,
-    growth_pct: patch.growthPct !== undefined ? patch.growthPct : cur.growth_pct,
+    label: (typeof patch.label === "string" ? patch.label : cur.label).trim() || cur.label,
+    category: patch.category === "revenue" || patch.category === "cost" ? patch.category : cur.category,
+    section: (typeof patch.section === "string" ? patch.section : cur.section).trim() || cur.section,
+    // Same finite-number guard as createPnlLine: the route passes raw PATCH
+    // JSON, and an explicit null/string here would either hit the NOT NULL
+    // constraint (500) or store text that turns the whole forecast into NaN.
+    monthly_amount: Number.isFinite(patch.monthlyAmount) ? patch.monthlyAmount : cur.monthly_amount,
+    growth_pct: Number.isFinite(patch.growthPct) ? patch.growthPct : cur.growth_pct,
     active: (patch.active ?? !!cur.active) ? 1 : 0,
   });
 }

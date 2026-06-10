@@ -79,7 +79,7 @@ interface HistoryDto {
 
 interface RunSummary {
   ranAt: string;
-  summary: { total: number; applied: number; flagged: number; noOps: number };
+  summary: { total: number; applied: number; flagged: number; noOps: number; skipped?: number };
 }
 
 const STATUS_VARIANT: Record<HistoryDto["status"], "success" | "warning" | "muted"> = {
@@ -162,6 +162,7 @@ export function PricingPanel() {
               <span className="text-[10px] text-muted-foreground">
                 last pass {formatRelative(lastRun.ranAt)} · {lastRun.summary.applied} applied ·{" "}
                 {lastRun.summary.flagged} flagged
+                {lastRun.summary.skipped ? ` · ${lastRun.summary.skipped} skipped (no rate yet)` : ""}
               </span>
             )}
             <button
@@ -295,8 +296,10 @@ export function PricingPanel() {
                 {units.map((u) => {
                   const delta = ((u.currentRate - u.baseRate) / u.baseRate) * 100;
                   const effMonthly = Math.round(u.currentRate * 30 * (1 - u.monthlyDiscountPct));
-                  const atFloor = u.currentRate <= u.minRate;
-                  const atCeil = u.currentRate >= u.maxRate;
+                  // Freshly-imported units have rate/floor/ceiling all 0 — that's
+                  // "no rates yet", not pinned at both bounds at once.
+                  const atFloor = u.maxRate > 0 && u.currentRate <= u.minRate;
+                  const atCeil = u.maxRate > 0 && u.currentRate >= u.maxRate;
                   return (
                     <tr key={u.id} className="border-t border-border/60">
                       <td className="px-3 py-2">

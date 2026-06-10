@@ -62,6 +62,12 @@ interface Elasticity {
     marginBefore: number | null;
     marginAfter: number | null;
   } | null;
+  model: {
+    offsetRank: number;
+    offsetN: number;
+    ownPositionsPerPct: number | null;
+    ownN: number;
+  };
   confidence: {
     level: "high" | "medium" | "low";
     n: number;
@@ -125,7 +131,11 @@ export function IntelligencePanel() {
     setCheckIn((c) => (checkIns.includes(c) ? c : checkIns[0] ?? ""));
   }, [checkIns]);
 
-  // Fetch the recommendation whenever the selection changes.
+  // Fetch the recommendation whenever the selection changes. Selection changes
+  // fire this twice in quick succession (listing change → stay reset), so stale
+  // responses are dropped; errors clear on the next success rather than
+  // replacing the whole panel (which would unmount the very selectors needed
+  // to recover from e.g. a transient 500).
   useEffect(() => {
     if (!listingId) return;
     const params = new URLSearchParams({
@@ -134,14 +144,25 @@ export function IntelligencePanel() {
       targetPage: String(targetPage),
     });
     if (checkIn) params.set("checkIn", checkIn);
+    let stale = false;
     fetch(`/api/learning/elasticity?${params}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
-      .then((b: Elasticity) => setData(b))
-      .catch((e) => setErr(e instanceof Error ? e.message : "failed to load"));
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`request failed (${r.status})`))))
+      .then((b: Elasticity) => {
+        if (stale) return;
+        setData(b);
+        setErr(null);
+      })
+      .catch((e) => {
+        if (!stale) setErr(e instanceof Error ? e.message : "failed to load");
+      });
+    return () => {
+      stale = true;
+    };
   }, [listingId, nights, checkIn, targetPage]);
 
   if (loading) return <p className="text-xs text-muted-foreground">Loading…</p>;
-  if (err) return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
+  if (err && !listings.length)
+    return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
   if (!listings.length)
     return <p className="text-[11px] text-muted-foreground">No listings tracked yet.</p>;
 
@@ -198,9 +219,130 @@ export function IntelligencePanel() {
         </label>
       </div>
 
+      {err && (
+        <p className="text-[11px] text-[hsl(var(--danger))]">
+          Couldn’t load the recommendation ({err}) — change the selection to retry.
+        </p>
+      )}
       {data && <Recommendation data={data} confBadge={confBadge} />}
       {data && <CurveCard data={data} />}
+      {listingId && <OutcomesCard listingId={listingId} nights={nights} />}
+      <StrategyCard />
     </div>
+  );
+}
+
+interface Outcomes {
+  scope: "unit" | "portfolio";
+  unitId: string | null;
+  pace: { medianLeadDays: number | null; n: number; histogram: { key: string; label: string; count: number }[] };
+  realizedNightly: { p25: number; p50: number; p75: number; n: number; currency: string | null } | null;
+  recent: Array<{
+    id: string;
+    createdOn: string | null;
+    arrival: string | null;
+    nightly: number | null;
+    source: string | null;
+    status: string | null;
+    leadDays: number | null;
+  }>;
+  marketPace: { medianLeadDays: number | null } | null;
+  paceDeltaDays: number | null;
+}
+
+function OutcomesCard({ listingId, nights }: { listingId: string; nights: number }) {
+  const [o, setO] = useState<Outcomes | null>(null);
+  useEffect(() => {
+    fetch(`/api/learning/outcomes?listingId=${listingId}&nights=${nights}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then(setO)
+      .catch(() => setO(null));
+  }, [listingId, nights]);
+
+  if (!o) return null;
+  const hasData = (o.realizedNightly?.n ?? 0) > 0 || o.pace.n > 0;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Booking outcomes · MiniHotel</CardTitle>
+          <Badge variant={o.scope === "unit" ? "info" : "muted"}>
+            {o.scope === "unit" ? "this unit" : "portfolio"}
+          </Badge>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          What actually booked — realized price and how far ahead. Our pace is the benchmark to
+          compare against market booking lead times (M5), and the truth behind strategy success (M6).
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {!hasData ? (
+          <p className="text-[11px] text-muted-foreground">
+            No bookings synced yet — run the MiniHotel bookings sync (POST
+            /api/integrations/minihotel/bookings).
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-x-10 gap-y-3">
+              {o.realizedNightly && (
+                <Stat
+                  label={`Realized nightly (n=${o.realizedNightly.n})`}
+                  value={`${fmtMoney(o.realizedNightly.p50)}/n`}
+                  sub={`${fmtMoney(o.realizedNightly.p25)}–${fmtMoney(o.realizedNightly.p75)}`}
+                />
+              )}
+              <Stat
+                label={`Our pace (n=${o.pace.n})`}
+                value={o.pace.medianLeadDays != null ? `~${o.pace.medianLeadDays}d out` : "—"}
+                sub="median booking lead"
+              />
+              {o.marketPace?.medianLeadDays != null && (
+                <Stat
+                  label="Pace vs market"
+                  value={
+                    o.paceDeltaDays != null
+                      ? `${o.paceDeltaDays === 0 ? "on pace" : `${Math.abs(o.paceDeltaDays)}d ${o.paceDeltaDays < 0 ? "earlier" : "later"}`}`
+                      : "—"
+                  }
+                  sub={`market ~${o.marketPace.medianLeadDays}d out`}
+                />
+              )}
+            </div>
+            {o.marketPace?.medianLeadDays == null && (
+              <p className="text-[11px] text-muted-foreground">
+                Add market booking lead times to compare pace (POST /api/learning/market-pace).
+              </p>
+            )}
+            {o.recent.length > 0 && (
+              <div className="overflow-hidden rounded-lg border border-border">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-2 py-1 text-left">Booked</th>
+                      <th className="px-2 py-1 text-left">Arrival</th>
+                      <th className="px-2 py-1 text-right">Lead</th>
+                      <th className="px-2 py-1 text-right">Nightly</th>
+                      <th className="px-2 py-1 text-left">Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {o.recent.slice(0, 8).map((b) => (
+                      <tr key={b.id} className="border-t border-border/40">
+                        <td className="px-2 py-1 font-mono text-muted-foreground">{b.createdOn ?? "—"}</td>
+                        <td className="px-2 py-1 font-mono">{b.arrival ?? "—"}</td>
+                        <td className="px-2 py-1 text-right">{b.leadDays != null ? `${b.leadDays}d` : "—"}</td>
+                        <td className="px-2 py-1 text-right font-mono">{fmtMoney(b.nightly)}</td>
+                        <td className="px-2 py-1">{b.source ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -290,6 +432,16 @@ function Recommendation({ data, confBadge }: { data: Elasticity; confBadge: Reac
         </div>
 
         {drop && data.note && <p className="text-[11px] text-muted-foreground">{data.note}</p>}
+        {data.model.offsetN >= 2 && (
+          <p className="text-[11px] text-muted-foreground">
+            Model B: this listing ranks {Math.abs(data.model.offsetRank)} positions{" "}
+            {data.model.offsetRank <= 0 ? "better" : "worse"} than its price implies (from{" "}
+            {data.model.offsetN} appearances)
+            {data.model.ownPositionsPerPct != null &&
+              `; observed own sensitivity ≈ ${data.model.ownPositionsPerPct} pos per 1% cut (n=${data.model.ownN})`}
+            .
+          </p>
+        )}
         <p className="text-[11px] text-muted-foreground">
           Based on {data.confidence.n} market listings
           {data.confidence.freshnessDays != null && ` · scanned ${data.confidence.freshnessDays}d ago`}.
@@ -308,6 +460,103 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
       {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
     </div>
+  );
+}
+
+interface AttributionReport {
+  strategies: Array<{
+    strategy: "after-drop" | "after-raise" | "no-change";
+    n: number;
+    medianRealizedPctOfAsking: number | null;
+    medianLeadDays: number | null;
+    medianDaysFromChange: number | null;
+  }>;
+  followThrough: { windowDays: number; drops: number; dropsBooked: number; raises: number; raisesBooked: number };
+  unattributed: number;
+}
+
+const STRATEGY_LABELS: Record<string, string> = {
+  "after-drop": "▼ After a drop",
+  "after-raise": "▲ After a raise",
+  "no-change": "No recent change",
+};
+
+// Portfolio-wide: how bookings closed relative to asking, grouped by the price
+// action that preceded them — the "success rate over strategy" view.
+function StrategyCard() {
+  const [r, setR] = useState<AttributionReport | null>(null);
+  useEffect(() => {
+    fetch("/api/learning/attribution", { cache: "no-store" })
+      .then((res) => res.json())
+      .then(setR)
+      .catch(() => setR(null));
+  }, []);
+
+  if (!r) return null;
+  const total = r.strategies.reduce((s, x) => s + x.n, 0);
+  const ft = r.followThrough;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Strategy outcomes · portfolio</CardTitle>
+          <Badge variant="muted">{total} attributed</Badge>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Each booking joined to the asking price, search position, and price action live when it
+          was booked — how each strategy actually converts.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {total === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No attributable bookings yet — sync MiniHotel bookings and map listings to units in
+            Manage so they join up.
+            {r.unattributed > 0 && ` (${r.unattributed} booking(s) lack a listing↔unit link.)`}
+          </p>
+        ) : (
+          <>
+            <div className="overflow-hidden rounded-lg border border-border">
+              <table className="w-full text-[11px]">
+                <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 text-left">Strategy</th>
+                    <th className="px-2 py-1 text-right">Bookings</th>
+                    <th className="px-2 py-1 text-right">Realized vs asking</th>
+                    <th className="px-2 py-1 text-right">Lead</th>
+                    <th className="px-2 py-1 text-right">Days from move</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {r.strategies.map((s) => (
+                    <tr key={s.strategy} className="border-t border-border/40">
+                      <td className="px-2 py-1">{STRATEGY_LABELS[s.strategy] ?? s.strategy}</td>
+                      <td className="px-2 py-1 text-right font-mono">{s.n}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {s.medianRealizedPctOfAsking != null ? `${Math.round(s.medianRealizedPctOfAsking)}%` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {s.medianLeadDays != null ? `${Math.round(s.medianLeadDays)}d` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {s.medianDaysFromChange != null ? `${Math.round(s.medianDaysFromChange)}d` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {ft.drops > 0
+                ? `Follow-through: ${ft.dropsBooked}/${ft.drops} logged drops were followed by a booking within ${ft.windowDays}d` +
+                  (ft.raises > 0 ? `; raises ${ft.raisesBooked}/${ft.raises}.` : ".")
+                : `No logged price moves yet — log them (POST /api/learning/price-changes) when you change a price, and conversions get attributed to the move.`}
+              {r.unattributed > 0 && ` ${r.unattributed} booking(s) couldn't be attributed (no listing↔unit link).`}
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
