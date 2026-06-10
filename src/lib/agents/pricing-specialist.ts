@@ -5,9 +5,11 @@ import {
   recordPricing,
   setUnitRate,
   setUnitMinStay,
+  setUnitRateAnchor,
   type PricingHistoryRow,
 } from "@/lib/repos/units";
-import { PRICING_AGENT } from "@/lib/config/pricing";
+import { unitRateAnchors } from "@/lib/repos/rates";
+import { PRICING_AGENT, UNIT_PRICING_DEFAULTS, roundRate } from "@/lib/config/pricing";
 import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { representativeQuote, type FactorResult } from "@/lib/pricing/engine";
 
@@ -62,16 +64,28 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
   const asOf = new Date();
   const ranAt = asOf.toISOString();
   const units = listUnits();
+  const anchors = unitRateAnchors();
   const decisions: PricingDecision[] = [];
   const skipped: string[] = [];
 
-  for (const unit of units) {
-    // Units imported but not yet rate-synced (e.g. fresh MiniHotel imports) have
-    // no base/current rate. There's nothing to reprice, and a 0 current rate would
-    // make the % delta NaN and violate the pricing_history NOT NULL constraint.
+  for (const baseUnit of units) {
+    let unit = baseUnit;
+    // MiniHotel-imported units arrive with base/current = 0; their real rates live
+    // in the Rates Calendar. Anchor on the calendar's median nightly rate, persist
+    // it (so the engine + the rest of the app have a rate), and price from that.
+    // Only skip if even the calendar has no rate for the unit.
     if (unit.baseRate <= 0 || unit.currentRate <= 0) {
-      skipped.push(unit.id);
-      continue;
+      const a = anchors.get(unit.id);
+      if (!a) {
+        skipped.push(unit.id);
+        continue;
+      }
+      const base = unit.baseRate > 0 ? unit.baseRate : a.base;
+      const current = unit.currentRate > 0 ? unit.currentRate : a.current;
+      const minRate = unit.minRate > 0 ? unit.minRate : roundRate(base * UNIT_PRICING_DEFAULTS.floorPctOfBase);
+      const maxRate = unit.maxRate > 0 ? unit.maxRate : roundRate(base * UNIT_PRICING_DEFAULTS.ceilingPctOfBase);
+      setUnitRateAnchor(unit.id, base, current, minRate, maxRate);
+      unit = { ...unit, baseRate: base, currentRate: current, minRate, maxRate };
     }
     const q = representativeQuote(unit, providers, asOf);
     const newRate = q.rate;

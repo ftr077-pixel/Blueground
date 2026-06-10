@@ -110,6 +110,23 @@ export function setUnitMinStay(unitId: string, minStay: number) {
   db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);
 }
 
+// Seed a unit's base/current/floor/ceiling from a rate anchor (e.g. derived from
+// the Rates Calendar / MiniHotel) — only for units that don't have a base rate
+// yet, so we never clobber an existing one.
+export function setUnitRateAnchor(
+  unitId: string,
+  base: number,
+  current: number,
+  minRate: number,
+  maxRate: number,
+) {
+  const db = getDb();
+  db.prepare(
+    `UPDATE units SET base_rate = ?, current_rate = ?, min_rate = ?, max_rate = ?,
+       last_rate_change_at = ? WHERE id = ? AND base_rate <= 0`,
+  ).run(base, current, minRate, maxRate, new Date().toISOString(), unitId);
+}
+
 export function setUnitMiniHotelRoomType(unitId: string, code: string | null) {
   const db = getDb();
   db.prepare("UPDATE units SET minihotel_room_type = ? WHERE id = ?").run(code, unitId);
