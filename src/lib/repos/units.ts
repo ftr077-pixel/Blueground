@@ -105,6 +105,22 @@ export function setUnitRate(unitId: string, newRate: number, ts: string) {
   ).run(newRate, ts, unitId);
 }
 
+/** Operator sets the unit's base (anchor) rate — every derived nightly price
+ *  rebuilds from it, and the price floor/ceiling follow proportionally. */
+export function setUnitBaseRate(unitId: string, rate: number) {
+  const db = getDb();
+  db.prepare(
+    "UPDATE units SET base_rate = ?, current_rate = ?, min_rate = ?, max_rate = ?, last_rate_change_at = ? WHERE id = ?",
+  ).run(
+    rate,
+    rate,
+    roundRate(rate * UNIT_PRICING_DEFAULTS.floorPctOfBase),
+    roundRate(rate * UNIT_PRICING_DEFAULTS.ceilingPctOfBase),
+    new Date().toISOString(),
+    unitId,
+  );
+}
+
 export function setUnitMinStay(unitId: string, minStay: number) {
   const db = getDb();
   db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);

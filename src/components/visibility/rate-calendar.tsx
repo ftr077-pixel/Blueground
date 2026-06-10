@@ -38,6 +38,14 @@ interface RateCell {
   maxPrice: number | null;
   note: string | null;
 }
+interface RankInfo {
+  rank: number | null;
+  total: number | null;
+  page: number | null;
+  ts: string;
+  nights: number;
+  found: boolean;
+}
 interface RateRow {
   unit: {
     id: string;
@@ -49,6 +57,10 @@ interface RateRow {
     baseRate: number;
   };
   cells: RateCell[];
+  occ30: number | null;
+  occ60: number | null;
+  occ90: number | null;
+  airbnbRank: RankInfo | null;
 }
 interface Calendar {
   from: string;
@@ -184,6 +196,15 @@ export function RateCalendar() {
       return d.nights ?? 0;
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveBaseRate(unitId: string, rate: number) {
+    setError(null);
+    try {
+      await applyOverride({ unitId, baseRate: rate });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to save base rate");
     }
   }
 
@@ -463,8 +484,42 @@ export function RateCalendar() {
             <table className="border-collapse text-[11px] tabular-nums">
               <thead>
                 <tr>
-                  <th className="sticky left-0 z-20 bg-card px-3 py-2 text-left font-medium text-muted-foreground min-w-[12rem]">
+                  <th className="sticky left-0 z-20 w-48 min-w-[12rem] max-w-[12rem] bg-card px-3 py-2 text-left font-medium text-muted-foreground">
                     Listing
+                  </th>
+                  <th
+                    className="sticky left-[12rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Base rate (₪) — the anchor every nightly price builds from"
+                  >
+                    Base
+                  </th>
+                  <th
+                    className="sticky left-[17rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Occupancy over the next 30 nights (sold ÷ sellable)"
+                  >
+                    Occ
+                    <div className="text-[9px] font-normal">30N</div>
+                  </th>
+                  <th
+                    className="sticky left-[20.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Occupancy over the next 60 nights (sold ÷ sellable)"
+                  >
+                    Occ
+                    <div className="text-[9px] font-normal">60N</div>
+                  </th>
+                  <th
+                    className="sticky left-[24rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Occupancy over the next 90 nights (sold ÷ sellable)"
+                  >
+                    Occ
+                    <div className="text-[9px] font-normal">90N</div>
+                  </th>
+                  <th
+                    className="sticky left-[27.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Latest Airbnb search position for the tracked 1-month stay (visibility tab)"
+                  >
+                    Airbnb
+                    <div className="text-[9px] font-normal">1mo #</div>
                   </th>
                   {data.dates.map((d) => {
                     const p = partsUTC(d);
@@ -491,7 +546,7 @@ export function RateCalendar() {
                   const typical = typicalRate(row);
                   return (
                   <tr key={row.unit.id} className="border-t border-border/50">
-                    <th className="sticky left-0 z-10 bg-card px-3 py-1.5 text-left align-middle min-w-[12rem]">
+                    <th className="sticky left-0 z-10 w-48 min-w-[12rem] max-w-[12rem] bg-card px-3 py-1.5 text-left align-middle">
                       <div className="font-medium text-foreground leading-tight">
                         {(() => {
                           const { num, text } = apartmentDisplayParts(row.unit);
@@ -508,9 +563,27 @@ export function RateCalendar() {
                       <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                         <span>{row.unit.neighborhood}</span>
                         <Badge variant="muted">{row.unit.platform}</Badge>
-                        <span>₪{row.unit.currentRate}</span>
                       </div>
                     </th>
+                    <td className="sticky left-[12rem] z-10 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      <BaseRateCell
+                        value={row.unit.baseRate || row.unit.currentRate || 0}
+                        busy={busy}
+                        onSave={(n) => saveBaseRate(row.unit.id, n)}
+                      />
+                    </td>
+                    <td className="sticky left-[17rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      <OccPill v={row.occ30} />
+                    </td>
+                    <td className="sticky left-[20.5rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      <OccPill v={row.occ60} />
+                    </td>
+                    <td className="sticky left-[24rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      <OccPill v={row.occ90} />
+                    </td>
+                    <td className="sticky left-[27.5rem] z-10 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-1.5 text-center align-middle">
+                      <RankCell rk={row.airbnbRank} />
+                    </td>
                     {row.cells.map((c) => {
                       const selected = sel?.unitId === row.unit.id && sel?.date === c.date;
                       const monthStart = partsUTC(c.date).day === 1;
@@ -648,6 +721,72 @@ function guestsVerdict(g: NonNullable<DiagResult["guests"]>): string {
   if (e310)
     return `Fallback can't help either — the availability search hit the same config error (${e310}). This must be fixed in MiniHotel: set the room type's Basic occupancy (or deactivate it).`;
   return `Fallback returned no rooms${g.errors && g.errors.length ? ` (${g.errors.join("; ")})` : ""} — the broken room must be fixed in MiniHotel.`;
+}
+
+/** PriceLabs-style editable Base: the anchor every nightly price builds from. */
+function BaseRateCell({ value, busy, onSave }: { value: number; busy: boolean; onSave: (n: number) => void }) {
+  const [v, setV] = useState(value ? String(value) : "");
+  useEffect(() => setV(value ? String(value) : ""), [value]);
+  const commit = () => {
+    const n = Math.round(parseFloat(v));
+    if (!Number.isFinite(n) || n <= 0 || n === value) {
+      setV(value ? String(value) : "");
+      return;
+    }
+    onSave(n);
+  };
+  return (
+    <input
+      className={`${inputCls} w-[4.25rem] px-1.5 text-right tabular-nums`}
+      value={v}
+      disabled={busy}
+      inputMode="numeric"
+      placeholder="—"
+      title="Base rate (₪) — press Enter to save; derived prices rebuild from it"
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
+
+function OccPill({ v }: { v: number | null }) {
+  if (v == null) return <span className="text-muted-foreground/50">—</span>;
+  const pct = Math.round(v * 100);
+  const cls =
+    pct < 35
+      ? "bg-danger/10 text-[hsl(var(--danger))]"
+      : pct < 70
+        ? "bg-warning/10 text-[hsl(var(--warning))]"
+        : "bg-muted/40 text-muted-foreground";
+  return (
+    <span className={`inline-block rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums ${cls}`}>
+      {pct}%
+    </span>
+  );
+}
+
+function RankCell({ rk }: { rk: RankInfo | null }) {
+  if (!rk) return <span className="text-muted-foreground/50">—</span>;
+  if (!rk.found || rk.rank == null)
+    return (
+      <span
+        className="text-[10px] text-muted-foreground"
+        title={`Not found in the latest 1-month-stay scan (${rk.ts.slice(0, 10)})`}
+      >
+        n/f
+      </span>
+    );
+  return (
+    <span
+      className="inline-block rounded-full bg-info/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-[hsl(var(--info))]"
+      title={`Airbnb position ${rk.rank}${rk.total ? ` of ${rk.total}` : ""}${rk.page ? ` · page ${rk.page}` : ""} · ${rk.nights}-night stay · scanned ${rk.ts.slice(0, 10)}`}
+    >
+      #{rk.rank}
+    </span>
+  );
 }
 
 function LegendSwatch({ className, label }: { className: string; label: string }) {

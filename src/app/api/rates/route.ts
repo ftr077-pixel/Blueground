@@ -9,6 +9,7 @@ import {
   type AppliedCell,
 } from "@/lib/repos/rates";
 import { logActivity } from "@/lib/repos/activity";
+import { setUnitBaseRate } from "@/lib/repos/units";
 import { pushRatesToMiniHotel, type PushResult } from "@/lib/integrations/minihotel";
 
 export const dynamic = "force-dynamic";
@@ -48,11 +49,37 @@ export async function PATCH(req: Request) {
     price?: number | null;
     minNights?: number | null;
     closed?: boolean | null;
+    // unit base-rate shape
+    baseRate?: number;
   };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "invalid json" }, { status: 400 });
+  }
+
+  // ---- unit base-rate shape: { unitId, baseRate } ----------------------------
+  // The anchor every derived nightly price builds from (PriceLabs "Base").
+  if (body.baseRate !== undefined) {
+    const { unitId } = body;
+    const rate = Math.round(Number(body.baseRate));
+    if (!unitId) {
+      return NextResponse.json({ error: "unitId required" }, { status: 400 });
+    }
+    if (!Number.isFinite(rate) || rate <= 0 || rate > 100000) {
+      return NextResponse.json({ error: "baseRate must be a positive number" }, { status: 400 });
+    }
+    if (!unitExists(unitId)) {
+      return NextResponse.json({ error: "unknown unit" }, { status: 404 });
+    }
+    setUnitBaseRate(unitId, rate);
+    logActivity({
+      department: "revenue",
+      worker: "Pricing Specialist",
+      message: `Rates Calendar · ${unitId}: base rate set to ₪${rate} (derived prices and floors/ceilings rebuilt).`,
+      level: "info",
+    });
+    return NextResponse.json({ ok: true });
   }
 
   // ---- range shape: { unitId, from, to, ... } --------------------------------
