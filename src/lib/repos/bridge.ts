@@ -51,8 +51,10 @@ export function clearOverrides(): void {
 
 export type Period = "month" | "quarter" | "year";
 
-// Computed model with overrides applied + aggregated to the requested period.
-// The chart always uses the monthly series; the table uses the period buckets.
+// Computed model aggregated to the requested period, carrying BOTH series:
+//   plan     — the locked plan of record (no driver overrides), per line
+//   monthly  — the forecast (plan + driver what-if overrides applied)
+// With no overrides the two are identical. The chart uses the forecast monthlies.
 export function getBridgeView(period: Period, base = false) {
   const overrides = base ? {} : getOverrides();
   const result = computeBridge(overrides);
@@ -69,11 +71,22 @@ export function getBridgeView(period: Period, base = false) {
   }
 
   const agg = aggregate(result, period);
+
+  // Locked plan series for the same period buckets (computed without overrides).
+  const hasOverrides = Object.keys(overrides).length > 0;
+  const planResult = hasOverrides ? computeBridge({}) : result;
+  const planAgg = hasOverrides ? aggregate(planResult, period) : agg;
+  const planById = new Map(planAgg.lines.map((l) => [l.id, l]));
+  const lines = agg.lines.map((ln) => {
+    const p = planById.get(ln.id);
+    return { ...ln, plan: p?.monthly ?? ln.monthly, planTotal: p?.total ?? ln.total };
+  });
+
   return {
     scenario: result.scenario,
     period,
     periods: agg.periods,
-    lines: agg.lines,
+    lines,
     chart: {
       months: result.months,
       revenue: result.series.revenue.map((x) => Math.round(x)),
@@ -81,6 +94,7 @@ export function getBridgeView(period: Period, base = false) {
       netIncome: result.series.netIncome.map((x) => Math.round(x)),
     },
     summary: result.summary,
+    planSummary: planResult.summary,
     drivers: result.drivers,
     overrides,
     maxBaselineErrorPct: result.maxBaselineErrorPct,
