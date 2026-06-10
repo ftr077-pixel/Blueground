@@ -695,6 +695,11 @@ function seedBookings(db: Database.Database) {
       });
     }
     db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_bookings', 'v1')").run();
+    // Link the seeded listing to the seeded unit so the demo bookings attribute
+    // (booking → unit → listing → its scans). Touches only the seed row.
+    db.prepare(
+      "UPDATE tracked_listings SET unit_id = 'BG-2231' WHERE id = 'lst-portmamad' AND unit_id IS NULL",
+    ).run();
   });
   tx();
 }

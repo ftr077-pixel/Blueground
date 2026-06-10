@@ -207,6 +207,7 @@ export function IntelligencePanel() {
       {data && <Recommendation data={data} confBadge={confBadge} />}
       {data && <CurveCard data={data} />}
       {listingId && <OutcomesCard listingId={listingId} />}
+      <StrategyCard />
     </div>
   );
 }
@@ -439,6 +440,103 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
       {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
     </div>
+  );
+}
+
+interface AttributionReport {
+  strategies: Array<{
+    strategy: "after-drop" | "after-raise" | "no-change";
+    n: number;
+    medianRealizedPctOfAsking: number | null;
+    medianLeadDays: number | null;
+    medianDaysFromChange: number | null;
+  }>;
+  followThrough: { windowDays: number; drops: number; dropsBooked: number; raises: number; raisesBooked: number };
+  unattributed: number;
+}
+
+const STRATEGY_LABELS: Record<string, string> = {
+  "after-drop": "▼ After a drop",
+  "after-raise": "▲ After a raise",
+  "no-change": "No recent change",
+};
+
+// Portfolio-wide: how bookings closed relative to asking, grouped by the price
+// action that preceded them — the "success rate over strategy" view.
+function StrategyCard() {
+  const [r, setR] = useState<AttributionReport | null>(null);
+  useEffect(() => {
+    fetch("/api/learning/attribution", { cache: "no-store" })
+      .then((res) => res.json())
+      .then(setR)
+      .catch(() => setR(null));
+  }, []);
+
+  if (!r) return null;
+  const total = r.strategies.reduce((s, x) => s + x.n, 0);
+  const ft = r.followThrough;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Strategy outcomes · portfolio</CardTitle>
+          <Badge variant="muted">{total} attributed</Badge>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Each booking joined to the asking price, search position, and price action live when it
+          was booked — how each strategy actually converts.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {total === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No attributable bookings yet — sync MiniHotel bookings and map listings to units in
+            Manage so they join up.
+            {r.unattributed > 0 && ` (${r.unattributed} booking(s) lack a listing↔unit link.)`}
+          </p>
+        ) : (
+          <>
+            <div className="overflow-hidden rounded-lg border border-border">
+              <table className="w-full text-[11px]">
+                <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 text-left">Strategy</th>
+                    <th className="px-2 py-1 text-right">Bookings</th>
+                    <th className="px-2 py-1 text-right">Realized vs asking</th>
+                    <th className="px-2 py-1 text-right">Lead</th>
+                    <th className="px-2 py-1 text-right">Days from move</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {r.strategies.map((s) => (
+                    <tr key={s.strategy} className="border-t border-border/40">
+                      <td className="px-2 py-1">{STRATEGY_LABELS[s.strategy] ?? s.strategy}</td>
+                      <td className="px-2 py-1 text-right font-mono">{s.n}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {s.medianRealizedPctOfAsking != null ? `${Math.round(s.medianRealizedPctOfAsking)}%` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {s.medianLeadDays != null ? `${Math.round(s.medianLeadDays)}d` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        {s.medianDaysFromChange != null ? `${Math.round(s.medianDaysFromChange)}d` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {ft.drops > 0
+                ? `Follow-through: ${ft.dropsBooked}/${ft.drops} logged drops were followed by a booking within ${ft.windowDays}d` +
+                  (ft.raises > 0 ? `; raises ${ft.raisesBooked}/${ft.raises}.` : ".")
+                : `No logged price moves yet — log them (POST /api/learning/price-changes) when you change a price, and conversions get attributed to the move.`}
+              {r.unattributed > 0 && ` ${r.unattributed} booking(s) couldn't be attributed (no listing↔unit link).`}
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
