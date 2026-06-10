@@ -33,6 +33,9 @@ interface RateCell {
   booked: boolean;
   weekend: boolean;
   source: "derived" | "manual" | "minihotel";
+  minPrice: number | null;
+  maxPrice: number | null;
+  note: string | null;
 }
 interface RateRow {
   unit: {
@@ -141,22 +144,20 @@ export function RateCalendar() {
     return row && cell ? { unit: row.unit, cell } : null;
   }, [sel, data]);
 
-  async function save(body: { unitId: string; date: string; price: number; minNights: number; closed: boolean }) {
+  // Apply a Date Specific Override (range shape). Throws on failure so the
+  // panel can show the error inline; the caller closes the panel on success.
+  async function applyOverride(body: Record<string, unknown>): Promise<number> {
     setBusy(true);
-    setError(null);
     try {
       const res = await fetch("/api/rates", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const e = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(e.error || `request failed (${res.status})`);
-      }
+      const d = (await res.json().catch(() => ({}))) as { error?: string; nights?: number };
+      if (!res.ok) throw new Error(d.error || `request failed (${res.status})`);
       await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "request failed");
+      return d.nights ?? 0;
     } finally {
       setBusy(false);
     }
@@ -308,18 +309,17 @@ export function RateCalendar() {
         </p>
       )}
 
-      {/* edit bar */}
+      {/* Date Specific Overrides panel */}
       {selCell && (
-        <EditBar
+        <OverridePanel
           key={`${selCell.unit.id}|${selCell.cell.date}`}
+          unitId={selCell.unit.id}
           unitName={apartmentLabel(selCell.unit)}
           cell={selCell.cell}
           defaultMinNights={data.defaultMinNights}
           busy={busy}
           onClose={() => setSel(null)}
-          onSave={(price, minNights, closed) =>
-            save({ unitId: selCell.unit.id, date: selCell.cell.date, price, minNights, closed })
-          }
+          onApply={applyOverride}
         />
       )}
 
@@ -333,8 +333,9 @@ export function RateCalendar() {
             </span>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Click any night to edit its rate, minimum-stay, or close it. Edits are staged locally —
-            wiring the push to MiniHotel (Reverse ARI) is the next step.
+            Click any night to open Date Specific Overrides — set a fixed or percent price, min/max
+            bounds, minimum stay, or close a whole date range. Edits are staged locally — wiring the
+            push to MiniHotel (Reverse ARI) is the next step.
           </p>
         </CardHeader>
         <CardContent>
@@ -454,67 +455,338 @@ function LegendSwatch({ className, label }: { className: string; label: string }
   );
 }
 
-function EditBar({
+const sectionCls = "rounded-md bg-muted/40 px-3 py-2 text-xs font-semibold text-foreground";
+const fieldLabelCls = "flex flex-col gap-1 text-[11px] text-muted-foreground";
+
+function OverridePanel({
+  unitId,
   unitName,
   cell,
   defaultMinNights,
   busy,
-  onSave,
+  onApply,
   onClose,
 }: {
+  unitId: string;
   unitName: string;
   cell: RateCell;
   defaultMinNights: number;
   busy: boolean;
-  onSave: (price: number, minNights: number, closed: boolean) => void;
+  onApply: (body: Record<string, unknown>) => Promise<number>;
   onClose: () => void;
 }) {
-  const [price, setPrice] = useState(cell.price == null ? "" : String(cell.price));
-  const [minNights, setMinNights] = useState(String(cell.minNights));
-  const [closed, setClosed] = useState(cell.closed);
-  const num = (s: string, d: number) => {
-    const n = parseInt(s, 10);
-    return Number.isFinite(n) ? n : d;
-  };
+  const [start, setStart] = useState(cell.date);
+  const [end, setEnd] = useState(cell.date);
+  const [dowOn, setDowOn] = useState(false);
+  const [dow, setDow] = useState<boolean[]>(Array(7).fill(true));
+  const [priceMode, setPriceMode] = useState<"fixed" | "pct">("fixed");
+  const [priceVal, setPriceVal] = useState("");
+  const [minPriceVal, setMinPriceVal] = useState(cell.minPrice == null ? "" : String(cell.minPrice));
+  const [maxPriceVal, setMaxPriceVal] = useState(cell.maxPrice == null ? "" : String(cell.maxPrice));
+  const [minNightsVal, setMinNightsVal] = useState("");
+  const [avail, setAvail] = useState<"" | "close" | "open">("");
+  const [note, setNote] = useState(cell.note ?? "");
+  const [err, setErr] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+
+  const nights = useMemo(() => {
+    const a = Date.parse(start + "T00:00:00Z");
+    const b = Date.parse(end + "T00:00:00Z");
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+    let n = 0;
+    for (let t = a; t <= b; t += 86400000) {
+      if (!dowOn || dow[new Date(t).getUTCDay()]) n++;
+    }
+    return n;
+  }, [start, end, dowOn, dow]);
+
+  const pct = priceMode === "pct" ? parseFloat(priceVal) : NaN;
+  const previewPrice =
+    priceVal.trim() === ""
+      ? null
+      : priceMode === "fixed"
+        ? Math.max(0, Math.round(parseFloat(priceVal) || 0))
+        : cell.price != null && Number.isFinite(pct)
+          ? Math.max(0, Math.round(cell.price * (1 + pct / 100)))
+          : null;
+
+  function buildBody(clear: boolean): Record<string, unknown> | string {
+    if (nights === 0) return "Pick a valid date range.";
+    const body: Record<string, unknown> = { unitId, from: start, to: end };
+    if (dowOn) {
+      const sel = dow.flatMap((on, i) => (on ? [i] : []));
+      if (sel.length === 0) return "Select at least one day of the week.";
+      if (sel.length < 7) body.daysOfWeek = sel;
+    }
+    if (clear) {
+      body.clear = true;
+      return body;
+    }
+    if (priceVal.trim() !== "") {
+      const n = parseFloat(priceVal);
+      if (!Number.isFinite(n)) return "Price must be a number.";
+      if (priceMode === "fixed") body.price = Math.max(0, Math.round(n));
+      else {
+        if (n < -90 || n > 500) return "Percent must be between -90 and 500.";
+        body.pricePct = n;
+      }
+    }
+    const intOf = (s: string) => Math.max(0, Math.round(parseFloat(s)));
+    if (minPriceVal.trim() !== "") body.minPrice = intOf(minPriceVal);
+    if (maxPriceVal.trim() !== "") body.maxPrice = intOf(maxPriceVal);
+    if (
+      typeof body.minPrice === "number" &&
+      typeof body.maxPrice === "number" &&
+      body.minPrice > body.maxPrice
+    )
+      return "Minimum price must be ≤ maximum price.";
+    if (minNightsVal.trim() !== "") body.minNights = Math.max(1, Math.round(parseFloat(minNightsVal)));
+    if (avail !== "") body.closed = avail === "close";
+    if (note.trim() !== (cell.note ?? "")) body.note = note.trim() === "" ? null : note.trim();
+    const hasAny = Object.keys(body).some(
+      (k) => !["unitId", "from", "to", "daysOfWeek"].includes(k),
+    );
+    if (!hasAny) return "Set at least one override field.";
+    return body;
+  }
+
+  async function submit(clear: boolean) {
+    setErr(null);
+    setOkMsg(null);
+    const body = buildBody(clear);
+    if (typeof body === "string") {
+      setErr(body);
+      return;
+    }
+    try {
+      const n = await onApply(body);
+      if (clear) {
+        setOkMsg(`Removed overrides on ${n} night(s).`);
+      } else {
+        onClose();
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "request failed");
+    }
+  }
+
+  const dowChip = (on: boolean) =>
+    `h-7 w-9 rounded-md border text-[11px] font-medium transition-colors ${
+      on
+        ? "border-primary/40 bg-primary/15 text-primary"
+        : "border-border bg-card text-muted-foreground hover:text-foreground"
+    }`;
 
   return (
-    <Card>
-      <CardContent className="flex flex-wrap items-end gap-x-4 gap-y-3 p-4">
-        <div className="mr-2">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Editing</div>
-          <div className="text-sm font-medium">
-            {unitName} · {cell.date}
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <aside className="absolute inset-y-0 right-0 flex w-full max-w-md flex-col border-l border-border bg-card shadow-2xl">
+        {/* header */}
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Date Specific Overrides</h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {unitName}
+              <span className="mx-1.5">·</span>clicked {cell.date}
+              {cell.booked && (
+                <Badge variant="success" className="ml-1.5">
+                  booked
+                </Badge>
+              )}
+            </p>
           </div>
-          <div className="mt-0.5 flex items-center gap-1.5">
-            {cell.booked && <Badge variant="success">booked</Badge>}
-            {cell.source !== "derived" && <Badge variant="info">{cell.source}</Badge>}
+          <button type="button" className={iconBtn} title="Close" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* body */}
+        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          {/* dates */}
+          <div className="flex flex-wrap items-end gap-3">
+            <label className={fieldLabelCls}>
+              From
+              <input type="date" className={inputCls} value={start} onChange={(e) => setStart(e.target.value || cell.date)} />
+            </label>
+            <label className={fieldLabelCls}>
+              To
+              <input type="date" className={inputCls} value={end} onChange={(e) => setEnd(e.target.value || cell.date)} />
+            </label>
+            <label className="flex items-center gap-2 pb-1.5 text-[11px] text-muted-foreground">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                checked={dowOn}
+                onChange={(e) => setDowOn(e.target.checked)}
+              />
+              Apply on specific days of the week
+            </label>
+          </div>
+          {dowOn && (
+            <div className="flex gap-1.5">
+              {WD.map((d, i) => (
+                <button
+                  key={d}
+                  type="button"
+                  className={dowChip(dow[i])}
+                  onClick={() => setDow((p) => p.map((v, j) => (j === i ? !v : v)))}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* price settings */}
+          <div className={sectionCls}>Price Settings</div>
+          <div className="space-y-3">
+            <div className="text-[11px] text-muted-foreground">New Final Price</div>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-foreground">
+                <input
+                  type="radio"
+                  name="price-mode"
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  checked={priceMode === "fixed"}
+                  onChange={() => setPriceMode("fixed")}
+                />
+                Fixed
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-foreground">
+                <input
+                  type="radio"
+                  name="price-mode"
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  checked={priceMode === "pct"}
+                  onChange={() => setPriceMode("pct")}
+                />
+                Percent
+              </label>
+              <div className="relative">
+                <input
+                  className={`${inputCls} w-32 pr-9`}
+                  value={priceVal}
+                  onChange={(e) => setPriceVal(e.target.value)}
+                  inputMode="decimal"
+                  placeholder={priceMode === "fixed" ? (cell.price != null ? String(cell.price) : "—") : "e.g. -10"}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-[10px] text-muted-foreground">
+                  {priceMode === "fixed" ? "ILS" : "%"}
+                </span>
+              </div>
+            </div>
+            {priceMode === "pct" && (
+              <p className="text-[10px] text-muted-foreground">
+                Percent adjusts each night&rsquo;s current calendar price (e.g. -10 lowers every night in the
+                range by 10%).
+              </p>
+            )}
+            <div className="flex gap-3">
+              <label className={fieldLabelCls}>
+                Minimum Price
+                <input
+                  className={`${inputCls} w-28`}
+                  value={minPriceVal}
+                  onChange={(e) => setMinPriceVal(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="none"
+                />
+              </label>
+              <label className={fieldLabelCls}>
+                Maximum Price
+                <input
+                  className={`${inputCls} w-28`}
+                  value={maxPriceVal}
+                  onChange={(e) => setMaxPriceVal(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="none"
+                />
+              </label>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Min/max clamp the calendar&rsquo;s own nightly price on those dates; a Fixed final price wins over
+              both.
+            </p>
+          </div>
+
+          {/* stay restrictions */}
+          <div className={sectionCls}>Stay Restrictions</div>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className={fieldLabelCls}>
+              Minimum Stay
+              <input
+                className={`${inputCls} w-28`}
+                value={minNightsVal}
+                onChange={(e) => setMinNightsVal(e.target.value)}
+                inputMode="numeric"
+                placeholder={`${cell.minNights}${cell.minNights === defaultMinNights ? " (default)" : ""}`}
+              />
+            </label>
+            <label className={fieldLabelCls}>
+              Availability
+              <select className={inputCls} value={avail} onChange={(e) => setAvail(e.target.value as "" | "close" | "open")}>
+                <option value="">No change</option>
+                <option value="close">Close these nights</option>
+                <option value="open">Open these nights</option>
+              </select>
+            </label>
+          </div>
+
+          {/* more options */}
+          <div className={sectionCls}>More Options</div>
+          <label className={fieldLabelCls}>
+            Note or Reason for Override
+            <input
+              className={inputCls}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. holiday weekend, owner request"
+              maxLength={500}
+            />
+          </label>
+
+          {err && <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>}
+          {okMsg && <p className="text-[11px] text-[hsl(var(--success))]">{okMsg}</p>}
+        </div>
+
+        {/* footer */}
+        <div className="border-t border-border px-5 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-[11px] text-muted-foreground">
+              <div>
+                {nights} night{nights === 1 ? "" : "s"} selected
+              </div>
+              <div>
+                Current: {cell.price != null ? fmtILS(cell.price) : "—"}
+                {previewPrice != null && (
+                  <>
+                    <span className="mx-1">→</span>
+                    <span className="font-medium text-foreground">{fmtILS(previewPrice)}</span>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy}
+                title="Remove existing overrides on the selected nights"
+                onClick={() => submit(true)}
+              >
+                Clear
+              </button>
+              <button type="button" className={btnGhost} onClick={onClose}>
+                Cancel
+              </button>
+              <button type="button" className={btnCls} disabled={busy} onClick={() => submit(false)}>
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Add
+              </button>
+            </div>
           </div>
         </div>
-        <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
-          Nightly rate (₪)
-          <input className={`${inputCls} w-28`} value={price} onChange={(e) => setPrice(e.target.value)} inputMode="numeric" />
-        </label>
-        <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
-          Min nights
-          <input className={`${inputCls} w-24`} value={minNights} onChange={(e) => setMinNights(e.target.value)} inputMode="numeric" />
-        </label>
-        <label className="flex items-center gap-2 pb-1.5 text-[11px] text-muted-foreground">
-          <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} className="h-3.5 w-3.5 accent-[hsl(var(--danger))]" />
-          Close this night
-        </label>
-        <button
-          type="button"
-          disabled={busy}
-          className={btnCls}
-          onClick={() => onSave(Math.max(0, num(price, cell.price ?? 0)), Math.max(1, num(minNights, defaultMinNights)), closed)}
-        >
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-          Save
-        </button>
-        <button type="button" className={`${iconBtn} ml-auto`} title="Close editor" onClick={onClose}>
-          <X className="h-4 w-4" />
-        </button>
-      </CardContent>
-    </Card>
+      </aside>
+    </div>
   );
 }

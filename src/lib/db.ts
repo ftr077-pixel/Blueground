@@ -335,6 +335,11 @@ function init(db: Database.Database) {
   // MiniHotel connection: each unit maps to a MiniHotel room-type code (names
   // differ between this app and MiniHotel, so we store the link explicitly).
   ensureColumn(db, "units", "minihotel_room_type", "TEXT");
+  // Date-specific overrides (PriceLabs-style panel): optional per-date price
+  // floor/ceiling that clamp the derived nightly price, and an operator note.
+  ensureColumn(db, "rate_calendar", "min_price", "INTEGER");
+  ensureColumn(db, "rate_calendar", "max_price", "INTEGER");
+  ensureColumn(db, "rate_calendar", "note", "TEXT");
   // Floors/ceilings derive from the base rate; backfill any rows still missing
   // them (covers both pre-existing DBs and freshly-seeded rows, which insert
   // only the original columns), ₪-step rounded.
