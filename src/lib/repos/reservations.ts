@@ -201,6 +201,32 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
 }
 
 /**
+ * Flip already-stored reservations to a cancelled status (driven by the
+ * Cancellations="YES" sweep). UPDATE-only on purpose: the cancellation feed can
+ * ship rows without prices, and a cancelled booking we never stored has no
+ * revenue to remove anyway. Returns how many rows actually changed status.
+ */
+export function markReservationsCancelled(
+  rows: Array<{ id: string; status?: string | null }>,
+): number {
+  if (rows.length === 0) return 0;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const upd = db.prepare(
+    "UPDATE reservation SET status = @status, updated_at = @now WHERE id = @id AND (status IS NULL OR status <> @status)",
+  );
+  let changed = 0;
+  const tx = db.transaction((list: typeof rows) => {
+    for (const r of list) {
+      if (!r.id) continue;
+      changed += upd.run({ id: String(r.id), status: r.status || "CL", now }).changes;
+    }
+  });
+  tx(rows);
+  return changed;
+}
+
+/**
  * Actual NET room revenue per calendar month (YYYY-MM), recognized per night across
  * each stay. Cancelled / no-show reservations and test apartments are excluded.
  */
@@ -337,7 +363,11 @@ interface ReportSql {
  */
 export function reservationReport(thisMonth?: string): ReservationReport {
   const excluded = getExcludedRoomCodes();
-  const ym = thisMonth && /^\d{4}-\d{2}$/.test(thisMonth) ? thisMonth : new Date().toISOString().slice(0, 7);
+  // "This month" on the hotel's calendar (Asia/Jerusalem), matching the occupancy repo.
+  const ym =
+    thisMonth && /^\d{4}-\d{2}$/.test(thisMonth)
+      ? thisMonth
+      : new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date()).slice(0, 7);
   const rows = getDb()
     .prepare(
       "SELECT id, status, room_type, room_number, country, check_in, check_out, nights, gross, vat, revenue, currency, vat_basis FROM reservation ORDER BY check_in",

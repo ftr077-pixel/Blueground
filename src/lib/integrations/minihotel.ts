@@ -8,8 +8,9 @@ import {
 } from "@/lib/repos/integrations";
 import { upsertOverride } from "@/lib/repos/rates";
 import { upsertImportedUnit, deleteUnitsByIdPrefix } from "@/lib/repos/units";
-import { upsertReservations, reservationStats } from "@/lib/repos/reservations";
+import { upsertReservations, reservationStats, markReservationsCancelled } from "@/lib/repos/reservations";
 import { storeAriOccupancy, occupancyByMonth } from "@/lib/repos/occupancy";
+import { getDb } from "@/lib/db";
 
 /**
  * MiniHotel read sync (server-side).
@@ -1321,8 +1322,86 @@ export interface ReservationSyncResult {
   months: number; // distinct months with revenue
   revenue: number; // total counted NET revenue, ILS
   vat: number; // total VAT stripped out
+  /** Stored rows flipped to cancelled by the cancellation sweep (live pulls only). */
+  cancelledSwept?: number;
+  /** The sweep is best-effort — its failure is reported here, never thrown. */
+  sweepError?: string;
   message?: string;
 }
+
+/** GetReservationKey with Cancellations="YES" — CreateDate is then the CANCELLATION
+ *  action date (§3.3), so this returns "everything cancelled between from and to". */
+export function buildCancellationsRequest(conn: MiniHotelConnection, from: string, to: string): string {
+  const a = miniHotelContentAuth(conn);
+  return (
+    '<?xml version="1.0" encoding="UTF-8" ?>' +
+    "<GetReservationKey>" +
+    `<Authentication username="${escXml(a.username)}" password="${escXml(a.password)}" />` +
+    `<Hotel id="${escXml(conn.hotelId)}" />` +
+    `<CreateDate From="${from}" To="${to}" />` +
+    "<Cancellations>YES</Cancellations>" +
+    "</GetReservationKey>"
+  );
+}
+
+export async function fetchCancellations(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(`${ep.content}/api/Agents/Sci/Reservation/GetReservationKey`, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildCancellationsRequest(conn, from, to),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    // Zero cancellations is a normal (booking-less) response; only a bare error
+    // body is a failure.
+    const decoded = decodeEntities(text);
+    if (!/<Booking\b/i.test(decoded)) {
+      const err = decoded.match(/\bERR\s?\d+[^<\n]*/);
+      if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
+    }
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Lenient id/status extraction for the cancellation feed. Deliberately NOT the
+ * full reservation parser: cancelled entries may ship without totals, and the
+ * full parser drops price-less rows — but for a cancellation only the identity
+ * matters. These ids are applied as status UPDATES to already-stored rows.
+ */
+export function parseCancelledIds(xml: string): Array<{ id: string; status: string }> {
+  const x = decodeEntities(xml);
+  const out: Array<{ id: string; status: string }> = [];
+  const seen = new Set<string>();
+  const re = /<Booking\b([^>]*?)\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(x))) {
+    const head = m[1];
+    const id = attr(head, "Minihotel_reservation_id") || attr(head, "Portal_reservation_id") || attr(head, "id");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    // Whatever status the feed carries wins; default "CL" (MiniHotel's cancelled
+    // code) — every row in a Cancellations="YES" response is cancelled by definition.
+    out.push({ id, status: attr(head, "Status") || "CL" });
+  }
+  return out;
+}
+
+// Money is re-checked, not remembered. Stays run 30-90+ nights, so the bookings
+// most likely to change (extensions, shortened stays, compensations, rate edits)
+// arrived WEEKS ago — a "today forward" pull would never re-read them, freezing
+// whatever price was first captured. Every sync therefore re-pulls all arrivals
+// from RES_LOOKBACK_DAYS back through RES_HORIZON_DAYS forward and overwrites
+// each stored row with MiniHotel's current price/dates/status.
+const RES_LOOKBACK_DAYS = 210; // covers the longest in-house stay + late corrections to closed months
+const RES_HORIZON_DAYS = 120;
 
 export async function syncReservationsFromMiniHotel(opts: {
   from?: string;
@@ -1330,8 +1409,11 @@ export async function syncReservationsFromMiniHotel(opts: {
   payload?: string; // captured response — parse this instead of calling MiniHotel
 }): Promise<ReservationSyncResult> {
   const conn = getMiniHotelConnection();
-  const from = opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from) ? opts.from : todayLocal();
-  const days = Math.max(1, Math.min(370, opts.days ?? 120));
+  const from =
+    opts.from && /^\d{4}-\d{2}-\d{2}$/.test(opts.from)
+      ? opts.from
+      : plusDays(todayLocal(), -RES_LOOKBACK_DAYS);
+  const days = Math.max(1, Math.min(370, opts.days ?? RES_LOOKBACK_DAYS + RES_HORIZON_DAYS));
   const to = plusDays(from, days - 1);
 
   let payload = opts.payload;
@@ -1370,6 +1452,27 @@ export async function syncReservationsFromMiniHotel(opts: {
       status: r.status,
     })),
   );
+
+  // Cancellation sweep: arrival-window pulls may simply omit a booking once it's
+  // cancelled, which would leave its revenue counting forever. Ask MiniHotel for
+  // cancellation ACTIONS in the window (§3.3 Cancellations="YES") and flip those
+  // rows out of revenue. Non-fatal — the main pull already succeeded.
+  let cancelledSwept: number | undefined;
+  let sweepError: string | undefined;
+  if (!opts.payload) {
+    try {
+      const cxml = await fetchCancellations(conn, from, todayLocal());
+      cancelledSwept = markReservationsCancelled(parseCancelledIds(cxml));
+    } catch (e) {
+      sweepError = e instanceof Error ? e.message : "cancellation sweep failed";
+    }
+    // Freshness marker for the auto-refresh hook (live checks only — a captured
+    // payload refreshes rows but isn't a verification against MiniHotel).
+    getDb()
+      .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_synced_at', ?)")
+      .run(new Date().toISOString());
+  }
+
   const stats = reservationStats();
   return {
     ok: true,
@@ -1383,5 +1486,34 @@ export async function syncReservationsFromMiniHotel(opts: {
     months: stats.months,
     revenue: stats.revenue,
     vat: stats.vat,
+    cancelledSwept,
+    sweepError,
   };
+}
+
+// ------------------------------------------------- freshness (auto re-check)
+// The P&L must never quietly serve remembered money. Reading a money endpoint
+// calls this: if the last live verification against MiniHotel is older than
+// RESERVATIONS_MAX_AGE_HOURS (default 6, 0 disables), a background re-sync is
+// kicked — the current request still answers instantly from stored data, the
+// next one reads the re-checked numbers. Single-flight, and failed attempts
+// back off 10 minutes so a dead MiniHotel doesn't get hammered per page view.
+let resSyncInFlight: Promise<unknown> | null = null;
+let resSyncLastAttempt = 0;
+
+export function ensureFreshReservations(): void {
+  const maxAgeHours = Number(process.env.RESERVATIONS_MAX_AGE_HOURS ?? 6);
+  if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0) return;
+  const row = getDb()
+    .prepare("SELECT value FROM meta WHERE key = 'reservations_synced_at'")
+    .get() as { value: string } | undefined;
+  const last = row ? Date.parse(row.value) : NaN;
+  if (Number.isFinite(last) && Date.now() - last < maxAgeHours * 3_600_000) return;
+  if (resSyncInFlight || Date.now() - resSyncLastAttempt < 10 * 60_000) return;
+  resSyncLastAttempt = Date.now();
+  resSyncInFlight = syncReservationsFromMiniHotel({})
+    .catch(() => undefined) // unreachable PMS → stored data keeps serving
+    .finally(() => {
+      resSyncInFlight = null;
+    });
 }
