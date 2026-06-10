@@ -12,11 +12,12 @@ import {
   CalendarRange,
   ChevronDown,
   ConciergeBell,
+  Gauge,
   LayoutDashboard,
+  LineChart,
   Radar,
   Settings,
   ShieldAlert,
-  SlidersHorizontal,
   TrendingUp,
   Wallet,
 } from "lucide-react";
@@ -31,14 +32,14 @@ const REVENUE_HUB = {
   icon: Banknote,
   base: "/visibility",
   children: [
+    { href: "/departments/revenue", label: "Pricing Engine", icon: Gauge },
+    { href: "/market", label: "Market Analytics", icon: LineChart },
     { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
     { href: "/visibility", label: "Search & Profit", icon: Radar },
     { href: "/visibility/analytics", label: "Position Trends", icon: TrendingUp },
     { href: "/visibility/pricing", label: "Pricing vs Rank", icon: BarChart3 },
     { href: "/visibility/intelligence", label: "Pricing Intelligence", icon: Brain },
-    { href: "/visibility/portfolio", label: "Portfolio", icon: Boxes },
-    { href: "/visibility/manage", label: "Manage", icon: SlidersHorizontal },
   ] as Item[],
 };
 

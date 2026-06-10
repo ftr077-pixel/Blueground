@@ -46,6 +46,8 @@ export interface PricingRunResult {
   flagged: PricingDecision[];
   applied: PricingDecision[];
   noOps: PricingDecision[];
+  /** Unit ids skipped because they have no rate yet (imported, not rate-synced). */
+  skipped: string[];
 }
 
 const fpct = (f: number) => `${f >= 1 ? "+" : ""}${((f - 1) * 100).toFixed(1)}%`;
@@ -61,8 +63,16 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
   const ranAt = asOf.toISOString();
   const units = listUnits();
   const decisions: PricingDecision[] = [];
+  const skipped: string[] = [];
 
   for (const unit of units) {
+    // Units imported but not yet rate-synced (e.g. fresh MiniHotel imports) have
+    // no base/current rate. There's nothing to reprice, and a 0 current rate would
+    // make the % delta NaN and violate the pricing_history NOT NULL constraint.
+    if (unit.baseRate <= 0 || unit.currentRate <= 0) {
+      skipped.push(unit.id);
+      continue;
+    }
     const q = representativeQuote(unit, providers, asOf);
     const newRate = q.rate;
     const deltaPct = ((newRate - unit.currentRate) / unit.currentRate) * 100;
@@ -180,5 +190,6 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
     flagged: decisions.filter((d) => d.status === "pending_approval"),
     applied: decisions.filter((d) => d.status === "applied" && Math.abs(d.deltaPct) >= NO_OP_PCT),
     noOps: decisions.filter((d) => Math.abs(d.deltaPct) < NO_OP_PCT),
+    skipped,
   };
 }

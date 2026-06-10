@@ -1,9 +1,11 @@
 import { Settings as SettingsIcon } from "lucide-react";
+import { ManagePanel } from "@/components/visibility/manage-panel";
 import { UpdateCard } from "@/components/admin/update-card";
 import { CostDefaultsCard } from "@/components/admin/cost-defaults-card";
 import { PricingRulesCard } from "@/components/admin/pricing-rules-card";
 import { MiniHotelCard } from "@/components/admin/minihotel-card";
 import { MiniHotelMappingCard } from "@/components/admin/minihotel-mapping-card";
+import { RateCodeFinderCard } from "@/components/admin/ratecode-finder-card";
 
 export const dynamic = "force-dynamic";
 
@@ -17,14 +19,17 @@ export default function SettingsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Settings</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            App maintenance and configuration.
+            Profiles, listings, costs, pricing rules and app maintenance — all configuration in one
+            place.
           </p>
         </div>
       </header>
-      <MiniHotelCard />
-      <MiniHotelMappingCard />
+      <ManagePanel />
       <CostDefaultsCard />
       <PricingRulesCard />
+      <MiniHotelCard />
+      <RateCodeFinderCard />
+      <MiniHotelMappingCard />
       <UpdateCard />
     </div>
   );

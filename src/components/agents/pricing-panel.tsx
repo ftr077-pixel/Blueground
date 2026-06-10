@@ -79,7 +79,7 @@ interface HistoryDto {
 
 interface RunSummary {
   ranAt: string;
-  summary: { total: number; applied: number; flagged: number; noOps: number };
+  summary: { total: number; applied: number; flagged: number; noOps: number; skipped?: number };
 }
 
 const STATUS_VARIANT: Record<HistoryDto["status"], "success" | "warning" | "muted"> = {
@@ -162,6 +162,7 @@ export function PricingPanel() {
               <span className="text-[10px] text-muted-foreground">
                 last pass {formatRelative(lastRun.ranAt)} · {lastRun.summary.applied} applied ·{" "}
                 {lastRun.summary.flagged} flagged
+                {lastRun.summary.skipped ? ` · ${lastRun.summary.skipped} skipped (no rate yet)` : ""}
               </span>
             )}
             <button

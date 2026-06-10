@@ -33,6 +33,18 @@ interface Mover {
   kind: "up" | "down" | "entered" | "left";
 }
 
+interface ForwardSeries {
+  listingId: string;
+  label: string;
+  airbnbId: string;
+  ranks: Array<number | null>;
+}
+
+interface ForwardTrend {
+  dates: string[];
+  series: ForwardSeries[];
+}
+
 function fmt(ts: string) {
   const d = new Date(ts);
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(
@@ -40,18 +52,28 @@ function fmt(ts: string) {
   ).padStart(2, "0")}`;
 }
 
+// Plain YYYY-MM-DD → M/D without Date() so the label can't shift a day by timezone.
+function fmtDay(iso: string) {
+  const [, m, d] = iso.split("-");
+  return `${Number(m)}/${Number(d)}`;
+}
+
+const lineColor = (i: number) => `hsl(${Math.round((i * 137.5) % 360)} 62% 42%)`;
+
 export function AnalyticsPanel() {
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [movers, setMovers] = useState<Mover[]>([]);
+  const [forward, setForward] = useState<ForwardTrend>({ dates: [], series: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/visibility/analytics", { cache: "no-store" })
       .then((r) => r.json())
-      .then((b: { trend: TrendPoint[]; movers: Mover[] }) => {
+      .then((b: { trend: TrendPoint[]; movers: Mover[]; forward?: ForwardTrend }) => {
         setTrend(b.trend);
         setMovers(b.movers);
+        if (b.forward) setForward(b.forward);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "failed to load"))
       .finally(() => setLoading(false));
@@ -70,6 +92,13 @@ export function AnalyticsPanel() {
   const droppers = movers.filter((m) => m.kind === "down");
   const entered = movers.filter((m) => m.kind === "entered");
   const left = movers.filter((m) => m.kind === "left");
+
+  const forwardData = forward.dates.map((d, i) => {
+    const row: Record<string, string | number | null> = { label: fmtDay(d) };
+    for (const s of forward.series) row[s.listingId] = s.ranks[i];
+    return row;
+  });
+  const hasForwardPoints = forward.series.some((s) => s.ranks.some((r) => r != null));
 
   return (
     <div className="space-y-6">
@@ -95,6 +124,58 @@ export function AnalyticsPanel() {
                   <Line type="monotone" dataKey="available" name="Available" stroke="#64748b" strokeWidth={2} dot={false} />
                   <Line type="monotone" dataKey="appearing" name="In search" stroke="#2563eb" strokeWidth={2} dot={false} />
                   <Line type="monotone" dataKey="page1" name="Page 1" stroke="#16a34a" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle>Rank by upcoming check-in</CardTitle>
+          <p className="text-[11px] text-muted-foreground">
+            Each apartment&apos;s place in search results (1 = first place) for weekly check-in
+            dates over the next 90 days — latest scan per date. Gaps mean that week wasn&apos;t
+            scanned or the listing didn&apos;t appear.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {!hasForwardPoints ? (
+            <p className="text-[11px] text-muted-foreground">
+              No scans cover check-ins in the next 90 days yet.
+            </p>
+          ) : (
+            <div style={{ width: "100%", height: 320 }}>
+              <ResponsiveContainer>
+                <LineChart data={forwardData} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(214 32% 91%)" />
+                  <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="hsl(215 16% 47%)" />
+                  <YAxis
+                    reversed
+                    allowDecimals={false}
+                    domain={[1, "auto"]}
+                    tick={{ fontSize: 10 }}
+                    stroke="hsl(215 16% 47%)"
+                    label={{ value: "place", angle: -90, position: "insideLeft", fontSize: 10 }}
+                  />
+                  <Tooltip
+                    contentStyle={{ fontSize: 12 }}
+                    formatter={(value) => (value == null ? "—" : `#${value}`)}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  {forward.series.map((s, i) => (
+                    <Line
+                      key={s.listingId}
+                      type="monotone"
+                      dataKey={s.listingId}
+                      name={s.label}
+                      stroke={lineColor(i)}
+                      strokeWidth={2}
+                      dot={{ r: 2.5 }}
+                      connectNulls
+                    />
+                  ))}
                 </LineChart>
               </ResponsiveContainer>
             </div>

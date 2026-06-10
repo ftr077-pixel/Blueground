@@ -40,7 +40,8 @@ export interface SyncResult {
   cells: number; // day-rows parsed
   written: number; // overrides written
   unmappedTypes: string[];
-  errors: string[]; // ERR codes MiniHotel reported (non-fatal — skipped, not thrown)
+  errors: string[]; // ERR codes MiniHotel reported (non-fatal — collected, not thrown)
+  note?: string; // e.g. "loaded via availability search after the bulk feed was blocked"
   message?: string;
 }
 
@@ -70,14 +71,24 @@ function decodeEntities(s: string): string {
     .replace(/&amp;/gi, "&");
 }
 
-export function buildBulkAriRequest(conn: MiniHotelConnection, from: string, to: string): string {
+export function buildBulkAriRequest(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  roomTypeIds?: string[],
+): string {
   const rateCode = conn.rateCode || "USD";
+  const roomTypes =
+    roomTypeIds && roomTypeIds.length
+      ? `<RoomTypes>${roomTypeIds.map((id) => `<RoomType id="${escXml(id)}" />`).join("")}</RoomTypes>`
+      : "";
   return (
     '<?xml version="1.0" encoding="UTF-8" ?>' +
     '<AvailRaterq xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
     `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" ResponseType="05" />` +
     `<Hotel id="${escXml(conn.hotelId)}" />` +
     `<DateRange from="${from}" to="${to}" />` +
+    roomTypes +
     `<Prices rateCode="${escXml(rateCode)}"></Prices>` +
     "</AvailRaterq>"
   );
@@ -159,7 +170,12 @@ export function extractMiniHotelErrors(text: string): string[] {
   return out;
 }
 
-export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
+export async function fetchBulkAri(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  roomTypeIds?: string[],
+): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -167,7 +183,7 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
     const res = await fetch(ep.ari, {
       method: "POST",
       headers: { "Content-Type": "application/xml" },
-      body: buildBulkAriRequest(conn, from, to),
+      body: buildBulkAriRequest(conn, from, to, roomTypeIds),
       signal: controller.signal,
     });
     const text = await res.text();
@@ -180,6 +196,138 @@ export async function fetchBulkAri(conn: MiniHotelConnection, from: string, to: 
   }
 }
 
+/**
+ * Build an "Immediate ARI" (guests-based availability search) request. Unlike the
+ * bulk feed, this prices rooms FOR a party of N adults, so MiniHotel typically
+ * just omits a room type with no Basic occupancy instead of aborting the whole
+ * response (ERR 310). Its prices are the TOTAL for the requested stay — call it
+ * with a 1-night range to get a per-night price.
+ */
+export function buildGuestsAvailRequest(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  adults = 2,
+): string {
+  const rateCode = conn.rateCode || "USD";
+  return (
+    '<?xml version="1.0" encoding="UTF-8" ?>' +
+    '<AvailRaterq xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+    `<Authentication username="${escXml(conn.username)}" password="${escXml(conn.password)}" />` +
+    `<Hotel id="${escXml(conn.hotelId)}" />` +
+    `<DateRange from="${from}" to="${to}" />` +
+    `<Guests adults="${adults}" child="" babies="" />` +
+    '<RoomTypes><RoomType id="*ALL*" /></RoomTypes>' +
+    `<Prices rateCode="${escXml(rateCode)}"><Price boardCode="*ALL*" /></Prices>` +
+    "</AvailRaterq>"
+  );
+}
+
+export interface GuestsAvailRoom {
+  roomType: string;
+  price: number | null; // lowest board value for the requested stay
+  available: number | null;
+}
+
+/**
+ * Parse an Immediate-ARI response:
+ *   <RoomType id …><Inventory Allocation maxavail/><price value …/>…</RoomType>
+ * Price = the lowest board value (room-only base); availability = maxavail
+ * (falling back to Allocation).
+ */
+export function parseGuestsAvail(xml: string): GuestsAvailRoom[] {
+  const x = decodeEntities(xml);
+  const out: GuestsAvailRoom[] = [];
+  const rtRe = /<RoomType\b([^>]*)>([\s\S]*?)<\/RoomType>/gi;
+  let rt: RegExpExecArray | null;
+  while ((rt = rtRe.exec(x))) {
+    const code = attr(rt[1], "id");
+    if (!code) continue;
+    const body = rt[2];
+    let price: number | null = null;
+    const pRe = /<price\b([^>]*?)\/?>/gi;
+    let p: RegExpExecArray | null;
+    while ((p = pRe.exec(body))) {
+      const v = numAttr(p[1], "value");
+      if (v != null && (price == null || v < price)) price = v;
+    }
+    const inv = body.match(/<Inventory\b([^>]*?)\/?>/i);
+    let available: number | null = null;
+    if (inv) {
+      available = numAttr(inv[1], "maxavail");
+      if (available == null) available = numAttr(inv[1], "Allocation");
+    }
+    out.push({ roomType: code, price: price != null ? Math.round(price) : null, available });
+  }
+  return out;
+}
+
+export async function fetchGuestsAvail(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  adults = 2,
+): Promise<string> {
+  const ep = miniHotelEndpoints(conn.env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(ep.ari, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: buildGuestsAvailRequest(conn, from, to, adults),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`MiniHotel HTTP ${res.status}: ${text.slice(0, 160)}`);
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fallback used when the bulk feed is blocked: walk the window one night at a
+ * time via the guests-based search (its price is per-stay, so a 1-night range =
+ * nightly). Bails immediately if the first night yields nothing, so a dead end
+ * never costs a long loop; capped so even a working fallback stays responsive.
+ */
+async function fetchGuestsFallback(
+  conn: MiniHotelConnection,
+  from: string,
+  days: number,
+): Promise<{ cells: AriCell[]; errors: string[]; nights: number }> {
+  const cells: AriCell[] = [];
+  const errs = new Set<string>();
+  const horizon = Math.min(days, 35);
+  let nights = 0;
+  for (let i = 0; i < horizon; i++) {
+    const d = plusDays(from, i);
+    let rooms: GuestsAvailRoom[];
+    try {
+      const xml = await fetchGuestsAvail(conn, d, plusDays(d, 1));
+      parseAriErrors(xml).forEach((e) => errs.add(e));
+      rooms = parseGuestsAvail(xml);
+    } catch (e) {
+      errs.add(e instanceof Error ? e.message : "availability search failed");
+      if (i === 0) break; // can't even reach it — stop
+      continue;
+    }
+    if (rooms.length === 0) {
+      if (i === 0) break; // this endpoint can't help either — don't loop 35×
+      continue;
+    }
+    nights++;
+    for (const r of rooms) {
+      const cell: AriCell = { roomType: r.roomType, date: d };
+      if (r.price != null) cell.price = r.price;
+      if (r.available != null) cell.available = r.available;
+      cells.push(cell);
+    }
+  }
+  return { cells, errors: [...errs], nights };
+}
+
 export async function syncFromMiniHotel(opts: {
   from?: string;
   days?: number;
@@ -190,8 +338,13 @@ export async function syncFromMiniHotel(opts: {
   const days = Math.max(1, Math.min(120, opts.days ?? 60));
   const to = plusDays(from, days - 1);
 
-  let xml = opts.xml;
-  if (!xml) {
+  let parsed: AriCell[];
+  let errors: string[];
+  let note: string | undefined;
+  if (opts.xml) {
+    parsed = parseBulkAri(opts.xml);
+    errors = parseAriErrors(opts.xml);
+  } else {
     if (!conn.username || !conn.password || !conn.hotelId) {
       return {
         ok: false,
@@ -206,11 +359,26 @@ export async function syncFromMiniHotel(opts: {
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
-    xml = await fetchBulkAri(conn, from, to);
-  }
+    // 1) Whole-hotel bulk feed (per-night grid). It can't be scoped to specific
+    //    rooms, so one room type with missing Basic occupancy aborts it (ERR 310).
+    const xml = await fetchBulkAri(conn, from, to);
+    parsed = parseBulkAri(xml);
+    errors = parseAriErrors(xml);
 
-  const parsed = parseBulkAri(xml);
-  const errors = parseAriErrors(xml);
+    // 2) Bulk feed blocked (no cells but an error)? Fall back to the guests-based
+    //    availability search, which prices per party and usually skips a
+    //    misconfigured room instead of aborting the whole response.
+    if (parsed.length === 0 && errors.length > 0) {
+      const fb = await fetchGuestsFallback(conn, from, days);
+      fb.errors.forEach((e) => {
+        if (!errors.includes(e)) errors.push(e);
+      });
+      if (fb.cells.length > 0) {
+        parsed = fb.cells;
+        note = `Bulk feed was blocked (${errors[0]}); loaded ${fb.nights} night(s) via the availability search instead.`;
+      }
+    }
+  }
 
   // RoomTypeCode -> unit id(s); case-insensitive so codes match regardless of casing.
   const byType = new Map<string, string[]>();
@@ -256,6 +424,7 @@ export async function syncFromMiniHotel(opts: {
     written,
     unmappedTypes: [...unmapped].sort(),
     errors,
+    note,
   };
 }
 

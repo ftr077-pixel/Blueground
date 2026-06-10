@@ -12,6 +12,7 @@ export async function POST() {
       applied: result.applied.length,
       flagged: result.flagged.length,
       noOps: result.noOps.length,
+      skipped: result.skipped.length,
     },
     decisions: result.decisions.map((d) => ({
       unit: { id: d.unitId, name: d.unitName, neighborhood: d.neighborhood },
