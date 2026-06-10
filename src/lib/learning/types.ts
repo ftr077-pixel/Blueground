@@ -84,6 +84,9 @@ export interface ElasticityResult {
     ciNightlyHigh: number | null;
     freshnessDays: number | null;
   };
+  // Relative demand for this check-in (external readings normalized to their own
+  // history + supply tightness). Null when no demand data exists for the date.
+  demand: import("./demand").DemandSignal | null;
   curve: CurvePoint[];
   note: string | null;
 }

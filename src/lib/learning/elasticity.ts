@@ -7,6 +7,7 @@ import {
 } from "./config";
 import { evalCurve, invertCurve, isotonicNonDecreasing, type IsoCurve, type IsoInput } from "./isotonic";
 import { listingPriceHistory, listingState, marketObservations } from "./dataset";
+import { demandSignal } from "./demand";
 import { listingOffset, ownElasticity } from "./longitudinal";
 import type {
   Confidence,
@@ -214,6 +215,10 @@ export function elasticityForListing(
 
   const level = confidenceLevel(n, freshnessDays, ci, target?.nightly ?? null);
 
+  // Relative demand for this check-in: a hot/cold read tempers (never overrides)
+  // the price advice. Drops still come from the curve; demand frames urgency.
+  const demand = state.checkIn ? demandSignal(seg.profileId, nights, state.checkIn) : null;
+
   let note: string | null = null;
   if (n === 0) note = "No market ladder captured for this segment yet — run scans to build it.";
   else if (n < LEARNING.nMin) note = `Learning — only ${n} market points in this segment; treat as indicative.`;
@@ -221,6 +226,10 @@ export function elasticityForListing(
     note = `Already priced for page ${targetPage} or better — no cut needed.`;
   else if (target && !target.reachable)
     note = `Page ${targetPage} may not be reachable on price alone here — consider non-price levers.`;
+  else if (demand?.label === "hot" && target && target.deltaNightly != null && target.deltaNightly < 0)
+    note = `Demand is running hot for this date (top of its own range) — the market may climb to you; consider a smaller drop or a short hold.`;
+  else if (demand?.label === "cold" && target && target.deltaNightly != null && target.deltaNightly < 0)
+    note = `Demand is cold for this date — position buys less; lean on the cut (or non-price levers) early.`;
 
   return {
     listingId,
@@ -255,6 +264,7 @@ export function elasticityForListing(
       ciNightlyHigh: ci ? round(ci.hi, 5) : null,
       freshnessDays: freshnessDays == null ? null : round1(freshnessDays),
     },
+    demand,
     curve: sampleCurve(curve, T),
     note,
   };

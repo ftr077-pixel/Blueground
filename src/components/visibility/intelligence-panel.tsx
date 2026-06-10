@@ -75,8 +75,26 @@ interface Elasticity {
     ciNightlyHigh: number | null;
     freshnessDays: number | null;
   };
+  demand: DemandSignal | null;
   curve: CurvePoint[];
   note: string | null;
+}
+
+interface DemandComponent {
+  index: number;
+  percentile: number;
+  raw: number;
+  n: number;
+}
+interface DemandSignal {
+  area: string;
+  date: string;
+  index: number | null;
+  label: "hot" | "firm" | "soft" | "cold" | null;
+  market: DemandComponent | null;
+  supply: DemandComponent | null;
+  ourOccupancy: number | null;
+  readingTs: string | null;
 }
 
 const selectCls =
@@ -205,6 +223,7 @@ export function IntelligencePanel() {
       </div>
 
       {data && <Recommendation data={data} confBadge={confBadge} />}
+      {data && <DemandCard demand={data.demand} area={data.segment.area} />}
       {data && <CurveCard data={data} />}
       {listingId && <OutcomesCard listingId={listingId} nights={nights} />}
       <StrategyCard />
@@ -343,7 +362,10 @@ function Recommendation({ data, confBadge }: { data: Elasticity; confBadge: Reac
             {data.segment.area} · {nightsLabel(data.nights)} ·{" "}
             {data.leadDays != null ? `${data.leadDays}d lead` : "—"} ({data.segment.leadBucket})
           </CardTitle>
-          {confBadge}
+          <span className="flex items-center gap-1.5">
+            {data.demand?.label && <DemandBadge label={data.demand.label} />}
+            {confBadge}
+          </span>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -535,6 +557,126 @@ function StrategyCard() {
             </p>
           </>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DemandBadge({ label }: { label: NonNullable<DemandSignal["label"]> }) {
+  const v =
+    label === "hot" ? "danger" : label === "firm" ? "success" : label === "soft" ? "info" : "muted";
+  return <Badge variant={v}>demand {label}</Badge>;
+}
+
+// Relative demand for the selected check-in. The point of this card: the raw
+// market number is NOT trusted at face value (ghost listings sink it); it's read
+// against its own range, with our realized occupancy beside it as the anchor.
+function DemandCard({ demand, area }: { demand: DemandSignal | null; area: string }) {
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function submit() {
+    setMsg(null);
+    try {
+      const res = await fetch("/api/learning/demand", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ area, text }),
+      });
+      const b = (await res.json()) as { recorded?: number; error?: string };
+      setMsg(res.ok ? `recorded ${b.recorded} reading(s) — refresh to see them applied` : b.error ?? "failed");
+      if (res.ok) setText("");
+    } catch {
+      setMsg("failed to post readings");
+    }
+  }
+
+  const m = demand?.market ?? null;
+  const s = demand?.supply ?? null;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Demand · {demand?.date ?? "—"}</CardTitle>
+          {demand?.label ? <DemandBadge label={demand.label} /> : <Badge variant="muted">no data</Badge>}
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Market readings are treated as <span className="text-foreground">relative</span> — ghost
+          listings make the absolute level meaningless, so each reading is scored against its own
+          history for this area.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap gap-x-10 gap-y-3 text-sm">
+          {m ? (
+            <Stat
+              label="Market reading"
+              value={`${m.raw}%`}
+              sub={`p${m.percentile} of its own range (n=${m.n}) → ${
+                demand?.label ?? "—"
+              }`}
+            />
+          ) : (
+            <Stat label="Market reading" value="—" sub="paste readings below to enable" />
+          )}
+          {s && (
+            <Stat
+              label="Listings on market"
+              value={String(s.raw)}
+              sub={`p${s.percentile} for this lead window — ${
+                s.index > 0 ? "thinner than usual (hot)" : s.index < 0 ? "fatter than usual (soft)" : "typical"
+              }`}
+            />
+          )}
+          {demand?.ourOccupancy != null && (
+            <Stat
+              label="Our occupancy"
+              value={`${Math.round(demand.ourOccupancy * 100)}%`}
+              sub="realized, around this date (MiniHotel)"
+            />
+          )}
+        </div>
+        {m && demand?.ourOccupancy != null && (
+          <p className="text-[11px] text-muted-foreground">
+            Calibration: the dashboard says {m.raw}% while we run{" "}
+            {Math.round(demand.ourOccupancy * 100)}% — whenever this metric reads at p
+            {m.percentile} of its range, treat the market as{" "}
+            <span className="text-foreground">{demand.label}</span> regardless of the absolute
+            number.
+          </p>
+        )}
+        <div>
+          <button
+            type="button"
+            onClick={() => setPasteOpen((o) => !o)}
+            className="text-[11px] text-primary hover:underline"
+          >
+            {pasteOpen ? "close" : "paste market readings…"}
+          </button>
+          {pasteOpen && (
+            <div className="mt-2 space-y-2">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={4}
+                placeholder={"One per line: YYYY-MM-DD value\n2026-08-01 30\n2026-08-08 28.5"}
+                className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-primary/50"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={submit}
+                  disabled={!text.trim()}
+                  className="rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-60"
+                >
+                  Record for {area}
+                </button>
+                {msg && <span className="text-[11px] text-muted-foreground">{msg}</span>}
+              </div>
+            </div>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
