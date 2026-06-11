@@ -389,20 +389,6 @@ function init(db: Database.Database) {
   ensureColumn(db, "rate_calendar", "expires_on", "TEXT");
   ensureColumn(db, "rate_calendar", "created_at", "TEXT");
 
-  // One-time migration to the operator's live PriceLabs defaults: units seeded
-  // with the old 30-night MTR defaults move to the 3-night default min stay
-  // with a 1-night hard floor (the far-out ladder + orphan gap-1 rules take it
-  // from there). Keyed on user_version so deliberate per-unit edits afterwards
-  // are never touched again.
-  const userVersion = (db.pragma("user_version", { simple: true }) as number) ?? 0;
-  if (userVersion < 1) {
-    db.exec(`
-      UPDATE units SET min_stay = 3 WHERE min_stay = 30;
-      UPDATE units SET lowest_min_stay = 1 WHERE lowest_min_stay = 30;
-    `);
-    db.pragma("user_version = 1");
-  }
-
   // Migrations for DBs created before these columns existed.
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
@@ -438,6 +424,22 @@ function init(db: Database.Database) {
   ensureColumn(db, "units", "monthly_discount_pct", `REAL NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.monthlyDiscountPct}`);
   ensureColumn(db, "units", "min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.minStay}`);
   ensureColumn(db, "units", "lowest_min_stay", `INTEGER NOT NULL DEFAULT ${UNIT_PRICING_DEFAULTS.lowestMinStay}`);
+
+  // One-time migration to the operator's live PriceLabs defaults: units seeded
+  // with the old 30-night MTR defaults move to the 3-night default min stay
+  // with a 1-night hard floor (the far-out ladder + orphan gap-1 rules take it
+  // from there). Keyed on user_version so deliberate per-unit edits afterwards
+  // are never touched again. Must run AFTER the ensureColumn calls above — on a
+  // fresh database the columns don't exist yet, and referencing them here used
+  // to crash the whole init (every API 500s on a clean checkout).
+  const userVersion = (db.pragma("user_version", { simple: true }) as number) ?? 0;
+  if (userVersion < 1) {
+    db.exec(`
+      UPDATE units SET min_stay = 3 WHERE min_stay = 30;
+      UPDATE units SET lowest_min_stay = 1 WHERE lowest_min_stay = 30;
+    `);
+    db.pragma("user_version = 1");
+  }
 
   // MiniHotel connection: each unit maps to a MiniHotel room-type code (names
   // differ between this app and MiniHotel, so we store the link explicitly).
