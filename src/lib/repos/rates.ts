@@ -417,6 +417,40 @@ export function bookedDatesForUnit(unitId: string, from: string, days: number): 
   return out;
 }
 
+/**
+ * Authoritatively mark one unit's SOLD nights over a window from the PMS
+ * reservation list: every reservation night becomes booked (availability 0),
+ * and any previously-booked night in the window with no reservation behind it
+ * flips back to not-booked — so cancellations heal, and "availability 0"
+ * (blocked / no allocation) is never mistaken for "sold".
+ */
+export function setBookedNights(unitId: string, windowDates: string[], sold: Set<string>): number {
+  if (windowDates.length === 0 || !unitExists(unitId)) return 0;
+  const db = getDb();
+  const wasBooked = new Set(
+    (
+      db
+        .prepare(
+          "SELECT date FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND booked = 1",
+        )
+        .all(unitId, windowDates[0], windowDates[windowDates.length - 1]) as { date: string }[]
+    ).map((r) => r.date),
+  );
+  let marked = 0;
+  const tx = db.transaction(() => {
+    for (const date of windowDates) {
+      if (sold.has(date)) {
+        upsertOverride(unitId, date, { booked: true, available: 0 }, "minihotel");
+        marked++;
+      } else if (wasBooked.has(date)) {
+        upsertOverride(unitId, date, { booked: false }, "minihotel");
+      }
+    }
+  });
+  tx();
+  return marked;
+}
+
 // --------------------------------------------------------------- rate anchors
 function median(xs: number[]): number {
   if (!xs.length) return 0;
