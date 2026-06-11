@@ -7,9 +7,11 @@ import { PricingPanel } from "@/components/agents/pricing-panel";
 import {
   DEPARTMENTS,
   type Department,
+  type Worker,
   type WorkerStatus,
 } from "@/lib/mock-data";
 import { listActivity } from "@/lib/repos/activity";
+import { getCalendar } from "@/lib/repos/rates";
 import { cn, formatRelative } from "@/lib/utils";
 
 const STATUS_VARIANT: Record<WorkerStatus, "success" | "muted" | "warning"> = {
@@ -26,12 +28,56 @@ const STATUS_LABEL: Record<WorkerStatus, string> = {
 
 export const dynamic = "force-dynamic";
 
+const ROLE_BY_WORKER: Record<string, string> = {
+  "Pricing Specialist": "Dynamic rates & restrictions → MiniHotel (Reverse ARI)",
+};
+
 export default function DepartmentPage({ params }: { params: { id: string } }) {
   const dept = DEPARTMENTS.find((d) => d.id === params.id) as Department | undefined;
   if (!dept) notFound();
 
   const Icon = dept.icon;
   const events = listActivity(200).filter((e) => e.department === dept.id);
+
+  // Revenue & Yield shows REAL numbers only: KPIs from the synced Rates
+  // Calendar (next 30 nights) and worker cards rolled up from actual logged
+  // agent activity. No invented health scores, metrics, or narratives —
+  // unknowns render as "—" until real data exists. Other departments are
+  // placeholder demos for now and keep their static copy.
+  const isRevenue = dept.id === "revenue";
+  let kpis = dept.kpis;
+  let health: number | null = dept.health;
+  let workers: Worker[] = dept.workers;
+  if (isRevenue) {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(
+      new Date(),
+    );
+    const s = getCalendar(today, 30).summary;
+    const known = s.sold + s.open > 0;
+    const ils = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
+    kpis = [
+      { label: "Occupancy · synced 30d", value: known ? `${Math.round(s.occupancy * 100)}%` : "—" },
+      { label: "ADR · booked nights", value: s.adr > 0 ? ils(s.adr) : "—" },
+      { label: "On-the-books · 30d", value: s.bookedRevenue > 0 ? ils(s.bookedRevenue) : "—" },
+    ];
+    health = null;
+
+    const byWorker = new Map<string, { latest: (typeof events)[number]; today: number }>();
+    for (const e of events) {
+      // events arrive newest-first, so the first hit per worker is its latest
+      const w = byWorker.get(e.worker);
+      if (!w) byWorker.set(e.worker, { latest: e, today: e.ts.startsWith(today) ? 1 : 0 });
+      else if (e.ts.startsWith(today)) w.today++;
+    }
+    workers = [...byWorker.entries()].map(([name, v]) => ({
+      id: name,
+      name,
+      role: ROLE_BY_WORKER[name] ?? "Autonomous agent",
+      status: (Date.now() - Date.parse(v.latest.ts) < 86_400_000 ? "active" : "idle") as WorkerStatus,
+      lastAction: v.latest.message,
+      metric: { label: "Actions today", value: String(v.today) },
+    }));
+  }
 
   return (
     <div className="space-y-6">
@@ -55,13 +101,15 @@ export default function DepartmentPage({ params }: { params: { id: string } }) {
             <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{dept.tagline}</p>
           </div>
         </div>
-        <Badge variant={dept.health >= 92 ? "success" : dept.health >= 85 ? "info" : "warning"}>
-          Health {dept.health}
-        </Badge>
+        {health != null && (
+          <Badge variant={health >= 92 ? "success" : health >= 85 ? "info" : "warning"}>
+            Health {health}
+          </Badge>
+        )}
       </header>
 
       <section className="grid gap-3 sm:grid-cols-3">
-        {dept.kpis.map((k) => (
+        {kpis.map((k) => (
           <Card key={k.label} className="p-4">
             <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
               {k.label}
@@ -96,7 +144,13 @@ export default function DepartmentPage({ params }: { params: { id: string } }) {
             </p>
           </CardHeader>
           <CardContent className="space-y-3">
-            {dept.workers.map((w) => (
+            {workers.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                No agent actions logged yet — workers appear here as they act (e.g. the Pricing
+                Specialist pushing rates to MiniHotel).
+              </p>
+            )}
+            {workers.map((w) => (
               <div
                 key={w.id}
                 className="rounded-lg border border-border/70 bg-background/40 p-4"
