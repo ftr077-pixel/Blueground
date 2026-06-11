@@ -562,6 +562,13 @@ export function EngineRulesCard() {
   const [tableData, setTableData] = useState<TableResp | null>(null);
   const [tableBusy, setTableBusy] = useState(false);
 
+  // Smart Presets state
+  const [presetChoice, setPresetChoice] = useState<{ experienced: boolean; propertyType: string } | null>(null);
+  const [presetList, setPresetList] = useState<Array<{ key: string; label: string; blurb: string; items: Array<{ label: string; why: string }> }>>([]);
+  const [presetType, setPresetType] = useState("mtr");
+  const [presetExp, setPresetExp] = useState(true);
+  const [presetLoaded, setPresetLoaded] = useState(false);
+
   // Min Stay Recommendation Engine review state
   const [recData, setRecData] = useState<{
     annualRecommendation: number;
@@ -646,6 +653,43 @@ export function EngineRulesCard() {
   useEffect(() => {
     loadProfiles(cicoArchivedShown).catch(() => undefined);
   }, [loadProfiles, cicoArchivedShown]);
+
+  useEffect(() => {
+    fetch("/api/pricing/presets", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((b: { choice: { experienced: boolean; propertyType: string } | null; presets: typeof presetList }) => {
+        setPresetChoice(b.choice);
+        setPresetList(b.presets);
+        if (b.choice) {
+          setPresetType(b.choice.propertyType);
+          setPresetExp(b.choice.experienced);
+        }
+        setPresetLoaded(true);
+      })
+      .catch(() => setPresetLoaded(true));
+  }, []);
+
+  async function presetsAction(body: Record<string, unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/pricing/presets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const b = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(b?.error || `request failed: ${res.status}`);
+      }
+      setPresetChoice({ experienced: presetExp, propertyType: presetType });
+      if (body.apply) await load(scope);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "preset action failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   if (err) return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
   if (!f) return null;
@@ -1124,6 +1168,75 @@ export function EngineRulesCard() {
             Saving writes every section below to {scopeLabel}; Reset clears the scope so it inherits again.
           </span>
         </div>
+
+        {presetLoaded && (
+          <div className={`${sectionBox} ${!presetChoice ? "border-primary/40 bg-primary/5" : ""}`}>
+            <span className={sectionHead}>
+              Smart Presets — {presetChoice ? "tailored recommendations by property type (editable any time)" : "tell us about your portfolio to get tailored customization recommendations"}
+            </span>
+            <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+              <label className="flex flex-col gap-1">
+                Property type
+                <select className={`${input} w-56`} value={presetType} onChange={(e) => setPresetType(e.target.value)}>
+                  {presetList.map((pr) => (
+                    <option key={pr.key} value={pr.key}>
+                      {pr.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-flex items-center gap-1.5 pb-1.5">
+                <input
+                  type="checkbox"
+                  checked={presetExp}
+                  onChange={(e) => setPresetExp(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                />
+                I&apos;ve used dynamic pricing before
+              </label>
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy}
+                onClick={() => presetsAction({ choice: { experienced: presetExp, propertyType: presetType } })}
+              >
+                Save choice
+              </button>
+              <button
+                type="button"
+                className={btn}
+                disabled={busy}
+                onClick={() =>
+                  presetsAction({ choice: { experienced: presetExp, propertyType: presetType }, apply: { scope } })
+                }
+              >
+                Apply preset to {scopeLabel}
+              </button>
+            </div>
+            {(() => {
+              const pr = presetList.find((x) => x.key === presetType);
+              if (!pr) return null;
+              return (
+                <div className="space-y-1">
+                  <p className="text-[10px] text-muted-foreground/80">{pr.blurb}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {pr.items.map((it) => (
+                      <span key={it.label} title={it.why} className="rounded-md border border-border px-2 py-1 text-[10px]">
+                        💡 {it.label}
+                      </span>
+                    ))}
+                  </div>
+                  {!presetExp && (
+                    <p className="text-[10px] text-muted-foreground/70">
+                      New to dynamic pricing: sensitivities soften one notch and the human gate
+                      tightens to ±10% until you build trust.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-x-5 gap-y-2">
           {toggle("Seasonality", "seasonalityOn")}
