@@ -99,9 +99,11 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
       }
       const base = unit.baseRate > 0 ? unit.baseRate : a.base;
       const current = unit.currentRate > 0 ? unit.currentRate : a.current;
+      // Floor/ceiling stay auto in the DB (they follow the anchored Base);
+      // resolve them locally for this pass since `unit` predates the anchor.
       const minRate = unit.minRate > 0 ? unit.minRate : roundRate(base * UNIT_PRICING_DEFAULTS.floorPctOfBase);
       const maxRate = unit.maxRate > 0 ? unit.maxRate : roundRate(base * UNIT_PRICING_DEFAULTS.ceilingPctOfBase);
-      setUnitRateAnchor(unit.id, base, current, minRate, maxRate);
+      setUnitRateAnchor(unit.id, base, current);
       unit = { ...unit, baseRate: base, currentRate: current, minRate, maxRate };
     }
     // Per-unit effective config: account → group → sub-group → listing scopes

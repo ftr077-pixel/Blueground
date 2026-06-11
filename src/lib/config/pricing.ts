@@ -10,9 +10,11 @@
 /** Per-unit pricing defaults. Used as DB column defaults / backfills (db.ts) and
  *  as read-time fallbacks (units.ts). Percentages are fractions (0.8 = 80%). */
 export const UNIT_PRICING_DEFAULTS = {
-  /** Price floor as a fraction of base rate (PriceLabs "min price"). */
+  /** AUTO price floor as a fraction of Base (PriceLabs "min price") — applies
+   *  while the unit's min isn't pinned in the Rates Calendar (NULL min_rate);
+   *  auto bounds re-follow Base on every edit. */
   floorPctOfBase: 0.8,
-  /** Price ceiling as a fraction of base rate (surge cap). */
+  /** AUTO price ceiling as a fraction of Base (surge cap) — same pin semantics. */
   ceilingPctOfBase: 1.2,
   /** Weekly LOS discount (0..1). */
   weeklyDiscountPct: 0.1,

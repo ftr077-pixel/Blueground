@@ -16,6 +16,10 @@ export interface Unit {
   minRate: number;
   /** Price ceiling — caps surge/far-out premiums (PriceLabs "max price"). */
   maxRate: number;
+  /** True when the operator pinned the floor (it no longer follows Base). */
+  minRatePinned: boolean;
+  /** True when the operator pinned the ceiling (it no longer follows Base). */
+  maxRatePinned: boolean;
   /** LOS discount for 7+ night stays (0..1). */
   weeklyDiscountPct: number;
   /** LOS discount for ~30 night stays (0..1) — the headline MTR lever. */
@@ -89,8 +93,12 @@ function rowToUnit(r: UnitSql): Unit {
     occupancy30d: r.occupancy_30d,
     platform: r.platform,
     lastRateChangeAt: r.last_rate_change_at,
+    // NULL min/max = auto: follow Base at the default band. A stored value is
+    // an operator pin that holds firm across Base edits.
     minRate: r.min_rate ?? roundRate(r.base_rate * UNIT_PRICING_DEFAULTS.floorPctOfBase),
     maxRate: r.max_rate ?? roundRate(r.base_rate * UNIT_PRICING_DEFAULTS.ceilingPctOfBase),
+    minRatePinned: r.min_rate != null,
+    maxRatePinned: r.max_rate != null,
     weeklyDiscountPct: r.weekly_discount_pct ?? UNIT_PRICING_DEFAULTS.weeklyDiscountPct,
     monthlyDiscountPct: r.monthly_discount_pct ?? UNIT_PRICING_DEFAULTS.monthlyDiscountPct,
     minStay: r.min_stay ?? UNIT_PRICING_DEFAULTS.minStay,
@@ -114,19 +122,29 @@ export function setUnitRate(unitId: string, newRate: number, ts: string) {
 }
 
 /** Operator sets the unit's base (anchor) rate — every derived nightly price
- *  rebuilds from it, and the price floor/ceiling follow proportionally. */
+ *  rebuilds from it. Auto (un-pinned) floors/ceilings follow the new Base at
+ *  read time; pinned ones hold firm (NULL columns = auto, see rowToUnit). */
 export function setUnitBaseRate(unitId: string, rate: number) {
   const db = getDb();
   db.prepare(
-    "UPDATE units SET base_rate = ?, current_rate = ?, min_rate = ?, max_rate = ?, last_rate_change_at = ? WHERE id = ?",
-  ).run(
-    rate,
-    rate,
-    roundRate(rate * UNIT_PRICING_DEFAULTS.floorPctOfBase),
-    roundRate(rate * UNIT_PRICING_DEFAULTS.ceilingPctOfBase),
-    new Date().toISOString(),
-    unitId,
-  );
+    "UPDATE units SET base_rate = ?, current_rate = ?, last_rate_change_at = ? WHERE id = ?",
+  ).run(rate, rate, new Date().toISOString(), unitId);
+}
+
+/** Pin (or clear back to auto with null) the unit's price floor / ceiling.
+ *  Pinned values survive Base edits; auto values track Base at the default
+ *  band. Callers validate min ≤ max against the effective values. */
+export function setUnitMinMaxRates(
+  unitId: string,
+  patch: { minRate?: number | null; maxRate?: number | null },
+) {
+  const db = getDb();
+  if (patch.minRate !== undefined) {
+    db.prepare("UPDATE units SET min_rate = ? WHERE id = ?").run(patch.minRate, unitId);
+  }
+  if (patch.maxRate !== undefined) {
+    db.prepare("UPDATE units SET max_rate = ? WHERE id = ?").run(patch.maxRate, unitId);
+  }
 }
 
 export function setUnitMinStay(unitId: string, minStay: number) {
@@ -147,21 +165,16 @@ export function setUnitGroup(unitId: string, group: string | null, subgroup: str
     .run(g, s, unitId);
 }
 
-// Seed a unit's base/current/floor/ceiling from a rate anchor (e.g. derived from
-// the Rates Calendar / MiniHotel) — only for units that don't have a base rate
-// yet, so we never clobber an existing one.
-export function setUnitRateAnchor(
-  unitId: string,
-  base: number,
-  current: number,
-  minRate: number,
-  maxRate: number,
-) {
+// Seed a unit's base/current from a rate anchor (e.g. derived from the Rates
+// Calendar / MiniHotel) — only for units that don't have a base rate yet, so we
+// never clobber an existing one. Floor/ceiling stay auto (NULL) so they follow
+// the anchored Base until the operator pins them.
+export function setUnitRateAnchor(unitId: string, base: number, current: number) {
   const db = getDb();
   db.prepare(
-    `UPDATE units SET base_rate = ?, current_rate = ?, min_rate = ?, max_rate = ?,
+    `UPDATE units SET base_rate = ?, current_rate = ?,
        last_rate_change_at = ? WHERE id = ? AND base_rate <= 0`,
-  ).run(base, current, minRate, maxRate, new Date().toISOString(), unitId);
+  ).run(base, current, new Date().toISOString(), unitId);
 }
 
 export function setUnitMiniHotelRoomType(unitId: string, code: string | null) {

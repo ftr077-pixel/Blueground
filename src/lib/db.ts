@@ -446,16 +446,23 @@ function init(db: Database.Database) {
   ensureColumn(db, "rate_calendar", "min_price", "INTEGER");
   ensureColumn(db, "rate_calendar", "max_price", "INTEGER");
   ensureColumn(db, "rate_calendar", "note", "TEXT");
-  // Floors/ceilings derive from the base rate; backfill any rows still missing
-  // them (covers both pre-existing DBs and freshly-seeded rows, which insert
-  // only the original columns), ₪-step rounded.
-  const floorPct = UNIT_PRICING_DEFAULTS.floorPctOfBase;
-  const ceilPct = UNIT_PRICING_DEFAULTS.ceilingPctOfBase;
-  const step = PRICING_AGENT.roundingStep;
-  db.exec(`
-    UPDATE units SET min_rate = CAST(ROUND(base_rate * ${floorPct} / ${step}) * ${step} AS INTEGER) WHERE min_rate IS NULL;
-    UPDATE units SET max_rate = CAST(ROUND(base_rate * ${ceilPct} / ${step}) * ${step} AS INTEGER) WHERE max_rate IS NULL;
-  `);
+  // Floors/ceilings: NULL = auto (follow Base at the default band, resolved at
+  // read time in units.ts); a stored value is an operator pin that survives
+  // Base edits. One-time migration: historically every Base edit STAMPED
+  // min/max = band × base, so values still matching that formula are auto in
+  // disguise — null them so they resume following Base. Anything else was set
+  // deliberately (direct edit) and stays pinned. user_version-keyed so pins
+  // equal to the band made after this never get unpinned.
+  if (((db.pragma("user_version", { simple: true }) as number) ?? 0) < 2) {
+    const floorPct = UNIT_PRICING_DEFAULTS.floorPctOfBase;
+    const ceilPct = UNIT_PRICING_DEFAULTS.ceilingPctOfBase;
+    const step = PRICING_AGENT.roundingStep;
+    db.exec(`
+      UPDATE units SET min_rate = NULL WHERE min_rate = CAST(ROUND(base_rate * ${floorPct} / ${step}) * ${step} AS INTEGER);
+      UPDATE units SET max_rate = NULL WHERE max_rate = CAST(ROUND(base_rate * ${ceilPct} / ${step}) * ${step} AS INTEGER);
+    `);
+    db.pragma("user_version = 2");
+  }
 
   // Cached market data from the external provider (AirROI). One row per
   // neighborhood; refreshed by the daily market sync. JSON blobs hold the raw
