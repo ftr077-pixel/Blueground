@@ -10,6 +10,7 @@
 import { listUnits, type Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { bookedDatesForUnit } from "@/lib/repos/rates";
+import { realizedNightlyRates } from "@/lib/repos/reservations";
 import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
 
 export interface DateOverride {
@@ -58,6 +59,11 @@ export interface MarketProviders {
    *  reduction (own running relatively below market ⇒ shorter min stay). */
   occupancy90(unit: Unit): { own: number; market: number } | null;
 
+  /** Last year's realized NET nightly rate for an exact ISO date, or null when
+   *  no reservation history covers it. Feeds the Safety Minimum Price floor.
+   *  Wired to MiniHotel reservations (revenue ÷ nights per stay date). */
+  lastYearNightly(unit: Unit, isoDate: string): number | null;
+
   /** Operator/calendar override for a unit+date, or null.
    *  PRODUCTION SEAM: a unit_date_overrides table edited by the operator. */
   dateOverride(unit: Unit, date: Date): DateOverride | null;
@@ -84,6 +90,7 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
   let unitsCache: Unit[] | null = null;
   const allUnits = () => (unitsCache ??= listUnits());
   const groupOccCache = new Map<string, number | null>();
+  const lyCache = new Map<string, Map<string, number>>();
 
   return {
     isBooked(unit: Unit, date: Date): boolean {
@@ -114,6 +121,19 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
         if (s.has(new Date(t0 + i * DAY).toISOString().slice(0, 10))) own++;
       }
       return { own: own / 90, market };
+    },
+    lastYearNightly(unit: Unit, isoDate: string): number | null {
+      let m = lyCache.get(unit.id);
+      if (!m) {
+        // STLY probes for quotes up to a year ahead reach back ~371 days.
+        m = realizedNightlyRates(
+          unit.id,
+          iso(new Date(Date.now() - 380 * DAY)),
+          iso(new Date(Date.now() + 10 * DAY)),
+        );
+        lyCache.set(unit.id, m);
+      }
+      return m.get(isoDate) ?? null;
     },
   };
 }

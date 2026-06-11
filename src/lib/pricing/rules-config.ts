@@ -14,12 +14,15 @@ import {
   PRICING_OFFSET_LIMITS,
   PORTFOLIO_OBA_PRESETS,
   SEASONALITY_SENSITIVITY,
+  MARKET_FLAVOR_MULT,
   type PricingRulesConfig,
   type SeasonalitySensitivity,
   type MinPriceMode,
+  type MarketFlavor,
   type PortfolioObaWindow,
 } from "@/lib/config/pricing";
 import type { Unit } from "@/lib/repos/units";
+import { findCicoProfile } from "@/lib/repos/profiles";
 import { getSetting, setSetting } from "@/lib/repos/visibility";
 
 const RULES_KEY = "pricing_rule_overrides";
@@ -40,11 +43,26 @@ export function scopeStoreKey(scope: RuleScope): string {
 export interface RuleOverrides {
   currentRateLeadDays?: number;
   seasonality?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity };
-  demandEvents?: { enabled?: boolean; cap?: number };
+  demandEvents?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity; cap?: number };
   pacing?: { enabled?: boolean; sensitivity?: number; cap?: number };
   occupancy?: { enabled?: boolean };
-  farOut?: { enabled?: boolean; thresholdDays?: number; cap?: number; rampDays?: number };
-  lastMinute?: { enabled?: boolean; windowDays?: number; maxDiscount?: number };
+  farOut?: {
+    enabled?: boolean;
+    mode?: "gradual" | "flat" | "marketDriven";
+    marketFlavor?: MarketFlavor;
+    thresholdDays?: number;
+    cap?: number;
+    rampDays?: number;
+  };
+  lastMinute?: {
+    enabled?: boolean;
+    mode?: "gradual" | "flat" | "fixed" | "marketDriven";
+    marketFlavor?: MarketFlavor;
+    windowDays?: number;
+    value?: number;
+    /** Legacy field (pre mode-split): positive discount depth for the gradual ramp. */
+    maxDiscount?: number;
+  };
   adjacent?: {
     enabled?: boolean;
     mode?: "percent" | "fixed";
@@ -54,7 +72,20 @@ export interface RuleOverrides {
     applyOnWeekends?: boolean;
   };
   dayOfWeek?: { enabled?: boolean };
-  los?: { enabled?: boolean; quarterlyMinNights?: number; quarterlyDiscountPct?: number };
+  los?: {
+    enabled?: boolean;
+    weeklyPct?: number | null;
+    monthlyPct?: number | null;
+    quarterlyMinNights?: number;
+    quarterlyDiscountPct?: number;
+  };
+  extraPersonFee?: {
+    enabled?: boolean;
+    mode?: "fixed" | "percent";
+    value?: number;
+    afterGuests?: number;
+  };
+  checkinCheckout?: { enabled?: boolean; profile?: string | null };
   pricingOffset?: { enabled?: boolean; mode?: "percent" | "fixed"; value?: number };
   weekend?: { days?: number[] };
   orphanDayPrices?: {
@@ -78,6 +109,7 @@ export interface RuleOverrides {
     lastMinute?: { enabled?: boolean; withinDays?: number; mode?: MinPriceMode; value?: number };
     orphan?: { enabled?: boolean; mode?: MinPriceMode; value?: number };
   };
+  safetyMinPrice?: { enabled?: boolean; pctOfLastYear?: number };
   minStayRules?: {
     mode?: "recommended" | "custom";
     highestAllowed?: number;
@@ -107,14 +139,65 @@ const SECTION_KEYS = [
   "adjacent",
   "dayOfWeek",
   "los",
+  "extraPersonFee",
+  "checkinCheckout",
   "pricingOffset",
   "weekend",
   "orphanDayPrices",
   "portfolioOccupancy",
   "minPrices",
+  "safetyMinPrice",
   "minStayRules",
   "minStayHierarchy",
 ] as const;
+
+export type RuleSectionKey = (typeof SECTION_KEYS)[number];
+
+/** Section keys + display labels for the customizations Table View. */
+export const RULE_SECTIONS: Array<{ key: RuleSectionKey; label: string }> = [
+  { key: "seasonality", label: "Seasonality" },
+  { key: "demandEvents", label: "Demand" },
+  { key: "pacing", label: "Pacing" },
+  { key: "occupancy", label: "Occupancy" },
+  { key: "farOut", label: "Far-out" },
+  { key: "lastMinute", label: "Last-minute" },
+  { key: "adjacent", label: "Adjacent" },
+  { key: "dayOfWeek", label: "Day-of-week" },
+  { key: "los", label: "LOS / discounts" },
+  { key: "extraPersonFee", label: "Extra person" },
+  { key: "checkinCheckout", label: "Check-in/out" },
+  { key: "pricingOffset", label: "Offset" },
+  { key: "weekend", label: "Weekend days" },
+  { key: "orphanDayPrices", label: "Orphan prices" },
+  { key: "portfolioOccupancy", label: "Portfolio occ" },
+  { key: "minPrices", label: "Min prices" },
+  { key: "safetyMinPrice", label: "Safety min" },
+  { key: "minStayRules", label: "Min stay" },
+  { key: "minStayHierarchy", label: "Min-stay far-out" },
+];
+
+/** Which level supplies each customization section for a unit (Table View):
+ *  "listing" | "subgroup:NAME" | "group:NAME" | "account" | null (code default).
+ *  Mirrors resolveChain — the most specific level that defines a section wins. */
+export function sectionSourcesForUnit(
+  unit: Pick<Unit, "id" | "group" | "subgroup">,
+): Record<RuleSectionKey, string | null> {
+  const levels: Array<{ label: string; o: RuleOverrides }> = [
+    { label: "account", o: getRuleOverrides("account") },
+  ];
+  if (unit.group) levels.push({ label: `group:${unit.group}`, o: getRuleOverrides(`group:${unit.group}`) });
+  if (unit.subgroup)
+    levels.push({ label: `subgroup:${unit.subgroup}`, o: getRuleOverrides(`group:${unit.subgroup}`) });
+  levels.push({ label: "listing", o: getRuleOverrides(`unit:${unit.id}`) });
+  const out = {} as Record<RuleSectionKey, string | null>;
+  for (const k of SECTION_KEYS) {
+    out[k] = null;
+    for (const level of levels) {
+      if (level.o[k] !== undefined) out[k] = level.label;
+    }
+  }
+  return out;
+}
 
 export function getRuleOverrides(scope: RuleScope = "account"): RuleOverrides {
   const raw = getSetting(scopeStoreKey(scope));
@@ -196,6 +279,33 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   const lim = PRICING_OFFSET_LIMITS[pricingOffset.mode === "fixed" ? "fixed" : "percent"];
   pricingOffset.value = clampNum(pricingOffset.value, lim.min, lim.max, 0);
 
+  const validFlavor = (x: MarketFlavor | undefined, fb: MarketFlavor): MarketFlavor =>
+    x && x in MARKET_FLAVOR_MULT ? x : fb;
+  const farOut = { ...d.farOut, ...o.farOut };
+  farOut.mode = (["gradual", "flat", "marketDriven"] as const).includes(farOut.mode)
+    ? farOut.mode
+    : d.farOut.mode;
+  farOut.marketFlavor = validFlavor(farOut.marketFlavor, d.farOut.marketFlavor);
+  farOut.thresholdDays = clampInt(farOut.thresholdDays, 0, 730, d.farOut.thresholdDays);
+  farOut.cap = clampNum(farOut.cap, -0.75, 5, d.farOut.cap);
+  farOut.rampDays = clampInt(farOut.rampDays, 1, 730, d.farOut.rampDays);
+
+  const lmo = o.lastMinute;
+  const lastMinute = { ...d.lastMinute, ...lmo };
+  lastMinute.mode = (["gradual", "flat", "fixed", "marketDriven"] as const).includes(lastMinute.mode)
+    ? lastMinute.mode
+    : d.lastMinute.mode;
+  lastMinute.marketFlavor = validFlavor(lastMinute.marketFlavor, d.lastMinute.marketFlavor);
+  lastMinute.windowDays = clampInt(lastMinute.windowDays, 1, 90, d.lastMinute.windowDays);
+  // Legacy override blobs carried `maxDiscount` (a positive gradual depth).
+  if (lmo && lmo.value === undefined && lmo.maxDiscount != null && Number.isFinite(lmo.maxDiscount)) {
+    lastMinute.value = -Math.abs(lmo.maxDiscount);
+  }
+  lastMinute.value =
+    lastMinute.mode === "fixed"
+      ? clampNum(lastMinute.value, 0, 1000000, 0)
+      : clampNum(lastMinute.value, -0.75, 5, d.lastMinute.value);
+
   const weekendDays = (o.weekend?.days ?? d.weekend.days)
     .map((x) => Math.round(x))
     .filter((x) => x >= 0 && x <= 6);
@@ -258,6 +368,36 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     orphan: mp(d.minPrices.orphan, o.minPrices?.orphan),
   };
 
+  const los = { ...d.los, ...o.los };
+  // PriceLabs range: 0–75%, entered without a sign. null = use the unit's own.
+  los.weeklyPct = los.weeklyPct != null ? clampNum(Math.abs(los.weeklyPct), 0, 0.75, 0) : null;
+  los.monthlyPct = los.monthlyPct != null ? clampNum(Math.abs(los.monthlyPct), 0, 0.75, 0) : null;
+  los.quarterlyDiscountPct = clampNum(los.quarterlyDiscountPct, 0, 0.75, d.los.quarterlyDiscountPct);
+
+  const epf = { ...d.extraPersonFee, ...o.extraPersonFee };
+  epf.mode = epf.mode === "percent" ? "percent" : "fixed";
+  epf.value = epf.mode === "percent" ? clampNum(epf.value, 0, 1, 0) : clampNum(epf.value, 0, 100000, 0);
+  epf.afterGuests = clampInt(epf.afterGuests, 1, 20, d.extraPersonFee.afterGuests);
+
+  // Resolve the attached CICO profile's day lists at read time (all days when
+  // no profile / unknown profile). Archived profiles keep applying (PriceLabs).
+  const cco = { enabled: o.checkinCheckout?.enabled ?? d.checkinCheckout.enabled, profile: o.checkinCheckout?.profile ?? d.checkinCheckout.profile };
+  const cicoProf = findCicoProfile(cco.profile);
+  const checkinCheckout = {
+    enabled: cco.enabled,
+    profile: cco.profile,
+    allowedCheckin: cicoProf?.allowedCheckin ?? d.checkinCheckout.allowedCheckin,
+    allowedCheckout: cicoProf?.allowedCheckout ?? d.checkinCheckout.allowedCheckout,
+  };
+
+  const demandSens =
+    o.demandEvents?.sensitivity && o.demandEvents.sensitivity in SEASONALITY_SENSITIVITY
+      ? o.demandEvents.sensitivity
+      : d.demandEvents.sensitivity;
+
+  const safetyMinPrice = { ...d.safetyMinPrice, ...o.safetyMinPrice };
+  safetyMinPrice.pctOfLastYear = clampNum(safetyMinPrice.pctOfLastYear, 0.5, 3, d.safetyMinPrice.pctOfLastYear);
+
   const ms = o.minStayRules;
   const minStayRules: PricingRulesConfig["minStayRules"] = {
     mode: ms?.mode === "custom" ? "custom" : "recommended",
@@ -301,19 +441,28 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     currentRateLeadDays: o.currentRateLeadDays ?? d.currentRateLeadDays,
     curveHorizonDays: d.curveHorizonDays,
     seasonality: { ...d.seasonality, ...o.seasonality, sensitivity: sens },
-    demandEvents: { ...d.demandEvents, ...o.demandEvents },
+    demandEvents: { ...d.demandEvents, ...o.demandEvents, sensitivity: demandSens },
     pacing: { ...d.pacing, ...o.pacing },
     occupancy: { ...d.occupancy, ...o.occupancy },
-    farOut: { ...d.farOut, ...o.farOut },
-    lastMinute: { ...d.lastMinute, ...o.lastMinute },
+    farOut,
+    lastMinute: {
+      enabled: lastMinute.enabled,
+      mode: lastMinute.mode,
+      marketFlavor: lastMinute.marketFlavor,
+      windowDays: lastMinute.windowDays,
+      value: lastMinute.value,
+    },
     adjacent,
     dayOfWeek: { ...d.dayOfWeek, ...o.dayOfWeek },
-    los: { ...d.los, ...o.los },
+    los,
+    extraPersonFee: epf,
+    checkinCheckout,
     pricingOffset,
     weekend,
     orphanDayPrices,
     portfolioOccupancy,
     minPrices,
+    safetyMinPrice,
     minStayRules,
     minStayHierarchy: { ...d.minStayHierarchy, ...o.minStayHierarchy },
   };

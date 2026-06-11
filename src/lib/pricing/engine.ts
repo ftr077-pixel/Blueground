@@ -46,6 +46,9 @@ export interface DateQuote {
   minStaySource: string;
   /** Effective monthly rate (₪) for a 30-night booking after LOS discount. */
   effectiveMonthlyRate: number;
+  /** Check-in/Check-out restriction flags for this weekday (CICO profiles). */
+  checkinAllowed: boolean;
+  checkoutAllowed: boolean;
 }
 
 function leadDaysFrom(asOf: Date, date: Date): number {
@@ -212,17 +215,29 @@ export function quoteNight(
   add(pacingRule(unit, market, cfg));
   add(occupancyRule(unit, date, market, cfg));
   add(portfolioOccupancyRule(unit, date, leadDays, market, cfg));
-  add(farOutRule(leadDays, cfg));
+  add(farOutRule(unit, date, leadDays, market, cfg));
   // Gap/lead-time adjustment class — PriceLabs stacking: largest discount wins,
-  // premiums stack, a mix applies largest discount + every premium. A FIXED
-  // orphan price is a pin, not an adjustment — it bypasses the stack.
+  // premiums stack, a mix applies largest discount + every premium. FIXED
+  // prices (last-minute fixed, orphan fixed) are pins that bypass the stack;
+  // when both fire, last-minute beats orphan-day (the PriceLabs fixed-override
+  // hierarchy: date-specific > last-minute > orphan-day).
   const orphan = orphanDayPriceRule(unit, date, leadDays, market, cfg);
-  let orphanPin: number | null = null;
-  const stackCandidates = [lastMinuteRule(leadDays, cfg), adjacentRule(unit, date, market, cfg)];
+  const lastMin = lastMinuteRule(unit, date, leadDays, market, cfg);
+  const stackCandidates: (FactorResult | null)[] = [adjacentRule(unit, date, market, cfg)];
+  let pin: number | null = null;
+  if (lastMin?.pin != null) {
+    pin = lastMin.pin;
+    factors.push(lastMin);
+  } else if (lastMin) {
+    stackCandidates.push(lastMin);
+  }
   if (orphan?.pin != null) {
-    orphanPin = orphan.pin;
-    factors.push(orphan);
-  } else {
+    if (pin == null) {
+      pin = orphan.pin;
+      factors.push(orphan);
+    }
+    // else: the last-minute fixed price wins; the orphan pin is suppressed.
+  } else if (orphan) {
     stackCandidates.push(orphan);
   }
   for (const f of resolveAdjustmentStack(stackCandidates, unit.baseRate)) {
@@ -231,11 +246,11 @@ export function quoteNight(
   add(dayOfWeekRule(date, cfg));
 
   // Multiplicative factors compound on the base; fixed (₪) adjustments from
-  // fixed-mode rules are added after, before the floor/ceiling clamp. A fixed
-  // orphan price replaces the computed raw rate outright (still clamped).
+  // fixed-mode rules are added after, before the floor/ceiling clamp. A pinned
+  // fixed price replaces the computed raw rate outright (still clamped).
   const mult = factors.reduce((acc, f) => acc * f.factor, unit.baseRate);
   const fixedAdj = factors.reduce((acc, f) => acc + (f.add ?? 0), 0);
-  const rawRate = roundRate(Math.max(0, orphanPin ?? mult + fixedAdj));
+  const rawRate = roundRate(Math.max(0, pin ?? mult + fixedAdj));
 
   // Advanced Minimum Price rules resolve the floor per night (far-out/weekend
   // raise it; last-minute/orphan replace it — possibly below the listing min).
@@ -273,6 +288,13 @@ export function quoteNight(
   const { minStay, source } = resolveMinStay(unit, date, leadDays, market, cfg, rate);
   const effectiveMonthlyRate = Math.round(rate * 30 * (1 - losDiscountForStay(unit, 30, cfg)));
 
+  // Check-in/Check-out restriction for this weekday (engine-side; not pushed —
+  // no verified CTA/CTD field in the MiniHotel Reverse ARI contract).
+  const dow = date.getUTCDay();
+  const cc = cfg.checkinCheckout;
+  const checkinAllowed = !cc.enabled || cc.allowedCheckin.includes(dow);
+  const checkoutAllowed = !cc.enabled || cc.allowedCheckout.includes(dow);
+
   return {
     date: date.toISOString().slice(0, 10),
     leadDays,
@@ -286,6 +308,8 @@ export function quoteNight(
     minStay,
     minStaySource: source,
     effectiveMonthlyRate,
+    checkinAllowed,
+    checkoutAllowed,
   };
 }
 
@@ -331,17 +355,20 @@ export function activeRuleSummary(
   return [
     { key: "base", label: "Base rate anchor", enabled: true, note: "per-unit base × factors" },
     { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: `monthly market curve (${sens.label})` },
-    { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap` },
+    { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap (${(SEASONALITY_SENSITIVITY[cfg.demandEvents.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended).label})` },
     { key: "pacing", label: "Booking pace", enabled: cfg.pacing.enabled, note: `±${(cfg.pacing.cap * 100).toFixed(0)}% cap` },
     { key: "occupancy", label: "Occupancy bands", enabled: cfg.occupancy.enabled, note: `${cfg.occupancy.bands.length} bands` },
-    { key: "farOut", label: "Far-out premium", enabled: cfg.farOut.enabled, note: `>${cfg.farOut.thresholdDays}d` },
-    { key: "lastMinute", label: "Last-minute discount", enabled: cfg.lastMinute.enabled, note: "STR — off for MTR" },
+    { key: "farOut", label: "Far-out premium", enabled: cfg.farOut.enabled, note: cfg.farOut.mode === "marketDriven" ? `market-driven (${cfg.farOut.marketFlavor}) ≥60d, ≤20%` : `${cfg.farOut.mode} >${cfg.farOut.thresholdDays}d` },
+    { key: "lastMinute", label: "Last-minute prices", enabled: cfg.lastMinute.enabled, note: cfg.lastMinute.mode === "marketDriven" ? `market-driven (${cfg.lastMinute.marketFlavor}) ≤${Math.min(90, cfg.lastMinute.windowDays)}d` : `${cfg.lastMinute.mode} ≤${Math.min(90, cfg.lastMinute.windowDays)}d` },
     { key: "adjacent", label: "Adjacent factor", enabled: cfg.adjacent.enabled, note: `${adjNote}, ${cfg.adjacent.daysBefore}d before / ${cfg.adjacent.daysAfter}d after bookings` },
     { key: "orphanDay", label: "Orphan day prices", enabled: cfg.orphanDayPrices.enabled, note: `${cfg.orphanDayPrices.ranges.length} gap range(s)` },
     { key: "portfolioOccupancy", label: "Portfolio occupancy", enabled: cfg.portfolioOccupancy.enabled, note: `${cfg.portfolioOccupancy.profile} profile — group occupancy` },
     { key: "dayOfWeek", label: "Day-of-week", enabled: cfg.dayOfWeek.enabled, note: "STR — off for MTR" },
-    { key: "los", label: "LOS / monthly discount", enabled: cfg.los.enabled, note: "weekly / monthly / quarter" },
+    { key: "los", label: "LOS / monthly discount", enabled: cfg.los.enabled, note: cfg.los.weeklyPct != null || cfg.los.monthlyPct != null ? `scope ${cfg.los.weeklyPct != null ? `wk ${(cfg.los.weeklyPct * 100).toFixed(0)}%` : ""} ${cfg.los.monthlyPct != null ? `mo ${(cfg.los.monthlyPct * 100).toFixed(0)}%` : ""} + quarter` : "per-unit weekly / monthly + quarter" },
+    { key: "extraPersonFee", label: "Extra person fee", enabled: cfg.extraPersonFee.enabled, note: `${cfg.extraPersonFee.mode === "percent" ? `${(cfg.extraPersonFee.value * 100).toFixed(0)}%` : `₪${cfg.extraPersonFee.value}`} / extra guest after ${cfg.extraPersonFee.afterGuests}` },
+    { key: "checkinCheckout", label: "Check-in/out restriction", enabled: cfg.checkinCheckout.enabled, note: cfg.checkinCheckout.profile ? `profile "${cfg.checkinCheckout.profile}" (not pushed to MiniHotel)` : "no profile attached" },
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max + advanced min-price rules" },
+    { key: "safetyMinPrice", label: "Safety minimum price", enabled: cfg.safetyMinPrice.enabled, note: `LY same-weekday ADR ×${(cfg.safetyMinPrice.pctOfLastYear * 100).toFixed(0)}% — raises-only, needs reservation history` },
     { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
     { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: `${cfg.minStayRules.mode} — lowest-allowed → orphan → DSO → adjacent → far-out → last-minute → default` },
     { key: "gate", label: "Human gate", enabled: true, note: `>±${gatePct}% → Action Center` },

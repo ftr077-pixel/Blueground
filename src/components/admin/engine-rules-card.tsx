@@ -35,6 +35,11 @@ const MIN_PRICE_MODES = [
   { value: "pctBase", label: "% of base" },
   { value: "pctMin", label: "% of min" },
 ];
+const FLAVORS = [
+  { value: "conservative", label: "Conservative" },
+  { value: "balanced", label: "Balanced" },
+  { value: "aggressive", label: "Aggressive" },
+];
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 interface OrphanRow {
@@ -63,18 +68,25 @@ interface Form {
   seasonalityOn: boolean;
   seasonalitySens: string;
   demandOn: boolean;
+  demandSens: string;
   demandCapPct: string;
+  smpOn: boolean;
+  smpPct: string;
   pacingOn: boolean;
   pacingSensPct: string;
   pacingCapPct: string;
   occupancyOn: boolean;
   farOutOn: boolean;
+  farOutMode: string;
+  farOutFlavor: string;
   farOutDays: string;
   farOutCapPct: string;
   farOutRampDays: string;
   lastMinuteOn: boolean;
+  lastMinMode: string;
+  lastMinFlavor: string;
   lastMinWindow: string;
-  lastMinMaxPct: string;
+  lastMinValue: string;
   adjacentOn: boolean;
   adjacentMode: string;
   adjacentValue: string;
@@ -83,8 +95,16 @@ interface Form {
   adjacentWeekends: boolean;
   dayOfWeekOn: boolean;
   losOn: boolean;
+  losWeekly: string;
+  losMonthly: string;
   losQuarterNights: string;
   losQuarterPct: string;
+  epfOn: boolean;
+  epfMode: string;
+  epfValue: string;
+  epfAfter: string;
+  cicoOn: boolean;
+  cicoProfile: string;
   offsetOn: boolean;
   offsetMode: string;
   offsetValue: string;
@@ -138,11 +158,19 @@ interface Form {
 interface EffectiveConfig {
   currentRateLeadDays: number;
   seasonality: { enabled: boolean; sensitivity: string };
-  demandEvents: { enabled: boolean; cap: number };
+  demandEvents: { enabled: boolean; sensitivity: string; cap: number };
+  safetyMinPrice: { enabled: boolean; pctOfLastYear: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
   occupancy: { enabled: boolean };
-  farOut: { enabled: boolean; thresholdDays: number; cap: number; rampDays: number };
-  lastMinute: { enabled: boolean; windowDays: number; maxDiscount: number };
+  farOut: {
+    enabled: boolean;
+    mode: string;
+    marketFlavor: string;
+    thresholdDays: number;
+    cap: number;
+    rampDays: number;
+  };
+  lastMinute: { enabled: boolean; mode: string; marketFlavor: string; windowDays: number; value: number };
   adjacent: {
     enabled: boolean;
     mode: "percent" | "fixed";
@@ -152,7 +180,15 @@ interface EffectiveConfig {
     applyOnWeekends: boolean;
   };
   dayOfWeek: { enabled: boolean };
-  los: { enabled: boolean; quarterlyMinNights: number; quarterlyDiscountPct: number };
+  los: {
+    enabled: boolean;
+    weeklyPct: number | null;
+    monthlyPct: number | null;
+    quarterlyMinNights: number;
+    quarterlyDiscountPct: number;
+  };
+  extraPersonFee: { enabled: boolean; mode: string; value: number; afterGuests: number };
+  checkinCheckout: { enabled: boolean; profile: string | null };
   pricingOffset: { enabled: boolean; mode: "percent" | "fixed"; value: number };
   weekend: { days: number[] };
   orphanDayPrices: {
@@ -224,6 +260,39 @@ interface PreviewPoint {
   booked: boolean;
 }
 
+interface CicoProfile {
+  name: string;
+  archived: boolean;
+  allowedCheckin: number[];
+  allowedCheckout: number[];
+}
+
+interface WizardSuggestion {
+  name: string;
+  unitIds: string[];
+  alreadyGrouped: string[];
+}
+
+interface TableResp {
+  sections: Array<{ key: string; label: string }>;
+  rows: Array<{
+    unitId: string;
+    name: string;
+    neighborhood: string;
+    group: string | null;
+    subgroup: string | null;
+    sources: Record<string, string | null>;
+  }>;
+}
+
+const SOURCE_COLOR: Record<string, string> = {
+  listing: "#16a34a",
+  subgroup: "#7c3aed",
+  group: "#2563eb",
+  account: "#d97706",
+};
+const sourceKind = (s: string | null) => (s ? s.split(":")[0] : "default");
+
 const pct = (f: number) => String(Math.round(f * 1000) / 10);
 const frac = (s: string) => (parseFloat(s) || 0) / 100;
 const int = (s: string, fb = 0) => {
@@ -260,18 +329,25 @@ function toForm(e: EffectiveConfig): Form {
     seasonalityOn: e.seasonality.enabled,
     seasonalitySens: e.seasonality.sensitivity || "recommended",
     demandOn: e.demandEvents.enabled,
+    demandSens: e.demandEvents.sensitivity || "recommended",
     demandCapPct: pct(e.demandEvents.cap),
+    smpOn: e.safetyMinPrice.enabled,
+    smpPct: pct(e.safetyMinPrice.pctOfLastYear),
     pacingOn: e.pacing.enabled,
     pacingSensPct: pct(e.pacing.sensitivity),
     pacingCapPct: pct(e.pacing.cap),
     occupancyOn: e.occupancy.enabled,
     farOutOn: e.farOut.enabled,
+    farOutMode: e.farOut.mode || "gradual",
+    farOutFlavor: e.farOut.marketFlavor || "balanced",
     farOutDays: String(e.farOut.thresholdDays),
     farOutCapPct: pct(e.farOut.cap),
     farOutRampDays: String(e.farOut.rampDays),
     lastMinuteOn: e.lastMinute.enabled,
+    lastMinMode: e.lastMinute.mode || "gradual",
+    lastMinFlavor: e.lastMinute.marketFlavor || "balanced",
     lastMinWindow: String(e.lastMinute.windowDays),
-    lastMinMaxPct: pct(e.lastMinute.maxDiscount),
+    lastMinValue: e.lastMinute.mode === "fixed" ? String(e.lastMinute.value) : pct(e.lastMinute.value),
     adjacentOn: e.adjacent.enabled,
     adjacentMode: e.adjacent.mode,
     adjacentValue: e.adjacent.mode === "percent" ? pct(e.adjacent.value) : String(e.adjacent.value),
@@ -280,8 +356,17 @@ function toForm(e: EffectiveConfig): Form {
     adjacentWeekends: e.adjacent.applyOnWeekends,
     dayOfWeekOn: e.dayOfWeek.enabled,
     losOn: e.los.enabled,
+    losWeekly: e.los.weeklyPct == null ? "" : pct(e.los.weeklyPct),
+    losMonthly: e.los.monthlyPct == null ? "" : pct(e.los.monthlyPct),
     losQuarterNights: String(e.los.quarterlyMinNights),
     losQuarterPct: pct(e.los.quarterlyDiscountPct),
+    epfOn: e.extraPersonFee.enabled,
+    epfMode: e.extraPersonFee.mode || "fixed",
+    epfValue:
+      e.extraPersonFee.mode === "percent" ? pct(e.extraPersonFee.value) : String(e.extraPersonFee.value),
+    epfAfter: String(e.extraPersonFee.afterGuests),
+    cicoOn: e.checkinCheckout.enabled,
+    cicoProfile: e.checkinCheckout.profile ?? "",
     offsetOn: e.pricingOffset.enabled,
     offsetMode: e.pricingOffset.mode,
     offsetValue:
@@ -345,6 +430,23 @@ export function EngineRulesCard() {
   const [assignSub, setAssignSub] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
+  // Group Creation Wizard state
+  const [wizStrategy, setWizStrategy] = useState("city_bedroom");
+  const [wizSuggestions, setWizSuggestions] = useState<WizardSuggestion[] | null>(null);
+  const [wizPicked, setWizPicked] = useState<Set<string>>(new Set());
+  const [wizNames, setWizNames] = useState<Record<string, string>>({});
+
+  // Table View state
+  const [tableData, setTableData] = useState<TableResp | null>(null);
+  const [tableBusy, setTableBusy] = useState(false);
+
+  // Check-in/Check-out profiles state
+  const [cicoProfiles, setCicoProfiles] = useState<CicoProfile[]>([]);
+  const [cicoArchivedShown, setCicoArchivedShown] = useState(false);
+  const [edName, setEdName] = useState("");
+  const [edCheckin, setEdCheckin] = useState<boolean[]>(Array(7).fill(true));
+  const [edCheckout, setEdCheckout] = useState<boolean[]>(Array(7).fill(true));
+
   // Preview Prices Graph state
   const [pvUnit, setPvUnit] = useState("");
   const [pvHorizon, setPvHorizon] = useState(90);
@@ -377,6 +479,18 @@ export function EngineRulesCard() {
   useEffect(() => {
     loadGroups().catch(() => undefined);
   }, [loadGroups]);
+
+  const loadProfiles = useCallback(async (archived: boolean) => {
+    const res = await fetch(`/api/pricing/profiles${archived ? "?archived=1" : ""}`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return;
+    const b = (await res.json()) as { cico: CicoProfile[] };
+    setCicoProfiles(b.cico);
+  }, []);
+  useEffect(() => {
+    loadProfiles(cicoArchivedShown).catch(() => undefined);
+  }, [loadProfiles, cicoArchivedShown]);
 
   if (err) return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
   if (!f) return null;
@@ -440,19 +554,24 @@ export function EngineRulesCard() {
       currentRateLeadDays: int(f.currentRateLeadDays),
       humanGatePct: parseFloat(f.humanGatePct) || 15,
       seasonality: { enabled: f.seasonalityOn, sensitivity: f.seasonalitySens },
-      demandEvents: { enabled: f.demandOn, cap: frac(f.demandCapPct) },
+      demandEvents: { enabled: f.demandOn, sensitivity: f.demandSens, cap: frac(f.demandCapPct) },
+      safetyMinPrice: { enabled: f.smpOn, pctOfLastYear: frac(f.smpPct) },
       pacing: { enabled: f.pacingOn, sensitivity: frac(f.pacingSensPct), cap: frac(f.pacingCapPct) },
       occupancy: { enabled: f.occupancyOn },
       farOut: {
         enabled: f.farOutOn,
+        mode: f.farOutMode,
+        marketFlavor: f.farOutFlavor,
         thresholdDays: int(f.farOutDays),
         cap: frac(f.farOutCapPct),
         rampDays: int(f.farOutRampDays, 1),
       },
       lastMinute: {
         enabled: f.lastMinuteOn,
+        mode: f.lastMinMode,
+        marketFlavor: f.lastMinFlavor,
         windowDays: int(f.lastMinWindow),
-        maxDiscount: frac(f.lastMinMaxPct),
+        value: f.lastMinMode === "fixed" ? parseFloat(f.lastMinValue) || 0 : frac(f.lastMinValue),
       },
       adjacent: {
         enabled: f.adjacentOn,
@@ -465,8 +584,20 @@ export function EngineRulesCard() {
       dayOfWeek: { enabled: f.dayOfWeekOn },
       los: {
         enabled: f.losOn,
+        weeklyPct: f.losWeekly.trim() === "" ? null : Math.abs(frac(f.losWeekly)),
+        monthlyPct: f.losMonthly.trim() === "" ? null : Math.abs(frac(f.losMonthly)),
         quarterlyMinNights: int(f.losQuarterNights, 90),
         quarterlyDiscountPct: frac(f.losQuarterPct),
+      },
+      extraPersonFee: {
+        enabled: f.epfOn,
+        mode: f.epfMode === "percent" ? "percent" : "fixed",
+        value: f.epfMode === "percent" ? frac(f.epfValue) : parseFloat(f.epfValue) || 0,
+        afterGuests: int(f.epfAfter, 2),
+      },
+      checkinCheckout: {
+        enabled: f.cicoOn,
+        profile: f.cicoProfile || null,
       },
       pricingOffset: {
         enabled: f.offsetOn,
@@ -609,6 +740,95 @@ export function EngineRulesCard() {
     }
   }
 
+  function pickProfileToEdit(name: string) {
+    const p = cicoProfiles.find((x) => x.name === name);
+    if (!p) return;
+    setEdName(p.name);
+    setEdCheckin(DOW.map((_, i) => p.allowedCheckin.includes(i)));
+    setEdCheckout(DOW.map((_, i) => p.allowedCheckout.includes(i)));
+  }
+
+  async function profilesAction(body: Record<string, unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/pricing/profiles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const b = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(b?.error || `request failed: ${res.status}`);
+      }
+      await loadProfiles(cicoArchivedShown);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "profile update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function wizardSuggest() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(`/api/pricing/groups?wizard=${wizStrategy}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`wizard failed: ${res.status}`);
+      const b = (await res.json()) as { suggestions: WizardSuggestion[] };
+      setWizSuggestions(b.suggestions);
+      setWizPicked(new Set(b.suggestions.filter((s) => s.unitIds.length > s.alreadyGrouped.length).map((s) => s.name)));
+      setWizNames({});
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "wizard failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function wizardApply() {
+    if (!wizSuggestions) return;
+    const apply = wizSuggestions
+      .filter((s) => wizPicked.has(s.name))
+      .map((s) => ({ name: (wizNames[s.name] ?? s.name).trim() || s.name, unitIds: s.unitIds }));
+    if (apply.length === 0) return;
+    await groupsAction({ wizard: apply });
+    setWizSuggestions(null);
+  }
+
+  async function loadTable() {
+    setTableBusy(true);
+    try {
+      const res = await fetch("/api/pricing/rules/table", { cache: "no-store" });
+      if (res.ok) setTableData((await res.json()) as TableResp);
+    } finally {
+      setTableBusy(false);
+    }
+  }
+
+  function downloadTableCsv() {
+    if (!tableData) return;
+    const head = ["listing", "neighborhood", "group", "subgroup", ...tableData.sections.map((s) => s.label)];
+    const lines = [head.join(",")];
+    for (const r of tableData.rows) {
+      lines.push(
+        [
+          `"${r.name}"`,
+          `"${r.neighborhood}"`,
+          r.group ?? "",
+          r.subgroup ?? "",
+          ...tableData.sections.map((s) => r.sources[s.key] ?? "default"),
+        ].join(","),
+      );
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "customizations-table.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   async function reviewChanges() {
     if (!pvUnit) return;
     setPvBusy(true);
@@ -692,18 +912,64 @@ export function EngineRulesCard() {
         </div>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
           {select("Seasonality sensitivity", "seasonalitySens", SENS_OPTIONS)}
+          {select("Demand factor sensitivity", "demandSens", SENS_OPTIONS)}
           {num("Demand cap %", "demandCapPct")}
           {num("Pace sensitivity %", "pacingSensPct")}
           {num("Pace cap %", "pacingCapPct")}
-          {num("Far-out ≥ days", "farOutDays")}
-          {num("Far-out cap %", "farOutCapPct")}
-          {num("Far-out ramp days", "farOutRampDays")}
-          {num("Last-min window d", "lastMinWindow")}
-          {num("Last-min max %", "lastMinMaxPct")}
+          {num("Weekly disc % (blank = unit)", "losWeekly")}
+          {num("Monthly disc % (blank = unit)", "losMonthly")}
           {num("Quarter ≥ nights", "losQuarterNights")}
           {num("Quarter disc %", "losQuarterPct")}
           {num("Headline lead days", "currentRateLeadDays")}
           {num("Human gate ±%", "humanGatePct")}
+        </div>
+        <p className="text-[10px] text-muted-foreground/70">
+          Weekly/monthly discounts: 0–75% (PriceLabs range), no sign needed; they apply on top of
+          nightly rates, so the effective stay rate can dip below the minimum price. Quote-side
+          only — MiniHotel isn&apos;t in PriceLabs&apos;s weekly/monthly push list, so set any
+          PMS-side discount there.
+        </p>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Far-out prices — hold/raise distant dates (market-driven: capped at 20%, never before
+            60 days out)
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {select("Mode", "farOutMode", [
+              { value: "gradual", label: "% Gradual" },
+              { value: "flat", label: "% Flat" },
+              { value: "marketDriven", label: "Market driven" },
+            ], "w-36")}
+            {f.farOutMode === "marketDriven"
+              ? select("Flavor", "farOutFlavor", FLAVORS, "w-36")
+              : (
+                <>
+                  {num("≥ days out", "farOutDays")}
+                  {num("Cap % (− disc / + prem)", "farOutCapPct", "w-28")}
+                  {f.farOutMode === "gradual" && num("Ramp days", "farOutRampDays")}
+                </>
+              )}
+          </div>
+        </div>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Last-minute prices — fine-tune near-arrival rates (custom windows max 90 days; a fixed
+            ₪ price pins the night and beats an orphan-day fixed price)
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {select("Mode", "lastMinMode", [
+              { value: "gradual", label: "% Gradual" },
+              { value: "flat", label: "% Flat" },
+              { value: "fixed", label: "Fixed ₪" },
+              { value: "marketDriven", label: "Market driven" },
+            ], "w-36")}
+            {num("Window ≤ days", "lastMinWindow")}
+            {f.lastMinMode === "marketDriven"
+              ? select("Flavor", "lastMinFlavor", FLAVORS, "w-36")
+              : num(f.lastMinMode === "fixed" ? "Price ₪" : "Value % (− disc / + prem)", "lastMinValue", "w-28")}
+          </div>
         </div>
 
         <div className={sectionBox}>
@@ -833,6 +1099,16 @@ export function EngineRulesCard() {
             % values are signed changes (e.g. −20 = 20% below base/min). Per-date minimums for
             events live in the Rates Calendar&apos;s Date Specific Overrides.
           </p>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3 border-t border-border/40 pt-2">
+            {toggle("Safety minimum price", "smpOn")}
+            {num("% of last year", "smpPct", "w-20")}
+            <span className="pb-1 text-[10px] text-muted-foreground/70">
+              Floors each night at last year&apos;s realized same-weekday rate (STLY ±1 week,
+              weighted; event dates take the max) × this factor — 110% is the safe choice.
+              Raises-only, never below the listing min; inert until MiniHotel reservation history
+              covers the dates.
+            </span>
+          </div>
         </div>
 
         <div className={sectionBox}>
@@ -894,6 +1170,151 @@ export function EngineRulesCard() {
             {f.msOrphanStrategy === "fixed" && num("Fixed n", "msOrphanFixed", "w-14")}
             {num("Max gap n", "msOrphanMaxGap", "w-14")}
             {num("Lowest orphan n", "msOrphanLowest", "w-14")}
+          </div>
+        </div>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Extra person fee — per extra guest per night above the threshold (percent mode prices
+            off the check-in day&apos;s rate only, as PriceLabs sends no per-night variation)
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {toggle("Charge extra person fee", "epfOn")}
+            {select("Type", "epfMode", [
+              { value: "fixed", label: "Fixed ₪" },
+              { value: "percent", label: "% of nightly rate" },
+            ], "w-36")}
+            {num(f.epfMode === "percent" ? "Value %" : "Value ₪", "epfValue", "w-20")}
+            {num("After guests", "epfAfter", "w-16")}
+          </div>
+        </div>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Check-in / Check-out — named profiles of allowed weekdays, attachable per scope
+            (all-or-nothing per level; engine-side flags — MiniHotel&apos;s Reverse ARI has no
+            verified CTA/CTD field, so this is not pushed)
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {toggle("Restrict check-in/check-out", "cicoOn")}
+            <label className="flex flex-col gap-1">
+              Attached profile
+              <select
+                className={`${input} w-44`}
+                value={f.cicoProfile}
+                onChange={(e) => set("cicoProfile", e.target.value)}
+              >
+                <option value="">— none —</option>
+                {cicoProfiles
+                  .filter((p) => !p.archived || p.name === f.cicoProfile)
+                  .map((p) => (
+                    <option key={p.name} value={p.name}>
+                      {p.name}
+                      {p.archived ? " (archived — still applies)" : ""}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          </div>
+          <div className="space-y-2 rounded-md border border-border/40 p-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-1">
+                Profile editor
+                <input
+                  className={`${input} w-40`}
+                  placeholder="Profile name"
+                  value={edName}
+                  onChange={(e) => setEdName(e.target.value)}
+                />
+              </label>
+              <select className={`${input} w-44`} value="" onChange={(e) => pickProfileToEdit(e.target.value)}>
+                <option value="">Load existing…</option>
+                {cicoProfiles.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                    {p.archived ? " (archived)" : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy || !edName.trim()}
+                onClick={() =>
+                  profilesAction({
+                    save: {
+                      name: edName.trim(),
+                      allowedCheckin: edCheckin.flatMap((on, i) => (on ? [i] : [])),
+                      allowedCheckout: edCheckout.flatMap((on, i) => (on ? [i] : [])),
+                    },
+                  })
+                }
+              >
+                Save profile
+              </button>
+              {cicoProfiles.some((p) => p.name === edName.trim()) && (
+                <button
+                  type="button"
+                  className={btnGhost}
+                  disabled={busy}
+                  onClick={() => {
+                    const p = cicoProfiles.find((x) => x.name === edName.trim());
+                    profilesAction(p?.archived ? { unarchive: p.name } : { archive: edName.trim() });
+                  }}
+                >
+                  {cicoProfiles.find((x) => x.name === edName.trim())?.archived ? "Unarchive" : "Archive"}
+                </button>
+              )}
+              <label className="inline-flex items-center gap-1.5 pb-1.5">
+                <input
+                  type="checkbox"
+                  checked={cicoArchivedShown}
+                  onChange={(e) => setCicoArchivedShown(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                />
+                Show archived
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="w-20 text-[10px]">Check-in on</span>
+              {DOW.map((d, i) => (
+                <label key={`ci-${d}`} className="inline-flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={edCheckin[i]}
+                    onChange={(e) => {
+                      const days = [...edCheckin];
+                      days[i] = e.target.checked;
+                      setEdCheckin(days);
+                    }}
+                    className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  />
+                  {d}
+                </label>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="w-20 text-[10px]">Check-out on</span>
+              {DOW.map((d, i) => (
+                <label key={`co-${d}`} className="inline-flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={edCheckout[i]}
+                    onChange={(e) => {
+                      const days = [...edCheckout];
+                      days[i] = e.target.checked;
+                      setEdCheckout(days);
+                    }}
+                    className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  />
+                  {d}
+                </label>
+              ))}
+            </div>
+            <p className="text-[10px] text-muted-foreground/70">
+              Profiles can&apos;t be deleted — archive instead. Removal semantics still apply: detach
+              + push before disabling, or the last pushed restriction lingers on the PMS.
+            </p>
           </div>
         </div>
 
@@ -1031,7 +1452,133 @@ export function EngineRulesCard() {
               </label>
             ))}
           </div>
+          <div className="space-y-2 rounded-md border border-border/40 p-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <span className="w-full text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                Group Creation Wizard — suggests groups from listing attributes; nothing is applied
+                until you confirm (already-grouped listings are never moved)
+              </span>
+              <label className="flex flex-col gap-1">
+                Strategy
+                <select
+                  className={`${input} w-44`}
+                  value={wizStrategy}
+                  onChange={(e) => setWizStrategy(e.target.value)}
+                >
+                  <option value="city_bedroom">City + Bedroom (default)</option>
+                  <option value="city">City</option>
+                  <option value="bedroom">Bedroom</option>
+                </select>
+              </label>
+              <button type="button" className={btnGhost} disabled={busy} onClick={wizardSuggest}>
+                Suggest groups
+              </button>
+              {wizSuggestions && (
+                <button type="button" className={btn} disabled={busy || wizPicked.size === 0} onClick={wizardApply}>
+                  Create &amp; assign {wizPicked.size} group(s)
+                </button>
+              )}
+            </div>
+            {wizSuggestions && wizSuggestions.length === 0 && (
+              <p className="text-[10px] text-muted-foreground/70">No buckets with 2+ listings found.</p>
+            )}
+            {wizSuggestions && wizSuggestions.length > 0 && (
+              <div className="max-h-44 space-y-1 overflow-y-auto">
+                {wizSuggestions.map((s) => {
+                  const free = s.unitIds.length - s.alreadyGrouped.length;
+                  return (
+                    <div key={s.name} className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                        checked={wizPicked.has(s.name)}
+                        onChange={(e) => {
+                          const next = new Set(wizPicked);
+                          if (e.target.checked) next.add(s.name);
+                          else next.delete(s.name);
+                          setWizPicked(next);
+                        }}
+                      />
+                      <input
+                        className={`${input} w-48`}
+                        value={wizNames[s.name] ?? s.name}
+                        onChange={(e) => setWizNames({ ...wizNames, [s.name]: e.target.value })}
+                      />
+                      <span className="text-[10px]">
+                        {free} assignable
+                        {s.alreadyGrouped.length > 0 ? ` · ${s.alreadyGrouped.length} already grouped` : ""}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+
+        <details className="space-y-2 border-t border-border/60 pt-3">
+          <summary className="cursor-pointer text-xs font-medium text-foreground">
+            Table view — which level supplies each customization (hierarchy at a glance)
+          </summary>
+          <div className="flex items-center gap-2 pt-2">
+            <button type="button" className={btnGhost} disabled={tableBusy} onClick={loadTable}>
+              {tableBusy ? "Loading…" : tableData ? "Refresh" : "Load table"}
+            </button>
+            {tableData && (
+              <button type="button" className={btnGhost} onClick={downloadTableCsv}>
+                Download CSV
+              </button>
+            )}
+            <span className="text-[10px] text-muted-foreground/70">
+              <span style={{ color: SOURCE_COLOR.listing }}>●</span> listing ·{" "}
+              <span style={{ color: SOURCE_COLOR.subgroup }}>●</span> sub-group ·{" "}
+              <span style={{ color: SOURCE_COLOR.group }}>●</span> group ·{" "}
+              <span style={{ color: SOURCE_COLOR.account }}>●</span> account · ○ code default —
+              hover a dot for the level
+            </span>
+          </div>
+          {tableData && (
+            <div className="max-h-80 overflow-auto rounded-md border border-border/60">
+              <table className="w-full border-collapse text-[10px]">
+                <thead className="sticky top-0 bg-card">
+                  <tr>
+                    <th className="px-2 py-1 text-left font-medium">Listing</th>
+                    {tableData.sections.map((s) => (
+                      <th key={s.key} className="px-1 py-1 text-center font-medium" title={s.key}>
+                        {s.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {tableData.rows.map((r) => (
+                    <tr key={r.unitId} className="border-t border-border/40">
+                      <td className="whitespace-nowrap px-2 py-0.5">
+                        {r.name}
+                        {(r.group || r.subgroup) && (
+                          <span className="text-muted-foreground/70"> · {r.group ?? ""}{r.subgroup ? ` / ${r.subgroup}` : ""}</span>
+                        )}
+                      </td>
+                      {tableData.sections.map((s) => {
+                        const src = r.sources[s.key];
+                        const kind = sourceKind(src);
+                        return (
+                          <td key={s.key} className="px-1 py-0.5 text-center" title={src ?? "code default"}>
+                            {src ? (
+                              <span style={{ color: SOURCE_COLOR[kind] ?? "#64748b" }}>●</span>
+                            ) : (
+                              <span className="text-muted-foreground/40">○</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </details>
 
         <div className="space-y-2 border-t border-border/60 pt-3">
           <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
