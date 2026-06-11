@@ -78,6 +78,9 @@ export interface RateRow {
   occ90: number | null;
   /** Latest Airbnb search position for the ~1-month stay, via the linked tracked listing. */
   airbnbRank: RankInfo | null;
+  /** "Monthly estimate": from the first date a 30-night stay can start, the sum
+   *  of those 30 nightly rates minus 20%. null when the unit has no prices. */
+  monthlyEstimate: { from: string; total: number; nightly: number } | null;
 }
 
 export interface CalendarSummary {
@@ -240,6 +243,90 @@ export function getCalendar(from: string, days: number): Calendar {
   const ovOcc = new Map<string, OverrideSql>();
   for (const r of ovOccRows) ovOcc.set(r.unit_id + "|" + r.date, r);
 
+  // Overrides for the Monthly-estimate search: availability is scanned up to a
+  // year out (plus the 30-night stay itself) to find each unit's first
+  // bookable month. Rows are sparse, so one query per request, grouped by unit.
+  const EST_SEARCH_DAYS = 365;
+  const ovEstByUnit = new Map<string, Map<string, OverrideSql>>();
+  {
+    const rows = db
+      .prepare("SELECT * FROM rate_calendar WHERE date >= ? AND date < ?")
+      .all(occFrom, isoAddDays(occFrom, EST_SEARCH_DAYS + 30)) as OverrideSql[];
+    for (const r of rows) {
+      let m = ovEstByUnit.get(r.unit_id);
+      if (!m) {
+        m = new Map();
+        ovEstByUnit.set(r.unit_id, m);
+      }
+      m.set(r.date, r);
+    }
+  }
+
+  // "Monthly estimate": find the first date (from today) where 30 consecutive
+  // nights are bookable — not booked, not closed, not zero-availability — sum
+  // those 30 nightly rates exactly as the calendar prices them (override pins,
+  // dynamic %, per-date min/max on top of the engine rate), then take 20% off.
+  // If no fully-open month exists within a year, fall back to the first open
+  // night (the estimate is still useful, just less bookable as one block).
+  const monthlyEstimateFor = (
+    unit: Unit,
+    hasBaseline: boolean,
+    priceOf: (u: Unit, iso: string) => NightPrice,
+  ): { from: string; total: number; nightly: number } | null => {
+    if (!hasBaseline) return null;
+    const ovByDate = ovEstByUnit.get(unit.id);
+    const isBlocked = (date: string): boolean => {
+      const o = ovByDate?.get(date);
+      if (!o) return false;
+      return o.booked === 1 || o.closed === 1 || o.available === 0;
+    };
+    // Walk the (few) blocked dates to find the first 30-night open gap.
+    const blocked = ovByDate
+      ? [...ovByDate.values()]
+          .filter((o) => o.booked === 1 || o.closed === 1 || o.available === 0)
+          .map((o) => o.date)
+          .sort()
+      : [];
+    const horizonEnd = isoAddDays(occFrom, EST_SEARCH_DAYS);
+    let start: string | null = null;
+    let candidate = occFrom;
+    for (const b of blocked) {
+      if (b < candidate) continue;
+      if (dayIndex(b) - dayIndex(candidate) >= 30) break; // gap before this block fits a month
+      candidate = isoAddDays(b, 1);
+      if (candidate > horizonEnd) break;
+    }
+    if (candidate <= horizonEnd) start = candidate;
+    if (start == null) {
+      // Fallback: the first open night within the horizon.
+      let d = occFrom;
+      while (d <= horizonEnd && isBlocked(d)) d = isoAddDays(d, 1);
+      if (d > horizonEnd) return null;
+      start = d;
+    }
+    const todayIso = occFrom;
+    let sum = 0;
+    for (let i = 0; i < 30; i++) {
+      const date = isoAddDays(start, i);
+      let p = priceOf(unit, date).rate;
+      const o = ovByDate?.get(date);
+      if (o) {
+        const expired = o.expires_on != null && todayIso > o.expires_on;
+        if (!expired) {
+          if (o.price != null) p = o.price;
+          else {
+            if (o.pct_adjust != null) p = Math.max(0, Math.round(p * (1 + o.pct_adjust / 100)));
+            if (o.min_price != null && p < o.min_price) p = o.min_price;
+            if (o.max_price != null && p > o.max_price) p = o.max_price;
+          }
+        }
+      }
+      sum += p;
+    }
+    const total = Math.round(sum * 0.8); // the operator's flat 20% monthly cut
+    return { from: start, total, nightly: Math.round(total / 30) };
+  };
+
   // Latest ~1-month-stay Airbnb search position per linked unit (the search
   // the visibility tab tracks; tracked_listings.unit_id is the link).
   interface RankSql {
@@ -376,6 +463,7 @@ export function getCalendar(from: string, days: number): Calendar {
             found: rk.found === 1,
           }
         : null,
+      monthlyEstimate: monthlyEstimateFor(unit, hasBaseline, priceOf),
     };
   });
 

@@ -72,6 +72,7 @@ interface RateRow {
   occ60: number | null;
   occ90: number | null;
   airbnbRank: RankInfo | null;
+  monthlyEstimate: { from: string; total: number; nightly: number } | null;
 }
 interface Calendar {
   from: string;
@@ -230,7 +231,7 @@ const apptOrd = (unit: { id: string; name: string }): number =>
   apartmentIdFromUnit(unit) ?? Number.POSITIVE_INFINITY;
 
 // Sortable listing columns (click a header to sort, click again to reverse).
-type SortKey = "listing" | "base" | "occ30" | "occ60" | "occ90" | "rank";
+type SortKey = "listing" | "base" | "monthly" | "occ30" | "occ60" | "occ90" | "rank";
 
 function SortMark({ active, dir }: { active: boolean; dir: 1 | -1 }) {
   if (!active) return <ChevronsUpDown className="h-3 w-3 opacity-40" />;
@@ -293,6 +294,8 @@ export function RateCalendar() {
           const b = r.unit.baseRate || r.unit.currentRate;
           return b > 0 ? b : null;
         }
+        case "monthly":
+          return r.monthlyEstimate?.total ?? null;
         case "occ30":
           return r.occ30;
         case "occ60":
@@ -753,7 +756,21 @@ export function RateCalendar() {
                       <SortMark active={sort.key === "base"} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="sticky left-[17rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[17rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                    <button
+                      type="button"
+                      className="inline-flex flex-col items-center hover:text-foreground"
+                      title="Monthly estimate: from the first date a 30-night stay can start, the sum of those 30 nightly rates minus 20%. Click to sort."
+                      onClick={() => toggleSort("monthly")}
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        Monthly
+                        <SortMark active={sort.key === "monthly"} dir={sort.dir} />
+                      </span>
+                      <span className="text-[9px] font-normal">est. −20%</span>
+                    </button>
+                  </th>
+                  <th className="sticky left-[22rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -767,7 +784,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">30N</span>
                     </button>
                   </th>
-                  <th className="sticky left-[20.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[25.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -781,7 +798,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">60N</span>
                     </button>
                   </th>
-                  <th className="sticky left-[24rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[29rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -795,7 +812,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">90N</span>
                     </button>
                   </th>
-                  <th className="sticky left-[27.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[32.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -860,16 +877,28 @@ export function RateCalendar() {
                         onSave={(n) => saveBaseRate(row.unit.id, n)}
                       />
                     </td>
-                    <td className="sticky left-[17rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[17rem] z-10 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      {row.monthlyEstimate ? (
+                        <span
+                          className="text-[11px] font-medium tabular-nums text-foreground"
+                          title={`30 nights from ${row.monthlyEstimate.from} · ~₪${row.monthlyEstimate.nightly.toLocaleString("en-US")}/night · after −20%`}
+                        >
+                          {fmtILS(row.monthlyEstimate.total)}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground/50">—</span>
+                      )}
+                    </td>
+                    <td className="sticky left-[22rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
                       <OccPill v={row.occ30} />
                     </td>
-                    <td className="sticky left-[20.5rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[25.5rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
                       <OccPill v={row.occ60} />
                     </td>
-                    <td className="sticky left-[24rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[29rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
                       <OccPill v={row.occ90} />
                     </td>
-                    <td className="sticky left-[27.5rem] z-10 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[32.5rem] z-10 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-1.5 text-center align-middle">
                       <RankCell rk={row.airbnbRank} />
                     </td>
                     {row.cells.map((c) => {
