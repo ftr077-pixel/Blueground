@@ -122,6 +122,7 @@ export interface RuleOverrides {
   orphanDayPrices?: {
     enabled?: boolean;
     ranges?: Array<{
+      fromGapNights?: number;
       upToGapNights: number;
       mode: "percent" | "fixed";
       weekday: number;
@@ -148,11 +149,20 @@ export interface RuleOverrides {
     highestAllowed?: number;
     custom?: { rule?: "fixed" | "bookingValue"; weekday?: number; weekend?: number; bookingValue?: number };
     lastMinute?: Array<{ withinDays: number; weekday: number; weekend: number }>;
-    adjacent?: { enabled?: boolean; afterNights?: number; beforeFlushFit?: boolean };
+    farOut?: Array<{ beyondDays: number; weekday: number; weekend: number }>;
+    adjacent?: {
+      enabled?: boolean;
+      afterNights?: number;
+      afterWithinDays?: number;
+      afterLeadFromDays?: number;
+      afterLeadToDays?: number;
+      beforeFlushFit?: boolean;
+    };
     orphanGap?: {
       enabled?: boolean;
       strategy?: "lengthOfGap" | "gapMinus1" | "gapMinus2" | "fixed";
       fixedNights?: number;
+      minGapNights?: number;
       maxGapNights?: number;
       lowestAllowed?: number;
     };
@@ -359,16 +369,20 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   const orphanRanges = (o.orphanDayPrices?.ranges ?? d.orphanDayPrices.ranges)
     .filter((r) => r && Number.isFinite(r.upToGapNights) && r.upToGapNights >= 1)
     .slice(0, 5)
-    .map((r) => ({
-      upToGapNights: clampInt(r.upToGapNights, 1, 30, 2),
-      mode: r.mode === "fixed" ? ("fixed" as const) : ("percent" as const),
-      weekday: r.mode === "fixed" ? clampNum(r.weekday, 0, 100000, 0) : clampNum(r.weekday, -0.75, 5, 0),
-      weekend: r.mode === "fixed" ? clampNum(r.weekend, 0, 100000, 0) : clampNum(r.weekend, -0.75, 5, 0),
-      withinDays:
-        r.withinDays == null || !Number.isFinite(r.withinDays) || r.withinDays <= 0
-          ? null
-          : Math.round(r.withinDays),
-    }))
+    .map((r) => {
+      const upTo = clampInt(r.upToGapNights, 1, 45, 2);
+      return {
+        fromGapNights: Math.min(clampInt(r.fromGapNights, 1, 45, 1), upTo),
+        upToGapNights: upTo,
+        mode: r.mode === "fixed" ? ("fixed" as const) : ("percent" as const),
+        weekday: r.mode === "fixed" ? clampNum(r.weekday, 0, 100000, 0) : clampNum(r.weekday, -0.75, 5, 0),
+        weekend: r.mode === "fixed" ? clampNum(r.weekend, 0, 100000, 0) : clampNum(r.weekend, -0.75, 5, 0),
+        withinDays:
+          r.withinDays == null || !Number.isFinite(r.withinDays) || r.withinDays <= 0
+            ? null
+            : Math.round(r.withinDays),
+      };
+    })
     .sort((a, b) => a.upToGapNights - b.upToGapNights); // ascending-order rule
   const orphanDayPrices = {
     enabled: o.orphanDayPrices?.enabled ?? d.orphanDayPrices.enabled,
@@ -535,7 +549,7 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     : o.minStayRules;
   const minStayRules: PricingRulesConfig["minStayRules"] = {
     profile: msProfile ? msProfileName : null,
-    mode: ms?.mode === "custom" ? "custom" : "recommended",
+    mode: ms?.mode === "custom" || ms?.mode === "recommended" ? ms.mode : d.minStayRules.mode,
     recommendedFlavor: (["str", "mtr", "multiUnit"] as const).includes(ms?.recommendedFlavor as never)
       ? (ms!.recommendedFlavor as "str" | "mtr" | "multiUnit")
       : d.minStayRules.recommendedFlavor,
@@ -554,9 +568,21 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
         weekday: clampInt(x.weekday, 1, 365, 1),
         weekend: clampInt(x.weekend, 1, 365, 1),
       })),
+    farOut: (ms?.farOut ?? d.minStayRules.farOut)
+      .filter((x) => x && Number.isFinite(x.beyondDays) && x.beyondDays >= 0)
+      .slice(0, 8)
+      .map((x) => ({
+        beyondDays: clampInt(x.beyondDays, 0, 730, 0),
+        weekday: clampInt(x.weekday, 1, 365, 1),
+        weekend: clampInt(x.weekend, 1, 365, 1),
+      }))
+      .sort((a, b) => a.beyondDays - b.beyondDays),
     adjacent: {
       enabled: ms?.adjacent?.enabled ?? d.minStayRules.adjacent.enabled,
       afterNights: clampInt(ms?.adjacent?.afterNights, 1, 365, d.minStayRules.adjacent.afterNights),
+      afterWithinDays: clampInt(ms?.adjacent?.afterWithinDays, 1, 30, d.minStayRules.adjacent.afterWithinDays),
+      afterLeadFromDays: clampInt(ms?.adjacent?.afterLeadFromDays, 0, 730, d.minStayRules.adjacent.afterLeadFromDays),
+      afterLeadToDays: clampInt(ms?.adjacent?.afterLeadToDays, 0, 999, d.minStayRules.adjacent.afterLeadToDays),
       beforeFlushFit: ms?.adjacent?.beforeFlushFit ?? d.minStayRules.adjacent.beforeFlushFit,
     },
     orphanGap: {
@@ -567,7 +593,8 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
         ? (ms!.orphanGap!.strategy as PricingRulesConfig["minStayRules"]["orphanGap"]["strategy"])
         : d.minStayRules.orphanGap.strategy,
       fixedNights: clampInt(ms?.orphanGap?.fixedNights, 1, 365, d.minStayRules.orphanGap.fixedNights),
-      maxGapNights: clampInt(ms?.orphanGap?.maxGapNights, 1, 30, d.minStayRules.orphanGap.maxGapNights),
+      minGapNights: clampInt(ms?.orphanGap?.minGapNights, 1, 45, d.minStayRules.orphanGap.minGapNights),
+      maxGapNights: clampInt(ms?.orphanGap?.maxGapNights, 1, 45, d.minStayRules.orphanGap.maxGapNights),
       lowestAllowed: clampInt(ms?.orphanGap?.lowestAllowed, 1, 365, d.minStayRules.orphanGap.lowestAllowed),
     },
     adaptiveOccupancy: {

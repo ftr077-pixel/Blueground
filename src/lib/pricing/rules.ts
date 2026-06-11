@@ -348,7 +348,9 @@ export function orphanDayPriceRule(
   if (!gap) return null;
   const range = c.ranges.find(
     (r) =>
-      gap.len <= r.upToGapNights && (r.withinDays == null || leadDays <= r.withinDays),
+      gap.len >= r.fromGapNights &&
+      gap.len <= r.upToGapNights &&
+      (r.withinDays == null || leadDays <= r.withinDays),
   );
   if (!range) return null;
   const value = isWeekendDay(date, cfg) ? range.weekend : range.weekday;

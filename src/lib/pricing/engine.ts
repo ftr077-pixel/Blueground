@@ -140,8 +140,19 @@ function resolveMinStay(
     source = `last-minute ≤${lm.withinDays}d`;
   }
 
-  // 6. Far-out bookings require longer commitments
-  if (leadDays > cfg.minStayHierarchy.farOutThresholdDays && cfg.minStayHierarchy.farOutNights > 0) {
+  // 6. Far-out bookings require longer commitments — the LADDER's largest
+  // matching rung wins ("beyond 2d → 4n, beyond 20d → 28n"); falls back to the
+  // single legacy minStayHierarchy rule when no ladder is configured.
+  if (r.farOut.length > 0) {
+    let rung: (typeof r.farOut)[number] | null = null;
+    for (const x of r.farOut) {
+      if (leadDays > x.beyondDays) rung = x; // rungs are ascending
+    }
+    if (rung) {
+      rec = wk ? rung.weekend : rung.weekday;
+      source = `far-out >${rung.beyondDays}d`;
+    }
+  } else if (leadDays > cfg.minStayHierarchy.farOutThresholdDays && cfg.minStayHierarchy.farOutNights > 0) {
     rec = cfg.minStayHierarchy.farOutNights;
     source = "far-out";
   }
@@ -161,11 +172,22 @@ function resolveMinStay(
       source = `adjacent before (${dist}n flush)`;
     }
   }
-  // 4. Adjacent AFTER — check-in right after a checkout
-  if (r.adjacent.enabled && r.adjacent.afterNights > 0 && open &&
-      market.isBooked(unit, new Date(date.getTime() - DAY_MS))) {
-    rec = r.adjacent.afterNights;
-    source = "adjacent after";
+  // 4. Adjacent AFTER — dates within `afterWithinDays` after an unavailable
+  // (booked OR blocked) night, applying only inside the configured lead window.
+  if (
+    r.adjacent.enabled &&
+    r.adjacent.afterNights > 0 &&
+    open &&
+    leadDays >= r.adjacent.afterLeadFromDays &&
+    leadDays <= r.adjacent.afterLeadToDays
+  ) {
+    for (let k = 1; k <= Math.max(1, r.adjacent.afterWithinDays); k++) {
+      if (market.isUnavailable(unit, new Date(date.getTime() - k * DAY_MS))) {
+        rec = r.adjacent.afterNights;
+        source = `adjacent after (≤${r.adjacent.afterWithinDays}d)`;
+        break;
+      }
+    }
   }
 
   // 3. Date-Specific Override — clamped by Lowest Min Stay Allowed below
@@ -199,7 +221,7 @@ function resolveMinStay(
   // floor — that's the documented way short gap-fills happen).
   if (r.orphanGap.enabled) {
     const gap = gapInfo(unit, date, market);
-    if (gap && gap.len <= Math.max(1, r.orphanGap.maxGapNights)) {
+    if (gap && gap.len >= Math.max(1, r.orphanGap.minGapNights) && gap.len <= Math.max(1, r.orphanGap.maxGapNights)) {
       const byStrategy =
         r.orphanGap.strategy === "fixed"
           ? r.orphanGap.fixedNights

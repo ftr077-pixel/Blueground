@@ -43,6 +43,7 @@ const FLAVORS = [
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 interface OrphanRow {
+  fromGap: string;
   upTo: string;
   mode: string;
   weekday: string;
@@ -66,6 +67,11 @@ interface LosTierRow {
   pct: string;
   minPrice: string;
   maxPrice: string;
+}
+interface MsFarOutRow {
+  beyondDays: string;
+  weekday: string;
+  weekend: string;
 }
 
 // Form state mirrors the API's effective config; percents shown as % (stored as
@@ -159,10 +165,15 @@ interface Form {
   msLm: LmRow[];
   msAdjOn: boolean;
   msAdjAfter: string;
+  msAdjAfterWithin: string;
+  msAdjLeadFrom: string;
+  msAdjLeadTo: string;
   msAdjBeforeFlush: boolean;
+  msFarOut: MsFarOutRow[];
   msOrphanOn: boolean;
   msOrphanStrategy: string;
   msOrphanFixed: string;
+  msOrphanMinGap: string;
   msOrphanMaxGap: string;
   msOrphanLowest: string;
   msAdaptiveOn: boolean;
@@ -248,6 +259,7 @@ interface EffectiveConfig {
   orphanDayPrices: {
     enabled: boolean;
     ranges: Array<{
+      fromGapNights: number;
       upToGapNights: number;
       mode: "percent" | "fixed";
       weekday: number;
@@ -273,11 +285,20 @@ interface EffectiveConfig {
     highestAllowed: number;
     custom: { rule: string; weekday: number; weekend: number; bookingValue: number };
     lastMinute: Array<{ withinDays: number; weekday: number; weekend: number }>;
-    adjacent: { enabled: boolean; afterNights: number; beforeFlushFit: boolean };
+    farOut: Array<{ beyondDays: number; weekday: number; weekend: number }>;
+    adjacent: {
+      enabled: boolean;
+      afterNights: number;
+      afterWithinDays: number;
+      afterLeadFromDays: number;
+      afterLeadToDays: number;
+      beforeFlushFit: boolean;
+    };
     orphanGap: {
       enabled: boolean;
       strategy: string;
       fixedNights: number;
+      minGapNights: number;
       maxGapNights: number;
       lowestAllowed: number;
     };
@@ -385,8 +406,9 @@ const int = (s: string, fb = 0) => {
 function toForm(e: EffectiveConfig): Form {
   const orphanRanges: OrphanRow[] = [0, 1, 2].map((i) => {
     const r = e.orphanDayPrices.ranges[i];
-    if (!r) return { upTo: "", mode: "percent", weekday: "", weekend: "", withinDays: "" };
+    if (!r) return { fromGap: "", upTo: "", mode: "percent", weekday: "", weekend: "", withinDays: "" };
     return {
+      fromGap: String(r.fromGapNights ?? 1),
       upTo: String(r.upToGapNights),
       mode: r.mode,
       weekday: r.mode === "percent" ? pct(r.weekday) : String(r.weekday),
@@ -500,12 +522,22 @@ function toForm(e: EffectiveConfig): Form {
     msWeekend: String(e.minStayRules.custom.weekend),
     msBookingValue: String(e.minStayRules.custom.bookingValue || ""),
     msLm,
+    msFarOut: [0, 1, 2, 3, 4].map((i) => {
+      const r = e.minStayRules.farOut[i];
+      return r
+        ? { beyondDays: String(r.beyondDays), weekday: String(r.weekday), weekend: String(r.weekend) }
+        : { beyondDays: "", weekday: "", weekend: "" };
+    }),
     msAdjOn: e.minStayRules.adjacent.enabled,
     msAdjAfter: String(e.minStayRules.adjacent.afterNights),
+    msAdjAfterWithin: String(e.minStayRules.adjacent.afterWithinDays),
+    msAdjLeadFrom: String(e.minStayRules.adjacent.afterLeadFromDays),
+    msAdjLeadTo: String(e.minStayRules.adjacent.afterLeadToDays),
     msAdjBeforeFlush: e.minStayRules.adjacent.beforeFlushFit,
     msOrphanOn: e.minStayRules.orphanGap.enabled,
     msOrphanStrategy: e.minStayRules.orphanGap.strategy,
     msOrphanFixed: String(e.minStayRules.orphanGap.fixedNights),
+    msOrphanMinGap: String(e.minStayRules.orphanGap.minGapNights),
     msOrphanMaxGap: String(e.minStayRules.orphanGap.maxGapNights),
     msOrphanLowest: String(e.minStayRules.orphanGap.lowestAllowed),
     msAdaptiveOn: e.minStayRules.adaptiveOccupancy.enabled,
@@ -698,7 +730,7 @@ export function EngineRulesCard() {
     setF((c) => (c ? { ...c, [k]: v } : c));
     setPvStale(true);
   };
-  const setRow = <T,>(k: "orphanRanges" | "pobaWindows" | "obaWindows" | "losTiers" | "msLm", i: number, field: keyof T, v: string) => {
+  const setRow = <T,>(k: "orphanRanges" | "pobaWindows" | "obaWindows" | "losTiers" | "msLm" | "msFarOut", i: number, field: keyof T, v: string) => {
     setF((c) => {
       if (!c) return c;
       const rows = [...(c[k] as unknown as T[])];
@@ -737,7 +769,7 @@ export function EngineRulesCard() {
       </select>
     </label>
   );
-  const cell = (k: "orphanRanges" | "pobaWindows" | "obaWindows" | "losTiers" | "msLm", i: number, field: string, v: string, w = "w-16") => (
+  const cell = (k: "orphanRanges" | "pobaWindows" | "obaWindows" | "losTiers" | "msLm" | "msFarOut", i: number, field: string, v: string, w = "w-16") => (
     <input
       className={`${input} ${w}`}
       value={v}
@@ -870,6 +902,7 @@ export function EngineRulesCard() {
         ranges: f.orphanRanges
           .filter((r) => r.upTo.trim() !== "")
           .map((r) => ({
+            fromGapNights: r.fromGap.trim() === "" ? 1 : int(r.fromGap, 1),
             upToGapNights: int(r.upTo, 2),
             mode: (r.mode === "fixed" ? "fixed" : "percent") as "fixed" | "percent",
             weekday: r.mode === "fixed" ? parseFloat(r.weekday) || 0 : frac(r.weekday),
@@ -925,12 +958,27 @@ export function EngineRulesCard() {
         lastMinute: f.msLm
           .filter((r) => r.withinDays.trim() !== "")
           .map((r) => ({ withinDays: int(r.withinDays, 7), weekday: int(r.weekday, 1), weekend: int(r.weekend, 1) })),
-        adjacent: { enabled: f.msAdjOn, afterNights: int(f.msAdjAfter, 30), beforeFlushFit: f.msAdjBeforeFlush },
+        farOut: f.msFarOut
+          .filter((r) => r.beyondDays.trim() !== "")
+          .map((r) => ({
+            beyondDays: int(r.beyondDays, 0),
+            weekday: int(r.weekday, 1),
+            weekend: int(r.weekend, 1),
+          })),
+        adjacent: {
+          enabled: f.msAdjOn,
+          afterNights: int(f.msAdjAfter, 7),
+          afterWithinDays: int(f.msAdjAfterWithin, 2),
+          afterLeadFromDays: int(f.msAdjLeadFrom, 0),
+          afterLeadToDays: int(f.msAdjLeadTo, 999),
+          beforeFlushFit: f.msAdjBeforeFlush,
+        },
         orphanGap: {
           enabled: f.msOrphanOn,
           strategy: f.msOrphanStrategy as "lengthOfGap" | "gapMinus1" | "gapMinus2" | "fixed",
           fixedNights: int(f.msOrphanFixed, 1),
-          maxGapNights: int(f.msOrphanMaxGap, 4),
+          minGapNights: int(f.msOrphanMinGap, 1),
+          maxGapNights: int(f.msOrphanMaxGap, 28),
           lowestAllowed: int(f.msOrphanLowest, 1),
         },
         adaptiveOccupancy: { enabled: f.msAdaptiveOn },
@@ -1512,7 +1560,8 @@ export function EngineRulesCard() {
           {f.orphanRanges.map((r, i) => (
             <div key={i} className="flex flex-wrap items-center gap-2">
               <span className="w-10 text-[10px]">#{i + 1}</span>
-              gap ≤ {cell("orphanRanges", i, "upTo", r.upTo, "w-14")} nights ·
+              gaps {cell("orphanRanges", i, "fromGap", r.fromGap, "w-12")} –{" "}
+              {cell("orphanRanges", i, "upTo", r.upTo, "w-12")} nights ·
               <select
                 className={`${input} w-24`}
                 value={r.mode}
@@ -1658,9 +1707,20 @@ export function EngineRulesCard() {
                 { value: "multiUnit", label: "Multi-Unit Rental" },
               ], "w-44")}
             {num("Highest allowed n", "msHighest")}
-            {num("Far-out ≥ d", "minStayFarOutDays")}
-            {num("Far-out nights", "minStayFarOutNights")}
             {toggle("Adaptive occupancy (−1/−2 n below market)", "msAdaptiveOn")}
+          </div>
+          <div className="space-y-1.5">
+            <div className="text-[10px] text-muted-foreground/70">
+              Far-out ladder — &quot;beyond N days require X nights&quot;, largest matching rung
+              wins (blank = unused)
+            </div>
+            {f.msFarOut.map((r, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                beyond {cell("msFarOut", i, "beyondDays", r.beyondDays, "w-14")} d → weekday{" "}
+                {cell("msFarOut", i, "weekday", r.weekday, "w-14")} n, weekend{" "}
+                {cell("msFarOut", i, "weekend", r.weekend, "w-14")} n
+              </div>
+            ))}
           </div>
           {f.msMode === "custom" && (
             <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
@@ -1692,7 +1752,10 @@ export function EngineRulesCard() {
           </div>
           <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
             {toggle("Adjacent-day min stays", "msAdjOn")}
-            {num("After a checkout: n", "msAdjAfter")}
+            {num("After unavailable: n", "msAdjAfter", "w-14")}
+            {num("within d after", "msAdjAfterWithin", "w-14")}
+            {num("lead from d", "msAdjLeadFrom", "w-14")}
+            {num("lead to d", "msAdjLeadTo", "w-14")}
             {toggle("Before a booking: allow flush-fit stays", "msAdjBeforeFlush")}
           </div>
           <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
@@ -1704,7 +1767,8 @@ export function EngineRulesCard() {
               { value: "fixed", label: "Fixed number" },
             ], "w-44")}
             {f.msOrphanStrategy === "fixed" && num("Fixed n", "msOrphanFixed", "w-14")}
-            {num("Max gap n", "msOrphanMaxGap", "w-14")}
+            {num("Gaps from n", "msOrphanMinGap", "w-14")}
+            {num("to n", "msOrphanMaxGap", "w-14")}
             {num("Lowest orphan n", "msOrphanLowest", "w-14")}
           </div>
           <div className="space-y-1.5 border-t border-border/40 pt-2">

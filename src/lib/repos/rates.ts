@@ -14,7 +14,7 @@ import { getDb } from "@/lib/db";
  * (Price, Availability, MinimumNights, Close) map 1:1 onto the cells below.
  */
 
-export const DEFAULT_MIN_NIGHTS = 30;
+export const DEFAULT_MIN_NIGHTS = 3; // operator default (PriceLabs setup: 3/3 weekday/weekend)
 export const CURRENCY = "ILS";
 const EPOCH = Date.UTC(2026, 0, 1); // stable origin so booked blocks don't shift between requests
 
@@ -186,7 +186,7 @@ function closedSet(unit: Unit, fromIdx: number, toIdx: number): Set<number> {
 function basePrice(unit: Unit, iso: string, idx: number): number {
   let p = unit.currentRate || unit.baseRate || 600;
   const dow = weekdayUTC(iso);
-  if (dow === 5 || dow === 6) p *= 1.06; // Fri/Sat (Israeli weekend)
+  if (dow === 4 || dow === 5) p *= 1.06; // Thu/Fri (operator's weekend definition)
   p *= 1 + 0.04 * Math.sin(idx / 30); // mild seasonality
   p *= 0.98 + 0.04 * mulberry32(hashStr(unit.id + iso))(); // small per-night jitter
   return Math.round(p / 5) * 5;
@@ -298,7 +298,7 @@ export function getCalendar(from: string, days: number): Calendar {
         minNights,
         closed: isClosed,
         booked: isBooked,
-        weekend: weekdayUTC(date) === 5 || weekdayUTC(date) === 6,
+        weekend: weekdayUTC(date) === 4 || weekdayUTC(date) === 5,
         source,
         minPrice: o?.min_price ?? null,
         maxPrice: o?.max_price ?? null,

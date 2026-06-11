@@ -19,9 +19,10 @@ export const UNIT_PRICING_DEFAULTS = {
   /** Monthly LOS discount (0..1) — the headline mid-term lever. */
   monthlyDiscountPct: 0.2,
   /** Recommended minimum stay, nights (the agent flexes this with demand). */
-  minStay: 30,
-  /** Hard minimum-stay floor, nights — what makes a unit mid-term. */
-  lowestMinStay: 30,
+  minStay: 3,
+  /** Hard minimum-stay floor, nights. The operator's live PriceLabs setup runs
+   *  a 3-night default with gap-1 orphan fills, so the floor sits at 1. */
+  lowestMinStay: 1,
 } as const;
 
 /** Agent tuning constants for a pricing pass. */
@@ -148,9 +149,10 @@ export const OBA_PRESETS: Record<
     { uptoDays: 9999, bands: obaBands([-0.05, 0, 0.03, 0.05]) },
   ],
   aggressive: [
-    { uptoDays: 15, bands: obaBands([-0.3, -0.1, 0.08, 0.15]) },
-    { uptoDays: 30, bands: obaBands([-0.2, -0.05, 0.05, 0.12]) },
-    { uptoDays: 9999, bands: obaBands([-0.1, 0, 0.05, 0.08]) },
+    { uptoDays: 15, bands: obaBands([-0.3, -0.1, 0.08, 0.2]) },
+    { uptoDays: 30, bands: obaBands([-0.2, -0.05, 0.05, 0.15]) },
+    { uptoDays: 60, bands: obaBands([-0.1, 0, 0.05, 0.1]) },
+    { uptoDays: 9999, bands: obaBands([0, 0, 0, 0]) },
   ],
   superAggressive: [
     { uptoDays: 15, bands: obaBands([-0.45, -0.2, 0.08, 0.15]) },
@@ -378,6 +380,8 @@ export interface PricingRulesConfig {
   orphanDayPrices: {
     enabled: boolean;
     ranges: Array<{
+      /** Gap-length window in nights (from..upTo, inclusive). */
+      fromGapNights: number;
       upToGapNights: number;
       mode: "percent" | "fixed";
       weekday: number;
@@ -434,10 +438,22 @@ export interface PricingRulesConfig {
     custom: { rule: "fixed" | "bookingValue"; weekday: number; weekend: number; bookingValue: number };
     /** Up to 3 last-minute rules: lower the min stay near check-in. */
     lastMinute: Array<{ withinDays: number; weekday: number; weekend: number }>;
-    /** Adjacent-day min stays: allow shorter stays that butt up against an
-     *  existing booking. after = night right after a checkout; before = stays
+    /** Far-out min-stay LADDER: "beyond N days require X nights" rungs, the
+     *  largest matching rung winning. Empty = fall back to the single legacy
+     *  minStayHierarchy rule. */
+    farOut: Array<{ beyondDays: number; weekday: number; weekend: number }>;
+    /** Adjacent-day min stays. after = dates within `afterWithinDays` after an
+     *  unavailable (booked OR blocked) night get `afterNights`, applying only
+     *  for lead times in [afterLeadFromDays..afterLeadToDays]; before = stays
      *  that end flush against the next booking (no gap created). */
-    adjacent: { enabled: boolean; afterNights: number; beforeFlushFit: boolean };
+    adjacent: {
+      enabled: boolean;
+      afterNights: number;
+      afterWithinDays: number;
+      afterLeadFromDays: number;
+      afterLeadToDays: number;
+      beforeFlushFit: boolean;
+    };
     /** Orphan-gap min stay: shrink the min stay to make short gaps bookable.
      *  Only ever REDUCES (PriceLabs rule), with its own floor (Lowest Orphan
      *  Gap Allowed — may sit below the unit's lowestMinStay). */
@@ -445,6 +461,8 @@ export interface PricingRulesConfig {
       enabled: boolean;
       strategy: "lengthOfGap" | "gapMinus1" | "gapMinus2" | "fixed";
       fixedNights: number;
+      /** Gap-length window in nights the rule applies to. */
+      minGapNights: number;
       maxGapNights: number;
       lowestAllowed: number;
     };
@@ -483,13 +501,13 @@ export const PRICING_RULES: PricingRulesConfig = {
     sensitivity: 0.1,
     cap: 0.1,
   },
-  /** Occupancy-based adjustments (PriceLabs OBA) — the listing's own window
-   *  occupancy drives per-window bands; MTR default is gentler than PL's. */
+  /** Occupancy-based adjustments (PriceLabs OBA) — the operator runs the
+   *  Aggressive profile (−30%..+20% over the first 60 days). */
   occupancy: {
     enabled: true,
-    profile: "default",
+    profile: "aggressive",
     customName: null,
-    windows: OBA_PRESETS.default,
+    windows: OBA_PRESETS.aggressive,
   },
   /** Far-out premium: distant dates earn a gradual uplift (protects future inventory). */
   farOut: {
@@ -514,12 +532,12 @@ export const PRICING_RULES: PricingRulesConfig = {
    *  turnovers. Stacks with last-minute per PriceLabs rules (largest discount
    *  wins; premiums stack). OFF for MTR: month-boundary gaps are rare. */
   adjacent: {
-    enabled: false,
+    enabled: true,
     mode: "percent",
-    value: -0.1,
+    value: -0.3,
     daysBefore: 2,
     daysAfter: 2,
-    applyOnWeekends: false,
+    applyOnWeekends: true,
   },
   /** Day-of-week multiplier — OFF for MTR (a multi-week stay spans every weekday).
    *  Index Sun=0 .. Sat=6 (TLV weekend = Fri/Sat). */
@@ -571,13 +589,14 @@ export const PRICING_RULES: PricingRulesConfig = {
     mode: "percent",
     value: 0,
   },
-  /** TLV weekend: Friday + Saturday nights. */
-  weekend: { days: [5, 6] },
-  /** PriceLabs ships this ON with a 20% discount on ≤2-night gaps; for a 30+
-   *  night portfolio orphan gaps are rare, so it ships implemented but OFF. */
+  /** Operator's weekend definition: Thursday + Friday nights. */
+  weekend: { days: [4, 5] },
+  /** Operator default: 40% discount on 3–7-night gaps, any lead time. */
   orphanDayPrices: {
-    enabled: false,
-    ranges: [{ upToGapNights: 2, mode: "percent", weekday: -0.2, weekend: -0.2, withinDays: null }],
+    enabled: true,
+    ranges: [
+      { fromGapNights: 3, upToGapNights: 7, mode: "percent", weekday: -0.4, weekend: -0.4, withinDays: null },
+    ],
   },
   /** Needs customization groups to mean anything (single units swing 0↔100%). */
   portfolioOccupancy: {
@@ -594,15 +613,32 @@ export const PRICING_RULES: PricingRulesConfig = {
   /** PriceLabs ships SMP on by default; ~110% is their "safe choice". Inert
    *  until reservation history exists. */
   safetyMinPrice: { enabled: true, pctOfLastYear: 1.1 },
+  /** Operator's live setup: custom 3/3 default, a far-out ladder stepping
+   *  4→28 nights with lead time, gap−1 orphan fills on 4–28-night gaps, and
+   *  7-night stays within 2 days after an unavailable night (lead 7–30d). */
   minStayRules: {
     profile: null,
-    mode: "recommended",
+    mode: "custom",
     recommendedFlavor: "mtr",
     highestAllowed: 90,
-    custom: { rule: "fixed", weekday: 30, weekend: 30, bookingValue: 0 },
+    custom: { rule: "fixed", weekday: 3, weekend: 3, bookingValue: 0 },
     lastMinute: [],
-    adjacent: { enabled: false, afterNights: 30, beforeFlushFit: false },
-    orphanGap: { enabled: false, strategy: "lengthOfGap", fixedNights: 1, maxGapNights: 4, lowestAllowed: 1 },
+    farOut: [
+      { beyondDays: 2, weekday: 4, weekend: 4 },
+      { beyondDays: 4, weekday: 7, weekend: 7 },
+      { beyondDays: 7, weekday: 14, weekend: 14 },
+      { beyondDays: 14, weekday: 21, weekend: 21 },
+      { beyondDays: 20, weekday: 28, weekend: 28 },
+    ],
+    adjacent: {
+      enabled: true,
+      afterNights: 7,
+      afterWithinDays: 2,
+      afterLeadFromDays: 7,
+      afterLeadToDays: 30,
+      beforeFlushFit: false,
+    },
+    orphanGap: { enabled: true, strategy: "gapMinus1", fixedNights: 1, minGapNights: 4, maxGapNights: 28, lowestAllowed: 1 },
     adaptiveOccupancy: { enabled: true },
   },
   /** Minimum-stay hierarchy extras (the demand-flex tiers live in PRICING_AGENT). */
