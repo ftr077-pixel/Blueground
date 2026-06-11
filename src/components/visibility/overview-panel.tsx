@@ -47,11 +47,7 @@ function Stat({ label, value, tone = "text-foreground" }: { label: string; value
   );
 }
 
-const SUBTABS = [
-  { href: "/visibility", label: "Search & Profit" },
-  { href: "/visibility/analytics", label: "Position Trends" },
-  { href: "/visibility/pricing", label: "Pricing vs Rank" },
-];
+const SUBTABS = [{ href: "/visibility", label: "Search & Profit" }];
 
 export function OverviewPanel() {
   const { data, loading, error } = useDashboard();

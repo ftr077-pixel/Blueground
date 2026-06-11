@@ -6,7 +6,6 @@ import { usePathname } from "next/navigation";
 import {
   Activity,
   Banknote,
-  BarChart3,
   Boxes,
   Brain,
   CalendarClock,
@@ -41,8 +40,6 @@ const REVENUE_HUB = {
     { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
     { href: "/visibility", label: "Search & Profit", icon: Radar },
-    { href: "/visibility/analytics", label: "Position Trends", icon: TrendingUp },
-    { href: "/visibility/pricing", label: "Pricing vs Rank", icon: BarChart3 },
     { href: "/visibility/intelligence", label: "Pricing Intelligence", icon: Brain },
   ] as Item[],
 };
