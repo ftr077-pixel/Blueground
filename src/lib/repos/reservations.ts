@@ -262,6 +262,46 @@ export function realizedNightlyRates(unitId: string, from: string, to: string): 
 }
 
 /**
+ * On-the-books NET revenue over the night range [from, to] (inclusive),
+ * portfolio-wide: each counted reservation's net-of-VAT revenue is recognized
+ * evenly across its nights, and the nights falling inside the window contribute
+ * their share. Cancelled / no-show rows and test apartments are excluded — the
+ * same rules as the monthly P&L, so the Rates Calendar OTB ties out to it.
+ * `nights` is how many reservation-nights backed the figure (the realized-ADR
+ * denominator); 0 means no reservation data covers the window.
+ */
+export function windowReservationRevenue(from: string, to: string): { revenue: number; nights: number } {
+  if (!DATE_RE.test(from) || !DATE_RE.test(to)) return { revenue: 0, nights: 0 };
+  const excluded = getExcludedRoomCodes();
+  // check_out is exclusive, so a stay overlaps the window when it ends after
+  // `from` and starts no later than `to`.
+  const rows = getDb()
+    .prepare(
+      `SELECT room_type, room_number, check_in, check_out, nights, revenue, status FROM reservation
+       WHERE revenue > 0 AND check_out > ? AND check_in <= ?`,
+    )
+    .all(from, to) as ReservationSql[];
+  const DAY = 86_400_000;
+  const winStart = Date.parse(from + "T00:00:00Z");
+  const winEnd = Date.parse(to + "T00:00:00Z") + DAY; // exclusive
+  let revenue = 0;
+  let nightsIn = 0;
+  for (const r of rows) {
+    if (r.status && CANCELLED_RE.test(r.status)) continue;
+    if (isExcludedRoom(r.room_type, r.room_number, excluded)) continue;
+    const nights = r.nights > 0 ? r.nights : nightsBetween(r.check_in, r.check_out);
+    if (nights <= 0 || !DATE_RE.test(r.check_in) || !DATE_RE.test(r.check_out)) continue;
+    const start = Date.parse(r.check_in + "T00:00:00Z");
+    const end = Date.parse(r.check_out + "T00:00:00Z");
+    const overlap = Math.round((Math.min(end, winEnd) - Math.max(start, winStart)) / DAY);
+    if (overlap <= 0) continue;
+    revenue += (r.revenue / nights) * overlap;
+    nightsIn += overlap;
+  }
+  return { revenue: Math.round(revenue), nights: nightsIn };
+}
+
+/**
  * Booking-recency signal for one unit (Booking Recency Factor): days since the
  * unit's latest live reservation row was received, plus the age of the
  * reservation FEED overall (days since anything synced). Null when no feed
