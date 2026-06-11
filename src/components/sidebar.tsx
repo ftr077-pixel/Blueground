@@ -9,6 +9,7 @@ import {
   BarChart3,
   Boxes,
   Brain,
+  CalendarClock,
   CalendarRange,
   ChevronDown,
   ConciergeBell,
@@ -36,6 +37,7 @@ const REVENUE_HUB = {
     { href: "/departments/revenue", label: "Pricing Engine", icon: Gauge },
     { href: "/pricing-configuration", label: "Pricing Configuration", icon: SlidersHorizontal },
     { href: "/market", label: "Market Analytics", icon: LineChart },
+    { href: "/pacing", label: "Pacing", icon: CalendarClock },
     { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
     { href: "/visibility", label: "Search & Profit", icon: Radar },
@@ -189,7 +191,12 @@ function NavHub({
   pathname: string;
   activeHref: string;
 }) {
-  const within = pathname === hub.base || pathname.startsWith(hub.base);
+  // Some children live outside the hub's base path (/market, /pacing, …), so
+  // match those too — otherwise the group stays collapsed over its active item.
+  const within =
+    pathname === hub.base ||
+    pathname.startsWith(hub.base) ||
+    hub.children.some((c) => pathname === c.href || pathname.startsWith(c.href + "/"));
   const [open, setOpen] = useState(within);
   useEffect(() => {
     if (within) setOpen(true);
