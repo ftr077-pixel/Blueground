@@ -6,7 +6,7 @@ import {
   miniHotelContentAuth,
   type MiniHotelConnection,
 } from "@/lib/repos/integrations";
-import { upsertOverride } from "@/lib/repos/rates";
+import { upsertOverride, setBookedNights } from "@/lib/repos/rates";
 import { upsertImportedUnit, deleteUnitsByIdPrefix } from "@/lib/repos/units";
 import { upsertReservations, reservationStats, markReservationsCancelled } from "@/lib/repos/reservations";
 import { storeAriOccupancy, occupancyByMonth } from "@/lib/repos/occupancy";
@@ -43,6 +43,8 @@ export interface SyncResult {
   unmappedTypes: string[];
   errors: string[]; // ERR codes MiniHotel reported (non-fatal — collected, not thrown)
   note?: string; // e.g. "loaded via availability search after the bulk feed was blocked"
+  reservations?: number; // PMS reservations found in the window (undefined = pull didn't run)
+  bookedNights?: number; // sold nights written to the calendar from those reservations
   message?: string;
 }
 
@@ -355,6 +357,11 @@ export async function syncFromMiniHotel(opts: {
   let parsed: AriCell[];
   let errors: string[];
   let note: string | undefined;
+  // Sold nights per RoomTypeCode from the PMS reservation list (null = the
+  // reservation pull didn't run / returned nothing usable — leave booked flags
+  // to the availability inference rather than wiping them on a failed pull).
+  let soldByType: Map<string, Set<string>> | null = null;
+  let reservationsSeen = 0;
   if (opts.xml) {
     parsed = parseBulkAri(opts.xml);
     errors = parseAriErrors(opts.xml);
@@ -392,6 +399,37 @@ export async function syncFromMiniHotel(opts: {
         note = `Bulk feed was blocked (${errors[0]}); loaded ${fb.nights} night(s) via the availability search instead.`;
       }
     }
+
+    // 3) Reservations → sold nights. The price feeds say what's for sale; the
+    //    PMS reservation list (Room Status Inquiry) says what's actually SOLD.
+    //    Pull it for the same window so occupancy reads true all the way out —
+    //    independent of bulk-feed blocks or the fallback's night cap.
+    try {
+      const rxml = await fetchRoomStatusRange(conn, from, to);
+      const resv = parseRoomStatusReservations(rxml);
+      extractMiniHotelErrors(rxml).forEach((e) => {
+        if (!errors.includes(e)) errors.push(e);
+      });
+      if (resv.length > 0) {
+        soldByType = new Map();
+        reservationsSeen = 0;
+        for (const r of resv) {
+          if (!r.roomType) continue;
+          if (r.status && /^(cl|cxl|ns)$|cancel|no.?show|void|declin|reject/i.test(r.status)) continue;
+          reservationsSeen++;
+          const key = r.roomType.trim().toUpperCase();
+          let set = soldByType.get(key);
+          if (!set) soldByType.set(key, (set = new Set()));
+          // checkOut is the departure date — the guest's last NIGHT is the day before.
+          for (let d = r.checkIn; d < r.checkOut; d = plusDays(d, 1)) {
+            if (d >= from && d <= to) set.add(d);
+          }
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "reservation pull failed";
+      if (!errors.includes(msg)) errors.push(msg);
+    }
   }
 
   // RoomTypeCode -> unit id(s); case-insensitive so codes match regardless of casing.
@@ -415,8 +453,11 @@ export async function syncFromMiniHotel(opts: {
       continue;
     }
     const closed = c.closed ?? false;
-    // For a single apartment, availability 0 (and not closed) means the night is sold.
-    const booked = c.available != null ? !closed && c.available <= 0 : undefined;
+    // Without a reservation list, availability 0 (and not closed) is the best
+    // guess for "sold" — but when reservations were pulled (below), THEY are
+    // the truth for booked, so the inference stays out of their way.
+    const booked =
+      soldByType != null ? undefined : c.available != null ? !closed && c.available <= 0 : undefined;
     for (const unitId of units) {
       upsertOverride(
         unitId,
@@ -428,6 +469,19 @@ export async function syncFromMiniHotel(opts: {
     }
   }
 
+  // Reservation truth: mark each mapped unit's sold nights across the WHOLE
+  // window (cancellations heal — previously-booked nights with no reservation
+  // flip back to open).
+  let bookedNights = 0;
+  if (soldByType) {
+    const windowDates: string[] = [];
+    for (let i = 0; i < days; i++) windowDates.push(plusDays(from, i));
+    for (const [code, units] of byType) {
+      const sold = soldByType.get(code) ?? new Set<string>();
+      for (const unitId of units) bookedNights += setBookedNights(unitId, windowDates, sold);
+    }
+  }
+
   return {
     ok: true,
     from,
@@ -436,6 +490,8 @@ export async function syncFromMiniHotel(opts: {
     mappedTypes: typesSeen.size - unmapped.size,
     cells: parsed.length,
     written,
+    reservations: soldByType ? reservationsSeen : undefined,
+    bookedNights: soldByType ? bookedNights : undefined,
     unmappedTypes: [...unmapped].sort(),
     errors,
     note,

@@ -414,18 +414,27 @@ export function RateCalendar() {
         unmappedTypes?: string[];
         errors?: string[];
         note?: string;
+        reservations?: number;
+        bookedNights?: number;
         message?: string;
       };
       if (d.ok) {
         const errs = d.errors ?? [];
         const errText = `${errs.slice(0, 2).join(" | ")}${errs.length > 2 ? " …" : ""}`;
+        const resTxt =
+          d.reservations != null
+            ? ` · ${d.bookedNights ?? 0} sold night(s) from ${d.reservations} reservation(s)`
+            : "";
         // Nothing written + an error = MiniHotel's bulk feed aborted on one bad
         // room type (it can't be told to skip rooms). Say so plainly — "skipped"
-        // would be a lie, since one bad room blocks every room.
+        // would be a lie, since one bad room blocks every room. If reservations
+        // still loaded, occupancy is real even though prices are blocked.
         if ((d.written ?? 0) === 0 && errs.length) {
           setSyncMsg({
-            ok: false,
-            text: `MiniHotel returned no rates — its feed was blocked by a room-type config error: ${errText}. One misconfigured room stops EVERY room from syncing. In MiniHotel, set that room type's Basic occupancy (or deactivate the room type), then Sync again.`,
+            ok: (d.bookedNights ?? 0) > 0,
+            text: `MiniHotel returned no rates — its feed was blocked by a room-type config error: ${errText}. One misconfigured room stops EVERY room from syncing. In MiniHotel, set that room type's Basic occupancy (or deactivate the room type), then Sync again.${
+              (d.bookedNights ?? 0) > 0 ? ` Occupancy still loaded:${resTxt.replace(" ·", "")}.` : ""
+            }`,
           });
         } else {
           const extra = d.unmappedTypes && d.unmappedTypes.length ? ` · unmapped: ${d.unmappedTypes.join(", ")}` : "";
@@ -433,7 +442,7 @@ export function RateCalendar() {
           const via = d.note ? ` ${d.note}` : "";
           setSyncMsg({
             ok: !errs.length || !!d.note,
-            text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${extra}${issues}.${via}`,
+            text: `Synced ${d.written ?? 0} nights across ${d.mappedTypes ?? 0} room type(s)${resTxt}${extra}${issues}.${via}`,
           });
         }
         await refresh();
