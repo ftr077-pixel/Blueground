@@ -84,6 +84,7 @@ export interface RuleOverrides {
     monthlyPct?: number | null;
     quarterlyMinNights?: number;
     quarterlyDiscountPct?: number;
+    tiers?: Array<{ minNights: number; pct: number; minPrice: number | null; maxPrice: number | null }>;
   };
   extraPersonFee?: {
     enabled?: boolean;
@@ -106,6 +107,8 @@ export interface RuleOverrides {
   };
   rounding?: { enabled?: boolean; digits?: number; endings?: number[] };
   smoothing?: { enabled?: boolean; mode?: "week" | "split"; weekStart?: number };
+  freezeUnavailable?: { enabled?: boolean };
+  neighborhoodProfile?: { source?: string | null };
   pricingOffset?: { enabled?: boolean; mode?: "percent" | "fixed"; value?: number };
   weekend?: { days?: number[] };
   orphanDayPrices?: {
@@ -133,6 +136,7 @@ export interface RuleOverrides {
   minStayRules?: {
     profile?: string | null;
     mode?: "recommended" | "custom";
+    recommendedFlavor?: "str" | "mtr" | "multiUnit";
     highestAllowed?: number;
     custom?: { rule?: "fixed" | "bookingValue"; weekday?: number; weekend?: number; bookingValue?: number };
     lastMinute?: Array<{ withinDays: number; weekday: number; weekend: number }>;
@@ -164,6 +168,8 @@ const SECTION_KEYS = [
   "checkinCheckout",
   "rounding",
   "smoothing",
+  "freezeUnavailable",
+  "neighborhoodProfile",
   "pricingOffset",
   "weekend",
   "orphanDayPrices",
@@ -191,6 +197,8 @@ export const RULE_SECTIONS: Array<{ key: RuleSectionKey; label: string }> = [
   { key: "checkinCheckout", label: "Check-in/out" },
   { key: "rounding", label: "Rounding" },
   { key: "smoothing", label: "Smoothing" },
+  { key: "freezeUnavailable", label: "Freeze unavail" },
+  { key: "neighborhoodProfile", label: "Data source" },
   { key: "pricingOffset", label: "Offset" },
   { key: "weekend", label: "Weekend days" },
   { key: "orphanDayPrices", label: "Orphan prices" },
@@ -398,6 +406,23 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   los.weeklyPct = los.weeklyPct != null ? clampNum(Math.abs(los.weeklyPct), 0, 0.75, 0) : null;
   los.monthlyPct = los.monthlyPct != null ? clampNum(Math.abs(los.monthlyPct), 0, 0.75, 0) : null;
   los.quarterlyDiscountPct = clampNum(los.quarterlyDiscountPct, 0, 0.75, d.los.quarterlyDiscountPct);
+  // LOS tiers: ascending by minNights; "longer stays must not have higher
+  // premiums" (PriceLabs validation) — each row's pct is capped at the
+  // previous row's.
+  const losTiers = (o.los?.tiers ?? d.los.tiers)
+    .filter((t) => t && Number.isFinite(t.minNights) && t.minNights >= 1)
+    .slice(0, 8)
+    .map((t) => ({
+      minNights: clampInt(t.minNights, 1, 365, 1),
+      pct: clampNum(t.pct, -0.75, 5, 0),
+      minPrice: t.minPrice != null && Number.isFinite(t.minPrice) ? Math.max(0, Math.round(t.minPrice)) : null,
+      maxPrice: t.maxPrice != null && Number.isFinite(t.maxPrice) ? Math.max(0, Math.round(t.maxPrice)) : null,
+    }))
+    .sort((a, b) => a.minNights - b.minNights);
+  for (let i = 1; i < losTiers.length; i++) {
+    if (losTiers[i].pct > losTiers[i - 1].pct) losTiers[i].pct = losTiers[i - 1].pct;
+  }
+  los.tiers = losTiers;
 
   const epf = { ...d.extraPersonFee, ...o.extraPersonFee };
   epf.mode = epf.mode === "percent" ? "percent" : "fixed";
@@ -499,6 +524,9 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   const minStayRules: PricingRulesConfig["minStayRules"] = {
     profile: msProfile ? msProfileName : null,
     mode: ms?.mode === "custom" ? "custom" : "recommended",
+    recommendedFlavor: (["str", "mtr", "multiUnit"] as const).includes(ms?.recommendedFlavor as never)
+      ? (ms!.recommendedFlavor as "str" | "mtr" | "multiUnit")
+      : d.minStayRules.recommendedFlavor,
     highestAllowed: clampInt(ms?.highestAllowed, 1, 365, d.minStayRules.highestAllowed),
     custom: {
       rule: ms?.custom?.rule === "bookingValue" ? "bookingValue" : "fixed",
@@ -557,6 +585,10 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     checkinCheckout,
     rounding,
     smoothing,
+    freezeUnavailable: { enabled: o.freezeUnavailable?.enabled ?? d.freezeUnavailable.enabled },
+    neighborhoodProfile: {
+      source: (o.neighborhoodProfile?.source ?? d.neighborhoodProfile.source)?.trim() || null,
+    },
     pricingOffset,
     weekend,
     orphanDayPrices,
@@ -596,6 +628,15 @@ export function effectiveRulesForUnitWithPatch(
       : getRuleOverrides(s),
   );
   return rulesWithOverrides(resolveChain(chain));
+}
+
+/** The unit's effective market profile (Neighborhood Profile Data Source) —
+ *  the scoped override when set, else the listing's own neighborhood. Providers
+ *  use this to pick which market snapshot feeds recommendations. */
+export function effectiveNeighborhood(
+  unit: Pick<Unit, "id" | "group" | "subgroup" | "neighborhood">,
+): string {
+  return effectiveRulesForUnit(unit).neighborhoodProfile.source ?? unit.neighborhood;
 }
 
 /** The ±% human gate (spec §5), operator-overridable within sane bounds. */
