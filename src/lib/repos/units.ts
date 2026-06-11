@@ -26,6 +26,10 @@ export interface Unit {
   lowestMinStay: number;
   /** MiniHotel room-type code this unit maps to (names differ between systems). */
   minihotelRoomType: string | null;
+  /** Customization group / sub-group (PriceLabs hierarchy: listing > sub-group >
+   *  group > account). Both reference names from the shared group list. */
+  group: string | null;
+  subgroup: string | null;
 }
 
 export interface PricingHistoryRow {
@@ -57,6 +61,8 @@ interface UnitSql {
   min_stay: number | null;
   lowest_min_stay: number | null;
   minihotel_room_type: string | null;
+  customization_group: string | null;
+  customization_subgroup: string | null;
 }
 
 interface HistorySql {
@@ -90,6 +96,8 @@ function rowToUnit(r: UnitSql): Unit {
     minStay: r.min_stay ?? UNIT_PRICING_DEFAULTS.minStay,
     lowestMinStay: r.lowest_min_stay ?? UNIT_PRICING_DEFAULTS.lowestMinStay,
     minihotelRoomType: r.minihotel_room_type ?? null,
+    group: r.customization_group ?? null,
+    subgroup: r.customization_subgroup ?? null,
   };
 }
 
@@ -124,6 +132,19 @@ export function setUnitBaseRate(unitId: string, rate: number) {
 export function setUnitMinStay(unitId: string, minStay: number) {
   const db = getDb();
   db.prepare("UPDATE units SET min_stay = ? WHERE id = ?").run(minStay, unitId);
+}
+
+/** Assign (or clear) a unit's customization group / sub-group. A sub-group
+ *  requires a group, and they can't be the same group customization —
+ *  PriceLabs's own assignment rules. */
+export function setUnitGroup(unitId: string, group: string | null, subgroup: string | null) {
+  const g = group?.trim() || null;
+  let s = subgroup?.trim() || null;
+  if (!g) s = null; // no sub-group without a group
+  if (s && s === g) s = null; // a listing cannot have the same group and sub-group
+  getDb()
+    .prepare("UPDATE units SET customization_group = ?, customization_subgroup = ? WHERE id = ?")
+    .run(g, s, unitId);
 }
 
 // Seed a unit's base/current/floor/ceiling from a rate anchor (e.g. derived from

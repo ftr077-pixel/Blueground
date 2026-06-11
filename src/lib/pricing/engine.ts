@@ -11,11 +11,16 @@ import {
   demandRule,
   pacingRule,
   occupancyRule,
+  portfolioOccupancyRule,
   farOutRule,
   lastMinuteRule,
   adjacentRule,
+  orphanDayPriceRule,
   resolveAdjustmentStack,
   pricingOffsetRule,
+  resolveMinPrice,
+  gapInfo,
+  isWeekendDay,
   dayOfWeekRule,
   losDiscountForStay,
   type FactorResult,
@@ -34,6 +39,9 @@ export interface DateQuote {
   rawRate: number; // base × Π factors, before floor/ceiling
   rate: number; // final nightly rate
   bound: "floor" | "ceiling" | "override" | null;
+  /** The resolved price floor for this night (listing min or an advanced min-price rule). */
+  minPrice: number;
+  minPriceSource: string;
   minStay: number;
   minStaySource: string;
   /** Effective monthly rate (₪) for a 30-night booking after LOS discount. */
@@ -44,48 +52,145 @@ function leadDaysFrom(asOf: Date, date: Date): number {
   return Math.max(0, Math.round((date.getTime() - asOf.getTime()) / DAY_MS));
 }
 
+/**
+ * The full PriceLabs minimum-stay hierarchy (highest priority last to apply):
+ *   Lowest Min Stay Allowed > Orphan Gap (only ever reduces; has its OWN floor,
+ *   the "Lowest Orphan Gap Allowed") > Date-Specific Override > Adjacent After >
+ *   Adjacent Before > Far-Out > Last-Minute > Default (recommended or custom).
+ * The Adaptive Occupancy reduction applies on top of the resolved value and
+ * never goes below the unit floor. `nightlyRate` feeds the booking-value
+ * default rule (nights ≈ value ÷ rate).
+ */
 function resolveMinStay(
   unit: Unit,
   date: Date,
   leadDays: number,
   market: MarketProviders,
   cfg: typeof PRICING_RULES,
+  nightlyRate: number,
 ): { minStay: number; source: string } {
+  const r = cfg.minStayRules;
   const floor = unit.lowestMinStay;
-  const tiers = PRICING_AGENT.minStayDemandTiers;
-  let rec = floor;
-  let source = `floor ${floor}n`;
+  const cap = Math.max(1, r.highestAllowed);
+  const wk = isWeekendDay(date, cfg);
+  let rec: number;
+  let source: string;
 
-  // Demand-flex default
-  const demand = market.eventDemand(unit, date).bump;
-  for (const tier of tiers) {
-    if (demand >= tier.threshold) {
-      rec = floor + tier.bump;
-      source = tier.label;
-      break;
+  // 8. Default rule
+  if (r.mode === "custom") {
+    if (r.custom.rule === "bookingValue" && r.custom.bookingValue > 0) {
+      rec = Math.ceil(r.custom.bookingValue / Math.max(1, nightlyRate));
+      source = `booking value ₪${r.custom.bookingValue}`;
+    } else {
+      rec = Math.max(1, wk ? r.custom.weekend : r.custom.weekday);
+      source = `default ${wk ? "weekend" : "weekday"}`;
+    }
+  } else {
+    // Recommended (dynamic): demand-flex tiers benchmarked vs the comp median.
+    const tiers = PRICING_AGENT.minStayDemandTiers;
+    rec = floor;
+    source = `floor ${floor}n`;
+    const demand = market.eventDemand(unit, date).bump;
+    for (const tier of tiers) {
+      if (demand >= tier.threshold) {
+        rec = floor + tier.bump;
+        source = tier.label;
+        break;
+      }
+    }
+    const median = market.compMedianMinNights();
+    if (median && median > rec) {
+      rec = Math.min(median, floor + tiers[0].bump);
+      source = `market median ${median}n`;
     }
   }
-  // Benchmark against the competitor median
-  const median = market.compMedianMinNights();
-  if (median && median > rec) {
-    rec = Math.min(median, floor + tiers[0].bump);
-    source = `market median ${median}n`;
+
+  // 7. Last-minute rules (tightest matching window wins)
+  const lm = r.lastMinute
+    .filter((x) => x.withinDays > 0 && leadDays <= x.withinDays)
+    .sort((a, b) => a.withinDays - b.withinDays)[0];
+  if (lm) {
+    rec = Math.max(1, wk ? lm.weekend : lm.weekday);
+    source = `last-minute ≤${lm.withinDays}d`;
   }
-  // Far-out bookings require longer commitments
-  if (leadDays > cfg.minStayHierarchy.farOutThresholdDays && cfg.minStayHierarchy.farOutNights > rec) {
+
+  // 6. Far-out bookings require longer commitments
+  if (leadDays > cfg.minStayHierarchy.farOutThresholdDays && cfg.minStayHierarchy.farOutNights > 0) {
     rec = cfg.minStayHierarchy.farOutNights;
     source = "far-out";
   }
-  rec = Math.max(floor, Math.min(rec, PRICING_AGENT.maxMinStay));
-  // Operator date override wins outright — applied after the floor clamp on
-  // purpose, so it can go below the unit floor (e.g. a short gap-fill between
-  // two long bookings). Only the global cap still applies.
+
+  const open = !market.isBooked(unit, date);
+  // 5. Adjacent BEFORE — a stay ending flush against the next booking (no gap created)
+  if (r.adjacent.enabled && r.adjacent.beforeFlushFit && open) {
+    let dist = 0;
+    for (let k = 1; k <= 45; k++) {
+      if (market.isBooked(unit, new Date(date.getTime() + k * DAY_MS))) {
+        dist = k;
+        break;
+      }
+    }
+    if (dist > 0 && dist < rec) {
+      rec = dist;
+      source = `adjacent before (${dist}n flush)`;
+    }
+  }
+  // 4. Adjacent AFTER — check-in right after a checkout
+  if (r.adjacent.enabled && r.adjacent.afterNights > 0 && open &&
+      market.isBooked(unit, new Date(date.getTime() - DAY_MS))) {
+    rec = r.adjacent.afterNights;
+    source = "adjacent after";
+  }
+
+  // 3. Date-Specific Override — clamped by Lowest Min Stay Allowed below
+  // (PriceLabs: the lowest-allowed floor holds even against DSOs; sanctioned
+  // short gap-fills go through the orphan rule and ITS floor instead).
   const ov = market.dateOverride(unit, date);
   if (ov?.minStay != null) {
-    rec = Math.max(1, Math.min(ov.minStay, PRICING_AGENT.maxMinStay));
+    rec = ov.minStay;
     source = "override";
   }
-  return { minStay: rec, source };
+
+  // 1. Lowest/Highest Min Stay Allowed (orphan below applies its own floor)
+  if (rec < floor) source = `lowest allowed ${floor}n (over ${source})`;
+  rec = Math.max(floor, Math.min(rec, cap));
+
+  // Adaptive Occupancy Adjustment — own forward occupancy relatively below
+  // market shortens the requirement (−1 at >10% below, −2 at >20% below).
+  if (r.adaptiveOccupancy.enabled) {
+    const o = market.occupancy90(unit);
+    if (o) {
+      const reduce = o.own < o.market * 0.8 ? 2 : o.own < o.market * 0.9 ? 1 : 0;
+      if (reduce > 0 && rec > floor) {
+        rec = Math.max(floor, rec - reduce);
+        source += ` · adaptive −${reduce}n`;
+      }
+    }
+  }
+
+  // 2. Orphan gap — highest priority bar the floors; only ever REDUCES, and is
+  // clamped by its own Lowest Orphan Gap Allowed (which may sit below the unit
+  // floor — that's the documented way short gap-fills happen).
+  if (r.orphanGap.enabled) {
+    const gap = gapInfo(unit, date, market);
+    if (gap && gap.len <= Math.max(1, r.orphanGap.maxGapNights)) {
+      const byStrategy =
+        r.orphanGap.strategy === "fixed"
+          ? r.orphanGap.fixedNights
+          : r.orphanGap.strategy === "gapMinus1"
+            ? gap.len - 1
+            : r.orphanGap.strategy === "gapMinus2"
+              ? gap.len - 2
+              : gap.len;
+      const cand = Math.max(Math.max(1, r.orphanGap.lowestAllowed), Math.max(1, byStrategy));
+      if (cand < rec) {
+        rec = cand;
+        source = `orphan gap ${gap.len}n`;
+      }
+    }
+  }
+
+  return { minStay: Math.min(rec, cap), source };
 }
 
 /** Quote a single night for a unit. */
@@ -106,27 +211,42 @@ export function quoteNight(
   add(demandRule(unit, date, market, cfg));
   add(pacingRule(unit, market, cfg));
   add(occupancyRule(unit, date, market, cfg));
+  add(portfolioOccupancyRule(unit, date, leadDays, market, cfg));
   add(farOutRule(leadDays, cfg));
   // Gap/lead-time adjustment class — PriceLabs stacking: largest discount wins,
-  // premiums stack, a mix applies largest discount + every premium.
-  for (const f of resolveAdjustmentStack(
-    [lastMinuteRule(leadDays, cfg), adjacentRule(unit, date, market, cfg)],
-    unit.baseRate,
-  )) {
+  // premiums stack, a mix applies largest discount + every premium. A FIXED
+  // orphan price is a pin, not an adjustment — it bypasses the stack.
+  const orphan = orphanDayPriceRule(unit, date, leadDays, market, cfg);
+  let orphanPin: number | null = null;
+  const stackCandidates = [lastMinuteRule(leadDays, cfg), adjacentRule(unit, date, market, cfg)];
+  if (orphan?.pin != null) {
+    orphanPin = orphan.pin;
+    factors.push(orphan);
+  } else {
+    stackCandidates.push(orphan);
+  }
+  for (const f of resolveAdjustmentStack(stackCandidates, unit.baseRate)) {
     factors.push(f);
   }
   add(dayOfWeekRule(date, cfg));
 
   // Multiplicative factors compound on the base; fixed (₪) adjustments from
-  // fixed-mode rules are added after, before the floor/ceiling clamp.
+  // fixed-mode rules are added after, before the floor/ceiling clamp. A fixed
+  // orphan price replaces the computed raw rate outright (still clamped).
   const mult = factors.reduce((acc, f) => acc * f.factor, unit.baseRate);
   const fixedAdj = factors.reduce((acc, f) => acc + (f.add ?? 0), 0);
-  const rawRate = roundRate(Math.max(0, mult + fixedAdj));
+  const rawRate = roundRate(Math.max(0, orphanPin ?? mult + fixedAdj));
+
+  // Advanced Minimum Price rules resolve the floor per night (far-out/weekend
+  // raise it; last-minute/orphan replace it — possibly below the listing min).
+  const { min: minPrice, source: minPriceSource } = resolveMinPrice(
+    unit, date, leadDays, market, cfg,
+  );
 
   let rate = rawRate;
   let bound: DateQuote["bound"] = null;
-  if (rate < unit.minRate) {
-    rate = unit.minRate;
+  if (rate < minPrice) {
+    rate = minPrice;
     bound = "floor";
   } else if (rate > unit.maxRate) {
     rate = unit.maxRate;
@@ -150,7 +270,7 @@ export function quoteNight(
     factors.push(off.entry);
   }
 
-  const { minStay, source } = resolveMinStay(unit, date, leadDays, market, cfg);
+  const { minStay, source } = resolveMinStay(unit, date, leadDays, market, cfg, rate);
   const effectiveMonthlyRate = Math.round(rate * 30 * (1 - losDiscountForStay(unit, 30, cfg)));
 
   return {
@@ -161,6 +281,8 @@ export function quoteNight(
     rawRate,
     rate,
     bound,
+    minPrice,
+    minPriceSource,
     minStay,
     minStaySource: source,
     effectiveMonthlyRate,
@@ -215,11 +337,13 @@ export function activeRuleSummary(
     { key: "farOut", label: "Far-out premium", enabled: cfg.farOut.enabled, note: `>${cfg.farOut.thresholdDays}d` },
     { key: "lastMinute", label: "Last-minute discount", enabled: cfg.lastMinute.enabled, note: "STR — off for MTR" },
     { key: "adjacent", label: "Adjacent factor", enabled: cfg.adjacent.enabled, note: `${adjNote}, ${cfg.adjacent.daysBefore}d before / ${cfg.adjacent.daysAfter}d after bookings` },
+    { key: "orphanDay", label: "Orphan day prices", enabled: cfg.orphanDayPrices.enabled, note: `${cfg.orphanDayPrices.ranges.length} gap range(s)` },
+    { key: "portfolioOccupancy", label: "Portfolio occupancy", enabled: cfg.portfolioOccupancy.enabled, note: `${cfg.portfolioOccupancy.profile} profile — group occupancy` },
     { key: "dayOfWeek", label: "Day-of-week", enabled: cfg.dayOfWeek.enabled, note: "STR — off for MTR" },
     { key: "los", label: "LOS / monthly discount", enabled: cfg.los.enabled, note: "weekly / monthly / quarter" },
-    { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max" },
+    { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max + advanced min-price rules" },
     { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
-    { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: "floor → demand → market → far-out → override" },
+    { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: `${cfg.minStayRules.mode} — lowest-allowed → orphan → DSO → adjacent → far-out → last-minute → default` },
     { key: "gate", label: "Human gate", enabled: true, note: `>±${gatePct}% → Action Center` },
   ];
 }

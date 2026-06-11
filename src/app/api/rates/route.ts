@@ -11,7 +11,7 @@ import {
   type AppliedCell,
 } from "@/lib/repos/rates";
 import { logActivity } from "@/lib/repos/activity";
-import { setUnitBaseRate } from "@/lib/repos/units";
+import { setUnitBaseRate, listUnits as listAllUnits } from "@/lib/repos/units";
 import { pushRatesToMiniHotel, type PushResult } from "@/lib/integrations/minihotel";
 
 export const dynamic = "force-dynamic";
@@ -47,6 +47,7 @@ export async function PATCH(req: Request) {
     maxPrice?: number | null;
     note?: string | null;
     clear?: boolean;
+    applyToGroup?: boolean;
     // shared fields
     price?: number | null;
     minNights?: number | null;
@@ -111,6 +112,20 @@ export async function PATCH(req: Request) {
     if (!unitExists(unitId)) {
       return NextResponse.json({ error: "unknown unit" }, { status: 404 });
     }
+    // Group-level DSO (PriceLabs account/group overrides): fan the same range
+    // out to every listing attached to this unit's group customization.
+    let targetIds = [unitId];
+    let groupLabel: string | null = null;
+    if (body.applyToGroup) {
+      const all = listAllUnits();
+      const me = all.find((u) => u.id === unitId);
+      const g = me?.group ?? me?.subgroup ?? null;
+      if (!g) {
+        return NextResponse.json({ error: "unit has no customization group" }, { status: 400 });
+      }
+      groupLabel = g;
+      targetIds = all.filter((u) => u.group === g || u.subgroup === g).map((u) => u.id);
+    }
     const dow = Array.isArray(body.daysOfWeek)
       ? body.daysOfWeek.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
       : undefined;
@@ -156,9 +171,18 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "nothing to update" }, { status: 400 });
     }
 
-    let applied: { nights: number; written: AppliedCell[]; unresolved: number };
+    const applied = { nights: 0, unresolved: 0 };
+    const items: { unitId: string; date: string; price?: number | null; minNights?: number | null; closed?: boolean | null }[] = [];
     try {
-      applied = applyOverrideRange(range);
+      for (const id of targetIds) {
+        const res: { nights: number; written: AppliedCell[]; unresolved: number } =
+          applyOverrideRange({ ...range, unitId: id });
+        applied.nights += res.nights;
+        applied.unresolved += res.unresolved;
+        for (const w of res.written) {
+          items.push({ unitId: id, date: w.date, price: w.price, minNights: w.minNights, closed: w.closed });
+        }
+      }
     } catch (e) {
       return NextResponse.json(
         { error: e instanceof Error ? e.message : "range update failed" },
@@ -174,10 +198,8 @@ export async function PATCH(req: Request) {
     // lingers"; we re-push instead. Nights that only changed local-only
     // guardrails (min/max price) have nothing MiniHotel can store and are skipped.
     let push: PushResult | undefined;
-    const items = applied.written
-      .map((w) => ({ unitId, date: w.date, price: w.price, minNights: w.minNights, closed: w.closed }))
-      .filter((w) => w.price != null || w.minNights != null || w.closed != null);
-    if (items.length) push = await pushRatesToMiniHotel(items);
+    const pushable = items.filter((w) => w.price != null || w.minNights != null || w.closed != null);
+    if (pushable.length) push = await pushRatesToMiniHotel(pushable);
 
     const parts: string[] = [];
     if (range.clear) parts.push("overrides removed — defaults re-pushed");
@@ -198,14 +220,21 @@ export async function PATCH(req: Request) {
     if (applied.unresolved > 0) {
       pushTxt += `; ${applied.unresolved} night(s) have no default to send — last pushed values remain on MiniHotel`;
     }
+    const who = groupLabel ? `group "${groupLabel}" (${targetIds.length} listings)` : unitId;
     logActivity({
       department: "revenue",
       worker: "Pricing Specialist",
-      message: `Rates Calendar · ${unitId} ${from}→${to}${dowTxt}: ${parts.join(", ")} — ${nights} night(s) (${pushTxt}).`,
+      message: `Rates Calendar · ${who} ${from}→${to}${dowTxt}: ${parts.join(", ")} — ${nights} night(s) (${pushTxt}).`,
       level: (push && !push.ok) || applied.unresolved > 0 ? "warning" : "success",
     });
 
-    return NextResponse.json({ ok: true, nights, push, unresolved: applied.unresolved });
+    return NextResponse.json({
+      ok: true,
+      nights,
+      units: targetIds.length,
+      push,
+      unresolved: applied.unresolved,
+    });
   }
 
   // ---- legacy single-date shape: { unitId, date, ... } ------------------------
