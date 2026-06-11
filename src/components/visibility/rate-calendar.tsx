@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   apartmentDisplayParts,
   apartmentIdFromUnit,
@@ -122,6 +122,100 @@ function pushStatusMsg(p: PushInfo): { ok: boolean; text: string } {
 // UTC would show yesterday as "today" for the first 2-3 hours of each local day.
 const todayLocal = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
+
+// ---- day/month/year date field --------------------------------------------
+// Native <input type="date"> renders in the BROWSER's locale (US browsers show
+// mm/dd/yyyy), which reads wrong here. This field always displays dd/mm/yyyy;
+// the calendar button still opens the native picker. Value in/out stays ISO.
+const isoToDmy = (iso: string): string => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+};
+const dmyToIso = (text: string): string | null => {
+  const m = /^\s*(\d{1,2})[./\-\s](\d{1,2})[./\-\s](\d{4}|\d{2})\s*$/.exec(text);
+  if (!m) return null;
+  const d = Number(m[1]);
+  const mo = Number(m[2]);
+  const y = Number(m[3]) + (m[3].length === 2 ? 2000 : 0);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  return dt.toISOString().slice(0, 10);
+};
+
+function DmyDateInput({
+  value,
+  onChange,
+  allowEmpty = false,
+  width = "w-32",
+}: {
+  value: string; // ISO or ""
+  onChange: (iso: string) => void;
+  allowEmpty?: boolean;
+  width?: string;
+}) {
+  const [text, setText] = useState(isoToDmy(value));
+  const pickerRef = useRef<HTMLInputElement>(null);
+  useEffect(() => setText(isoToDmy(value)), [value]);
+
+  const commit = () => {
+    if (allowEmpty && text.trim() === "") {
+      onChange("");
+      return;
+    }
+    const iso = dmyToIso(text);
+    if (iso) onChange(iso);
+    else setText(isoToDmy(value)); // unparseable — revert to the last good value
+  };
+
+  return (
+    <span className={`relative inline-flex items-center ${width}`}>
+      <input
+        className={`${inputCls} w-full pr-7`}
+        value={text}
+        placeholder="dd/mm/yyyy"
+        inputMode="numeric"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          }
+        }}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        title="Open calendar"
+        className="absolute right-1.5 text-muted-foreground hover:text-foreground"
+        onClick={() => {
+          const el = pickerRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
+          if (!el) return;
+          try {
+            el.showPicker?.();
+          } catch {
+            el.focus();
+          }
+        }}
+      >
+        <CalendarDays className="h-3.5 w-3.5" />
+      </button>
+      {/* invisible native input that only supplies the picker popup */}
+      <input
+        ref={pickerRef}
+        type="date"
+        tabIndex={-1}
+        aria-hidden
+        value={value}
+        onChange={(e) => {
+          if (e.target.value) onChange(e.target.value);
+          else if (allowEmpty) onChange("");
+        }}
+        className="pointer-events-none absolute bottom-0 right-0 h-px w-px opacity-0"
+      />
+    </span>
+  );
+}
 const addDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 const partsUTC = (iso: string) => {
@@ -414,7 +508,7 @@ export function RateCalendar() {
         <CardContent className="flex flex-wrap items-end gap-x-4 gap-y-3 p-4">
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             From
-            <input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value || todayLocal())} />
+            <DmyDateInput value={from} onChange={(v) => setFrom(v || todayLocal())} />
           </label>
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             Horizon
@@ -1249,11 +1343,11 @@ function OverridePanel({
           <div className="flex flex-wrap items-end gap-3">
             <label className={fieldLabelCls}>
               From
-              <input type="date" className={inputCls} value={start} onChange={(e) => setStart(e.target.value || cell.date)} />
+              <DmyDateInput value={start} onChange={(v) => setStart(v || cell.date)} />
             </label>
             <label className={fieldLabelCls}>
               To
-              <input type="date" className={inputCls} value={end} onChange={(e) => setEnd(e.target.value || cell.date)} />
+              <DmyDateInput value={end} onChange={(v) => setEnd(v || cell.date)} />
             </label>
             <label className="flex items-center gap-2 pb-1.5 text-[11px] text-muted-foreground">
               <input
@@ -1412,30 +1506,15 @@ function OverridePanel({
           <div className="flex flex-wrap gap-3">
             <label className={fieldLabelCls}>
               Override expiry (auto-disable after)
-              <input
-                type="date"
-                className={`${inputCls} w-40`}
-                value={expiry}
-                onChange={(e) => setExpiry(e.target.value)}
-              />
+              <DmyDateInput allowEmpty width="w-40" value={expiry} onChange={setExpiry} />
             </label>
             <label className={fieldLabelCls}>
               Copy to another range — from
-              <input
-                type="date"
-                className={`${inputCls} w-40`}
-                value={copyFrom}
-                onChange={(e) => setCopyFrom(e.target.value)}
-              />
+              <DmyDateInput allowEmpty width="w-40" value={copyFrom} onChange={setCopyFrom} />
             </label>
             <label className={fieldLabelCls}>
               to
-              <input
-                type="date"
-                className={`${inputCls} w-40`}
-                value={copyTo}
-                onChange={(e) => setCopyTo(e.target.value)}
-              />
+              <DmyDateInput allowEmpty width="w-40" value={copyTo} onChange={setCopyTo} />
             </label>
           </div>
           {(cell.createdAt || cell.updatedAt) && (

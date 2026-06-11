@@ -1,8 +1,6 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
-import { ACTIVITY_FEED, DEPARTMENTS } from "@/lib/mock-data";
-import { APPROVAL_QUEUE } from "@/lib/action-center-data";
 import { UNIT_PRICING_DEFAULTS, PRICING_AGENT } from "@/lib/config/pricing";
 import { APARTMENTS, streetOf } from "@/lib/apartments";
 import { randomUUID } from "node:crypto";
@@ -429,9 +427,8 @@ function init(db: Database.Database) {
   // with the old 30-night MTR defaults move to the 3-night default min stay
   // with a 1-night hard floor (the far-out ladder + orphan gap-1 rules take it
   // from there). Keyed on user_version so deliberate per-unit edits afterwards
-  // are never touched again. Must run AFTER the ensureColumn calls above — on a
-  // fresh database the columns don't exist yet, and referencing them here used
-  // to crash the whole init (every API 500s on a clean checkout).
+  // are never touched again. Must run AFTER the min_stay/lowest_min_stay
+  // columns are ensured — on a fresh DB they don't exist until just above.
   const userVersion = (db.pragma("user_version", { simple: true }) as number) ?? 0;
   if (userVersion < 1) {
     db.exec(`
@@ -518,63 +515,29 @@ function seed(db: Database.Database) {
     return;
   }
 
-  const insertItem = db.prepare(`
-    INSERT INTO approval_items (id, department, worker, proposed_action, rationale, blast_radius, amount, raised_at, rule, payload)
-    VALUES (@id, @department, @worker, @proposed_action, @rationale, @blast_radius, @amount, @raised_at, @rule, @payload)
-  `);
-  const insertEvent = db.prepare(`
-    INSERT INTO activity_events (id, ts, department, worker, message, level)
-    VALUES (@id, @ts, @department, @worker, @message, @level)
-  `);
-
+  // No demo activity/approvals: those feeds start empty and fill with REAL
+  // events as the agents act (e.g. rate pushes logged by the Pricing Specialist).
   const tx = db.transaction(() => {
-    for (const a of APPROVAL_QUEUE) {
-      insertItem.run({
-        id: a.id,
-        department: a.department,
-        worker: a.worker,
-        proposed_action: a.proposedAction,
-        rationale: a.rationale,
-        blast_radius: a.blastRadius,
-        amount: a.amount ?? null,
-        raised_at: a.raisedAt,
-        rule: a.rule,
-        payload: null,
-      });
-    }
-    for (const e of ACTIVITY_FEED) {
-      insertEvent.run({
-        id: e.id,
-        ts: e.ts,
-        department: e.department,
-        worker: e.worker,
-        message: e.message,
-        level: e.level,
-      });
-    }
     for (const u of SEED_UNITS) {
       insertUnit.run(u);
     }
     db.prepare("INSERT INTO meta (key, value) VALUES ('seeded', ?)").run(SEED_VERSION);
   });
   tx();
-  // suppress unused import warning if departments aren't directly read
-  void DEPARTMENTS;
 }
 
-export const SEED_UNITS = APARTMENTS.map(([n, address]) => {
-  const baseRate = Math.round((500 + ((n * 137) % 450)) / 10) * 10; // ₪500–950, deterministic
-  return {
-    id: `BG-${n}`,
-    name: address,
-    neighborhood: streetOf(address),
-    bedrooms: 1,
-    base_rate: baseRate,
-    current_rate: baseRate,
-    occupancy_30d: 0.7 + ((n * 11) % 26) / 100, // 0.70–0.95
-    platform: "Blueground",
-  };
-});
+// The portfolio ships with rates/occupancy at 0 — unknown, not invented. Real
+// numbers arrive from the MiniHotel sync or the operator setting a Base rate.
+export const SEED_UNITS = APARTMENTS.map(([n, address]) => ({
+  id: `BG-${n}`,
+  name: address,
+  neighborhood: streetOf(address),
+  bedrooms: 1,
+  base_rate: 0,
+  current_rate: 0,
+  occupancy_30d: 0,
+  platform: "Blueground",
+}));
 
 function seedProfiles(db: Database.Database) {
   const seeded = db
@@ -673,181 +636,30 @@ function seedProfiles(db: Database.Database) {
   tx();
 }
 
-// Synthetic competitor ladder for the seeded proof run, so Pricing Intelligence
-// renders on a fresh DB before any real scan posts ladder rows. Deterministic and
-// clearly demo data: our listing keeps its real captured point (rank 51 @
-// ₪29,783); the rest are a plausible Tel-Aviv price ladder where cheaper listings
-// tend to rank better (with noise standing in for the non-price factors).
-function seedLadder(db: Database.Database) {
-  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_ladder'").get();
-  if (seeded) return;
-
-  const profileId = "prof-telaviv-2g";
-  const airbnbId = "1602229503214826484";
-  const runId = "seed-proof-run";
-  const ts = "2026-06-06T09:00:00.000Z";
-  const checkIn = "2026-08-01";
-  const checkOut = "2026-08-31";
-  const nights = 30;
-  const guests = 2;
-  const total = 280;
-  const currency = "ILS";
-
-  const noise = (k: number) => {
-    const x = Math.sin(k * 9301 + 49297) * 233280;
-    return x - Math.floor(x); // 0..1, deterministic
-  };
-
-  const ins = db.prepare(`
-    INSERT INTO search_results
-      (id, profile_id, run_id, ts, check_in, check_out, nights, guests, total,
-       room_id, rank, page, position, price, price_nightly, currency)
-    VALUES
-      (@id, @profile_id, @run_id, @ts, @check_in, @check_out, @nights, @guests, @total,
-       @room_id, @rank, @page, @position, @price, @price_nightly, @currency)
-  `);
-
+// One-time purge of demo data that earlier seed versions wrote into real
+// tables: fake approvals/activity narratives, a synthetic 280-listing
+// competitor ladder, 12 invented bookings, fabricated market-demand readings,
+// and invented per-unit occupancy. Every target is exact-matched by seed id /
+// run id / timestamp, so rows from real syncs and scans are never touched.
+// Revenue & Yield and P&L surfaces must only ever show real data.
+function purgeDemoData(db: Database.Database) {
+  const purged = db.prepare("SELECT value FROM meta WHERE key = 'demo_purged'").get();
+  if (purged) return;
   const tx = db.transaction(() => {
-    for (let rank = 1; rank <= total; rank++) {
-      let priceTotal: number;
-      let roomId: string | null = null;
-      if (rank === 51) {
-        priceTotal = 29783; // our listing's real captured point
-        roomId = airbnbId;
-      } else {
-        const nightly = 620 + 3.4 * rank + (noise(rank) - 0.5) * 520;
-        priceTotal = Math.max(9000, Math.round((nightly * nights) / 10) * 10);
-      }
-      ins.run({
-        id: randomUUID(),
-        profile_id: profileId,
-        run_id: runId,
-        ts,
-        check_in: checkIn,
-        check_out: checkOut,
-        nights,
-        guests,
-        total,
-        room_id: roomId,
-        rank,
-        page: Math.floor((rank - 1) / 18) + 1,
-        position: ((rank - 1) % 18) + 1,
-        price: priceTotal,
-        price_nightly: priceTotal / nights,
-        currency,
-      });
-    }
-    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_ladder', 'v1')").run();
-  });
-  tx();
-}
-
-// A handful of synthetic realized bookings (for a seed unit) so the Outcomes
-// surface renders on a fresh DB before the first MiniHotel bookings sync. Spread
-// across lead-time buckets + price points to give a pace distribution and a
-// realized nightly band. Clearly demo data.
-function seedBookings(db: Database.Database) {
-  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_bookings'").get();
-  if (seeded) return;
-
-  const unitId = "BG-2231";
-  const now = new Date().toISOString();
-  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-  const dayMs = 86_400_000;
-  // [arrival, leadDays, nightly]
-  const samples: Array<[string, number, number]> = [
-    ["2026-07-05", 12, 720],
-    ["2026-07-12", 9, 700],
-    ["2026-07-20", 22, 760],
-    ["2026-08-01", 34, 820],
-    ["2026-08-10", 28, 800],
-    ["2026-08-18", 47, 880],
-    ["2026-09-01", 55, 900],
-    ["2026-09-12", 41, 860],
-    ["2026-09-20", 18, 740],
-    ["2026-10-01", 63, 940],
-    ["2026-10-10", 30, 810],
-    ["2026-07-28", 6, 690],
-  ];
-
-  const ins = db.prepare(`
-    INSERT INTO bookings
-      (id, portal_res_id, unit_id, room_type, source, status, created_on, arrival, departure,
-       nights, guests, total, nightly, currency, lead_days, synced_at)
-    VALUES
-      (@id, @portal_res_id, @unit_id, @room_type, @source, @status, @created_on, @arrival, @departure,
-       @nights, @guests, @total, @nightly, @currency, @lead_days, @synced_at)
-  `);
-
-  const tx = db.transaction(() => {
-    let i = 0;
-    for (const [arrival, lead, nightly] of samples) {
-      i++;
-      const nights = 30;
-      const arrMs = Date.parse(`${arrival}T00:00:00Z`);
-      ins.run({
-        id: `seed-bk-${i}`,
-        portal_res_id: `PORTAL-${1000 + i}`,
-        unit_id: unitId,
-        room_type: null,
-        source: i % 2 ? "Airbnb" : "Booking.com",
-        status: "OK",
-        created_on: iso(arrMs - lead * dayMs),
-        arrival,
-        departure: iso(arrMs + nights * dayMs),
-        nights,
-        guests: 2,
-        total: nightly * nights,
-        nightly,
-        currency: "ILS",
-        lead_days: lead,
-        synced_at: now,
-      });
-    }
-    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_bookings', 'v1')").run();
-    // Link the seeded listing to the seeded unit so the demo bookings attribute
-    // (booking → unit → listing → its scans). Touches only the seed row.
+    db.prepare("DELETE FROM approval_items WHERE id IN ('ac-001','ac-002','ac-003')").run();
+    db.prepare("DELETE FROM activity_events WHERE id LIKE 'evt-%'").run();
+    db.prepare("DELETE FROM search_results WHERE run_id = 'seed-proof-run'").run();
+    db.prepare("DELETE FROM bookings WHERE id LIKE 'seed-bk-%'").run();
     db.prepare(
-      "UPDATE tracked_listings SET unit_id = 'BG-2231' WHERE id = 'lst-portmamad' AND unit_id IS NULL",
+      "UPDATE tracked_listings SET unit_id = NULL WHERE id = 'lst-portmamad' AND unit_id = 'BG-2231'",
     ).run();
-  });
-  tx();
-}
-
-// Demo market-occupancy readings for the seeded area, reproducing the operator's
-// observed pattern: absolute values look low (ghost listings), but a 30% reading
-// sits at the top of the metric's own range — i.e. relatively, demand is hot.
-function seedDemand(db: Database.Database) {
-  const seeded = db.prepare("SELECT value FROM meta WHERE key = 'seeded_demand'").get();
-  if (seeded) return;
-
-  const area = "Tel Aviv · 2 guests"; // matches the seeded profile label
-  const ins = db.prepare(
-    `INSERT INTO demand_readings (id, area, date, source, value, ts)
-     VALUES (@id, @area, @date, 'market-occupancy', @value, @ts)`,
-  );
-  const noise = (k: number) => {
-    const x = Math.sin(k * 7901 + 31337) * 215573;
-    return x - Math.floor(x); // 0..1, deterministic
-  };
-  const tx = db.transaction(() => {
-    // Weekly readings over ~6 months of stay dates: quiet winter/spring readings
-    // 12–22%, climbing into August where 28–31% is the seasonal peak.
-    const start = Date.parse("2026-03-01T00:00:00Z");
-    for (let w = 0; w < 26; w++) {
-      const dms = start + w * 7 * 86_400_000;
-      const date = new Date(dms).toISOString().slice(0, 10);
-      const month = new Date(dms).getUTCMonth() + 1; // 3..9
-      const seasonal = month >= 7 ? 26 + 5 * noise(w) : 12 + 10 * noise(w);
-      ins.run({
-        id: randomUUID(),
-        area,
-        date,
-        value: Math.round(seasonal * 10) / 10,
-        ts: "2026-06-08T09:00:00.000Z",
-      });
-    }
-    db.prepare("INSERT INTO meta (key, value) VALUES ('seeded_demand', 'v1')").run();
+    db.prepare(
+      "DELETE FROM demand_readings WHERE source = 'market-occupancy' AND ts = '2026-06-08T09:00:00.000Z'",
+    ).run();
+    // Seed-era invented occupancy (0.70–0.95) on portfolio units. Base rates are
+    // left alone — the operator may have tuned them deliberately.
+    db.prepare("UPDATE units SET occupancy_30d = 0 WHERE id LIKE 'BG-%'").run();
+    db.prepare("INSERT INTO meta (key, value) VALUES ('demo_purged', 'v1')").run();
   });
   tx();
 }
@@ -859,9 +671,7 @@ export function getDb(): Database.Database {
   init(db);
   seed(db);
   seedProfiles(db);
-  seedLadder(db);
-  seedBookings(db);
-  seedDemand(db);
+  purgeDemoData(db);
   global.__rohubDb = db;
   return db;
 }

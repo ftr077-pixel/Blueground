@@ -4,11 +4,15 @@ import { getDb } from "@/lib/db";
 /**
  * Rates Calendar repo.
  *
- * The calendar is a deterministic *baseline* (each unit's nightly rate shaped by
- * weekend/seasonal factors, plus long mid-term booked blocks sized by occupancy),
- * with persisted *overrides* layered on top. Overrides come from two places:
+ * Prices are a deterministic *baseline* (each unit's base rate shaped by
+ * weekend/seasonal factors) with persisted *overrides* layered on top. Overrides
+ * come from two places:
  *   - operator edits in the UI            → source = "manual"
  *   - ingested actuals from MiniHotel ARI  → source = "minihotel"  (see /api/rates/snapshot)
+ *
+ * Booked / closed / availability are REAL data only — they exist solely as
+ * overrides written by the MiniHotel sync or the operator. Nights without data
+ * are unknown (never fabricated), so occupancy reads honestly at any horizon.
  *
  * This is the read/write surface that replaces PriceLabs: the Reverse ARI fields
  * (Price, Availability, MinimumNights, Close) map 1:1 onto the cells below.
@@ -16,7 +20,7 @@ import { getDb } from "@/lib/db";
 
 export const DEFAULT_MIN_NIGHTS = 3; // operator default (PriceLabs setup: 3/3 weekday/weekend)
 export const CURRENCY = "ILS";
-const EPOCH = Date.UTC(2026, 0, 1); // stable origin so booked blocks don't shift between requests
+const EPOCH = Date.UTC(2026, 0, 1); // stable origin for day indexing + per-night price jitter
 
 export interface RateCell {
   date: string; // YYYY-MM-DD
@@ -151,38 +155,6 @@ function weekdayUTC(iso: string): number {
   return new Date(iso + "T00:00:00Z").getUTCDay(); // 0 Sun .. 6 Sat
 }
 
-/** Long mid-term stays as deterministic booked blocks; density tracks occupancy. */
-function bookedSet(unit: Unit, untilIdx: number): Set<number> {
-  const r = mulberry32(hashStr("book:" + unit.id));
-  const occ = Math.min(0.98, Math.max(0.4, unit.occupancy30d || 0.8));
-  const set = new Set<number>();
-  let day = 1 + Math.floor(r() * 20);
-  while (day <= untilIdx) {
-    const len = 28 + Math.floor(r() * 30); // 28..57-night stay
-    for (let k = 0; k < len && day + k <= untilIdx; k++) set.add(day + k);
-    const gap = Math.max(1, Math.round((1 - occ) * 55 * (0.4 + 0.6 * r())));
-    day += len + gap;
-  }
-  return set;
-}
-
-/** Occasional maintenance closure, ~every 70-110 nights, for ~1/3 of units. */
-function closedSet(unit: Unit, fromIdx: number, toIdx: number): Set<number> {
-  const set = new Set<number>();
-  const h = hashStr("cls:" + unit.id);
-  if (h % 3 !== 0) return set;
-  const r = mulberry32(h);
-  let day = 5 + Math.floor(r() * 40);
-  while (day <= toIdx) {
-    for (let k = 0; k < 3; k++) {
-      const d = day + k;
-      if (d >= fromIdx && d <= toIdx) set.add(d);
-    }
-    day += 70 + Math.floor(r() * 40);
-  }
-  return set;
-}
-
 function basePrice(unit: Unit, iso: string, idx: number): number {
   let p = unit.currentRate || unit.baseRate || 600;
   const dow = weekdayUTC(iso);
@@ -206,8 +178,6 @@ export function getCalendar(from: string, days: number): Calendar {
   const units = listUnits();
   const dates: string[] = [];
   for (let i = 0; i < days; i++) dates.push(isoAddDays(from, i));
-  const fromIdx = dayIndex(from);
-  const toIdx = fromIdx + days - 1;
 
   const db = getDb();
   const ovRows = db
@@ -219,7 +189,6 @@ export function getCalendar(from: string, days: number): Calendar {
   // Overrides for the occupancy horizons (next 90 nights from today) — a
   // separate span from the viewed window.
   const occFrom = hotelToday();
-  const occFromIdx = dayIndex(occFrom);
   const occDates: string[] = [];
   for (let i = 0; i < 90; i++) occDates.push(isoAddDays(occFrom, i));
   const ovOccRows = db
@@ -257,15 +226,16 @@ export function getCalendar(from: string, days: number): Calendar {
     // show nothing (price/availability = null) until real data is synced in,
     // rather than invent numbers.
     const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
-    const booked = hasBaseline ? bookedSet(unit, toIdx) : new Set<number>();
-    const closed = hasBaseline ? closedSet(unit, fromIdx, toIdx) : new Set<number>();
     const cells: RateCell[] = dates.map((date) => {
       const idx = dayIndex(date);
       let price: number | null = hasBaseline ? basePrice(unit, date, idx) : null;
       let minNights = DEFAULT_MIN_NIGHTS;
-      let isClosed = closed.has(idx);
-      let isBooked = booked.has(idx);
-      let available: number | null = hasBaseline ? (isBooked || isClosed ? 0 : 1) : null;
+      // Booked / closed / availability come ONLY from real data (overrides
+      // written by the MiniHotel sync or the operator) — never invented. A night
+      // with no data is open-looking with unknown availability.
+      let isClosed = false;
+      let isBooked = false;
+      let available: number | null = null;
       let source: RateCell["source"] = "derived";
 
       const o = ov.get(unit.id + "|" + date);
@@ -309,18 +279,15 @@ export function getCalendar(from: string, days: number): Calendar {
         note: o?.note ?? null,
       };
     });
-    // Occupancy over the next 30/60/90 nights from today: sold ÷ sellable,
-    // closed nights excluded; null when availability is unknown (unsynced).
+    // Occupancy over the next 30/60/90 nights from today: sold ÷ sellable, from
+    // REAL synced data only — closed nights excluded, unknown nights skipped.
+    // null when nothing is synced in the horizon (shown as "—", not a made-up %).
     const sold = [0, 0, 0];
     const open = [0, 0, 0];
-    const occToIdx = occFromIdx + 89;
-    const bookedOcc = hasBaseline ? bookedSet(unit, occToIdx) : new Set<number>();
-    const closedOcc = hasBaseline ? closedSet(unit, occFromIdx, occToIdx) : new Set<number>();
     for (let i = 0; i < 90; i++) {
-      const idx = occFromIdx + i;
-      let isClosed = closedOcc.has(idx);
-      let isBooked = bookedOcc.has(idx);
-      let available: number | null = hasBaseline ? (isBooked || isClosed ? 0 : 1) : null;
+      let isClosed = false;
+      let isBooked = false;
+      let available: number | null = null;
       const o = ovOcc.get(unit.id + "|" + occDates[i]);
       if (o) {
         if (o.closed != null) isClosed = o.closed === 1;
@@ -331,7 +298,7 @@ export function getCalendar(from: string, days: number): Calendar {
       if (isClosed) continue;
       const buckets = i < 30 ? [0, 1, 2] : i < 60 ? [1, 2] : [2];
       if (isBooked) for (const b of buckets) sold[b]++;
-      else if (available === 1) for (const b of buckets) open[b]++;
+      else if (available != null && available > 0) for (const b of buckets) open[b]++;
     }
     const occOf = (b: number) => (sold[b] + open[b] > 0 ? sold[b] / (sold[b] + open[b]) : null);
 
@@ -385,7 +352,7 @@ export function getCalendar(from: string, days: number): Calendar {
           rev += c.price;
           bookedPrices.push(c.price);
         }
-      } else if (c.available === 1) open++; // known-open; null availability = unsynced, skip
+      } else if (c.available != null && c.available > 0) open++; // known-open; null = unsynced, skip
     }
   }
   const avg = (xs: number[]) =>
@@ -422,57 +389,31 @@ export function getCalendar(from: string, days: number): Calendar {
  *  (it's not in PriceLabs's blocked-dates exception list). */
 export function unavailableDatesForUnit(unitId: string, from: string, days: number): Set<string> {
   const out = new Set<string>();
-  const unit = listUnits().find((u) => u.id === unitId);
-  if (!unit || days <= 0) return out;
-  const fromIdx = dayIndex(from);
-  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
-  const booked = hasBaseline ? bookedSet(unit, fromIdx + days - 1) : new Set<number>();
-  const closed = hasBaseline ? closedSet(unit, fromIdx, fromIdx + days - 1) : new Set<number>();
+  if (days <= 0 || !unitExists(unitId)) return out;
   const rows = getDb()
     .prepare(
-      "SELECT date, booked, closed FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND (booked IS NOT NULL OR closed IS NOT NULL)",
+      "SELECT date, booked, closed FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND (booked = 1 OR closed = 1)",
     )
-    .all(unitId, from, isoAddDays(from, days - 1)) as Array<{
-    date: string;
-    booked: number | null;
-    closed: number | null;
-  }>;
-  const ov = new Map(rows.map((r) => [r.date, r]));
-  for (let i = 0; i < days; i++) {
-    const date = isoAddDays(from, i);
-    const idx = fromIdx + i;
-    const o = ov.get(date);
-    const isBooked = o?.booked != null ? o.booked === 1 : booked.has(idx);
-    const isClosed = o?.closed != null ? o.closed === 1 : closed.has(idx);
-    if (isBooked || isClosed) out.add(date);
-  }
+    .all(unitId, from, isoAddDays(from, days - 1)) as Array<{ date: string }>;
+  for (const r of rows) out.add(r.date);
   return out;
 }
 
 /**
- * Booked nights for one unit over [from, from+days) — the same baseline blocks
- * + override booked flags the calendar renders. Feeds the pricing engine's
- * adjacency rule (MarketProviders.isBooked). Closed-only nights are NOT booked:
- * the Adjacent Factor keys off reservations, not maintenance blocks.
+ * Booked nights for one unit over [from, from+days) — the override booked flags
+ * the calendar renders (real synced/manual data only). Feeds the pricing
+ * engine's adjacency rule (MarketProviders.isBooked). Closed-only nights are
+ * NOT booked: the Adjacent Factor keys off reservations, not maintenance blocks.
  */
 export function bookedDatesForUnit(unitId: string, from: string, days: number): Set<string> {
   const out = new Set<string>();
-  const unit = listUnits().find((u) => u.id === unitId);
-  if (!unit || days <= 0) return out;
-  const fromIdx = dayIndex(from);
-  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
-  const baseline = hasBaseline ? bookedSet(unit, fromIdx + days - 1) : new Set<number>();
+  if (days <= 0 || !unitExists(unitId)) return out;
   const rows = getDb()
     .prepare(
-      "SELECT date, booked FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND booked IS NOT NULL",
+      "SELECT date FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND booked = 1",
     )
-    .all(unitId, from, isoAddDays(from, days - 1)) as { date: string; booked: number }[];
-  const ov = new Map(rows.map((r) => [r.date, r.booked === 1]));
-  for (let i = 0; i < days; i++) {
-    const date = isoAddDays(from, i);
-    const flag = ov.get(date);
-    if (flag !== undefined ? flag : baseline.has(fromIdx + i)) out.add(date);
-  }
+    .all(unitId, from, isoAddDays(from, days - 1)) as { date: string }[];
+  for (const r of rows) out.add(r.date);
   return out;
 }
 
@@ -578,14 +519,11 @@ export function rebaseFuturePrices(
 
   const from = hotelToday();
   const fromIdx = dayIndex(from);
-  const toIdx = fromIdx + horizonDays - 1;
   const db = getDb();
   const rows = db
     .prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ?")
     .all(unitId, from, isoAddDays(from, horizonDays - 1)) as OverrideSql[];
   const byDate = new Map(rows.map((r) => [r.date, r]));
-  const bookedS = bookedSet(unit, toIdx);
-  const closedS = closedSet(unit, fromIdx, toIdx);
 
   const out: { date: string; price: number }[] = [];
   const clearPrice = db.prepare(
@@ -598,13 +536,8 @@ export function rebaseFuturePrices(
       const o = byDate.get(date);
       // A manual fixed price is the operator's pin — never rebased.
       if (o && o.price != null && o.source === "manual") continue;
-      let isBooked = bookedS.has(idx);
-      let isClosed = closedS.has(idx);
-      if (o) {
-        if (o.booked != null) isBooked = o.booked === 1;
-        if (o.closed != null) isClosed = o.closed === 1;
-      }
-      if (isBooked || isClosed) continue;
+      // Sold/closed nights (real data only) keep their last price.
+      if (o && (o.booked === 1 || o.closed === 1)) continue;
 
       let price = basePrice(unit, date, idx); // unit already carries the new base
       if (o) {
@@ -702,8 +635,6 @@ export function applyOverrideRange(o: RangeOverride): {
   let unresolved = 0;
   const written: AppliedCell[] = [];
   const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
-  const bookedBaseline = hasBaseline ? bookedSet(unit, toIdx) : new Set<number>();
-  const closedBaseline = hasBaseline ? closedSet(unit, fromIdx, toIdx) : new Set<number>();
   const del = db.prepare("DELETE FROM rate_calendar WHERE unit_id = ? AND date = ?");
   const sel = db.prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date = ?");
 
@@ -727,7 +658,7 @@ export function applyOverrideRange(o: RangeOverride): {
           continue;
         }
         const idx = dayIndex(date);
-        const sold = existing.booked != null ? existing.booked === 1 : bookedBaseline.has(idx);
+        const sold = existing.booked === 1;
         const cell: AppliedCell = { date };
         // Only re-send fields the deleted override had actually pinned.
         if (
@@ -740,7 +671,7 @@ export function applyOverrideRange(o: RangeOverride): {
           cell.price = basePrice(unit, date, idx);
         }
         if (existing.min_nights != null) cell.minNights = DEFAULT_MIN_NIGHTS;
-        if (existing.closed != null) cell.closed = closedBaseline.has(idx);
+        if (existing.closed != null) cell.closed = false; // default state is open
         if (cell.price != null || cell.minNights != null || cell.closed != null) written.push(cell);
         continue;
       }
@@ -790,7 +721,7 @@ export function applyOverrideRange(o: RangeOverride): {
         cell.minNights = patch.minNights !== null ? patch.minNights : DEFAULT_MIN_NIGHTS;
       }
       if (patch.closed !== undefined) {
-        cell.closed = patch.closed !== null ? patch.closed : closedBaseline.has(dayIndex(date));
+        cell.closed = patch.closed !== null ? patch.closed : false; // cleared closure = open
       }
       written.push(cell);
       nights++;
@@ -822,8 +753,6 @@ export function clearedReplacements(
     else out.unresolved = true;
   }
   if (patch.minNights === null) out.minNights = DEFAULT_MIN_NIGHTS;
-  if (patch.closed === null) {
-    out.closed = hasBaseline ? closedSet(unit, idx, idx).has(idx) : false;
-  }
+  if (patch.closed === null) out.closed = false; // cleared closure = open
   return out;
 }

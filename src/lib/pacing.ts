@@ -177,20 +177,21 @@ function isExcludedRoom(
 // ------------------------------------------------------------- our daily side
 interface DayAgg {
   calBooked: number;
-  calValue: number; // listed price of booked calendar cells (demo-mode ADR)
+  calOpen: number; // known-available cells (real synced state, not fabricated)
+  calValue: number; // listed price of booked calendar cells (pre-revenue ADR)
   calValueNights: number;
   resBooked: number;
   resValue: number; // VAT-net reservation revenue spread per night
   resValueNights: number;
   closed: number;
-  listedSum: number; // open (sellable) cells with a price → "listed price"
+  listedSum: number; // open-looking cells with a price → "listed price"
   listedN: number;
 }
 
 interface YourSeries {
   rooms: number;
   useReservations: boolean; // any real reservation night in the window
-  hasSignal: boolean; // any priced/booked data at all (else the side stays null)
+  hasSignal: boolean; // any REAL booked/closed/availability state in the window
   byDate: Map<string, DayAgg>;
 }
 
@@ -200,6 +201,7 @@ function yourDailySeries(from: string, days: number): YourSeries {
   for (const date of cal.dates) {
     byDate.set(date, {
       calBooked: 0,
+      calOpen: 0,
       calValue: 0,
       calValueNights: 0,
       resBooked: 0,
@@ -210,23 +212,30 @@ function yourDailySeries(from: string, days: number): YourSeries {
       listedN: 0,
     });
   }
+  // The calendar fabricates nothing (booked/closed/availability are real synced
+  // state only) — so the signal is real state, never the derived price baseline.
   let hasSignal = false;
   for (const row of cal.rows) {
     for (const c of row.cells) {
       const a = byDate.get(c.date);
       if (!a) continue;
-      if (c.price != null || c.booked || c.closed) hasSignal = true;
       if (c.closed) {
         a.closed++;
+        hasSignal = true;
         continue;
       }
       if (c.booked) {
         a.calBooked++;
+        hasSignal = true;
         if (c.price != null && c.price > 0) {
           a.calValue += c.price;
           a.calValueNights++;
         }
         continue;
+      }
+      if (c.available != null && c.available > 0) {
+        a.calOpen++;
+        hasSignal = true;
       }
       if (c.available !== 0 && c.price != null && c.price > 0) {
         a.listedSum += c.price;
@@ -513,6 +522,7 @@ interface Acc {
   lyValueN: number;
   closed: number;
   roomNights: number;
+  sigN: number; // days with any real booked/closed/availability signal
   listedSum: number;
   listedN: number;
   mOcc: number;
@@ -546,6 +556,7 @@ const newAcc = (): Acc => ({
   lyValueN: 0,
   closed: 0,
   roomNights: 0,
+  sigN: 0,
   listedSum: 0,
   listedN: 0,
   mOcc: 0,
@@ -622,21 +633,31 @@ export function buildPacingReport(q: PacingQuery): PacingReport {
     acc.days++;
 
     const a = yours.byDate.get(date);
-    if (a && yours.hasSignal) {
-      const booked = yours.useReservations ? a.resBooked : a.calBooked;
-      const value = yours.useReservations ? a.resValue : a.calValue;
-      const valueN = yours.useReservations ? a.resValueNights : a.calValueNights;
-      const denom = Math.max(0, yours.rooms - a.closed);
-      acc.yBooked += Math.min(booked, denom > 0 ? denom : booked);
-      acc.yDenom += denom;
-      acc.yValue += value;
-      acc.yValueN += valueN;
-      acc.closed += a.closed;
-      acc.roomNights += yours.rooms;
+    if (a) {
+      // Listed price flows regardless of occupancy state — the price baseline
+      // is the app's real price surface even before any booking data syncs.
       if (date >= today && a.listedN > 0) {
         acc.listedSum += a.listedSum / a.listedN;
         acc.listedN++;
       }
+      if (yours.useReservations) {
+        const denom = Math.max(0, yours.rooms - a.closed);
+        acc.yBooked += Math.min(a.resBooked, denom > 0 ? denom : a.resBooked);
+        acc.yDenom += denom;
+        acc.yValue += a.resValue;
+        acc.yValueN += a.resValueNights;
+      } else {
+        // Honest calendar fallback: only nights with real synced state count
+        // (sold + known-open) — unknown nights contribute nothing, so the
+        // occupancy reads null rather than a fabricated 0%.
+        acc.yBooked += a.calBooked;
+        acc.yDenom += a.calBooked + a.calOpen;
+        acc.yValue += a.calValue;
+        acc.yValueN += a.calValueNights;
+      }
+      acc.closed += a.closed;
+      acc.roomNights += yours.rooms;
+      if (yours.useReservations || a.calBooked + a.calOpen + a.closed > 0) acc.sigN++;
     }
 
     // Last-year "you": real reservations only — a synthetic baseline is not history.
@@ -700,7 +721,8 @@ export function buildPacingReport(q: PacingQuery): PacingReport {
       mktOccLy: a.lOccN ? round1(a.lOcc / a.lOccN) : null,
       yourOcc: a.yDenom > 0 ? round1(Math.min(100, (a.yBooked / a.yDenom) * 100)) : null,
       yourOccLy: a.lyDenom > 0 ? round1(Math.min(100, (a.lyBooked / a.lyDenom) * 100)) : null,
-      unavailable: a.roomNights > 0 ? round1((a.closed / a.roomNights) * 100) : null,
+      unavailable:
+        a.sigN > 0 && a.roomNights > 0 ? round1((a.closed / a.roomNights) * 100) : null,
       mktAdr: a.mAdrN ? Math.round(a.mAdr / a.mAdrN) : null,
       mktAdrLy: a.lAdrN ? Math.round(a.lAdr / a.lAdrN) : null,
       yourAdr: a.yValueN > 0 ? Math.round(a.yValue / a.yValueN) : null,
