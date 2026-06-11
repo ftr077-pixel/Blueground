@@ -13,7 +13,8 @@ import {
 } from "@/lib/repos/rates";
 import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
 import { logActivity } from "@/lib/repos/activity";
-import { setUnitBaseRate, listUnits as listAllUnits } from "@/lib/repos/units";
+import { setUnitBaseRate, setUnitMinMaxRates, listUnits as listAllUnits } from "@/lib/repos/units";
+import { UNIT_PRICING_DEFAULTS, roundRate } from "@/lib/config/pricing";
 import { pushRatesToMiniHotel, type PushResult } from "@/lib/integrations/minihotel";
 
 export const dynamic = "force-dynamic";
@@ -57,6 +58,26 @@ function freezeUnavailablePrices(
   return frozen;
 }
 
+/** Rebuild a unit's forward derived prices and push them to MiniHotel — the
+ *  shared tail of every unit-level anchor edit (Base, price floor/ceiling). */
+async function rebaseAndPush(
+  unitId: string,
+): Promise<{ repriced: number; push?: PushResult; pushTxt: string }> {
+  const repriced = rebaseFuturePrices(unitId);
+  let push: PushResult | undefined;
+  if (repriced.length) {
+    push = await pushRatesToMiniHotel(
+      repriced.map((r) => ({ unitId, date: r.date, price: r.price })),
+    );
+  }
+  const pushTxt = !push
+    ? "no future nights to reprice"
+    : push.ok
+      ? `pushed ${push.pushed} night(s) to MiniHotel`
+      : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
+  return { repriced: repriced.length, push, pushTxt };
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const from = (url.searchParams.get("from") || todayLocal()).slice(0, 10);
@@ -91,6 +112,9 @@ export async function PATCH(req: Request) {
     closed?: boolean | null;
     // unit base-rate shape
     baseRate?: number;
+    // unit floor/ceiling shape (null = clear the pin back to auto)
+    minRate?: number | null;
+    maxRate?: number | null;
   };
   try {
     body = await req.json();
@@ -116,25 +140,73 @@ export async function PATCH(req: Request) {
     // Rebuild every future night from the new anchor (synced prices are
     // superseded; manual pins and sold/closed nights are left alone), then
     // push the repriced nights to MiniHotel like any other calendar edit.
-    const repriced = rebaseFuturePrices(unitId);
-    let push: PushResult | undefined;
-    if (repriced.length) {
-      push = await pushRatesToMiniHotel(
-        repriced.map((r) => ({ unitId, date: r.date, price: r.price })),
-      );
-    }
-    const pushTxt = !push
-      ? "no future nights to reprice"
-      : push.ok
-        ? `pushed ${push.pushed} night(s) to MiniHotel`
-        : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
+    const { repriced, push, pushTxt } = await rebaseAndPush(unitId);
     logActivity({
       department: "revenue",
       worker: "Pricing Specialist",
-      message: `Rates Calendar · ${unitId}: base rate set to ₪${rate} — ${repriced.length} future night(s) rebuilt from the new anchor (${pushTxt}).`,
+      message: `Rates Calendar · ${unitId}: base rate set to ₪${rate} — ${repriced} future night(s) rebuilt from the new anchor (${pushTxt}).`,
       level: push && !push.ok ? "warning" : "success",
     });
-    return NextResponse.json({ ok: true, repriced: repriced.length, push });
+    return NextResponse.json({ ok: true, repriced, push });
+  }
+
+  // ---- unit floor/ceiling shape: { unitId, minRate?, maxRate? } ---------------
+  // Pin the unit's price floor / ceiling (PriceLabs "Min/Max Price" next to
+  // Base). Pinned bounds survive Base edits; null clears a pin so the bound
+  // follows Base at the default band again. The forward calendar rebuilds and
+  // re-pushes, exactly like a Base edit.
+  if (body.minRate !== undefined || body.maxRate !== undefined) {
+    const { unitId } = body;
+    if (!unitId) {
+      return NextResponse.json({ error: "unitId required" }, { status: 400 });
+    }
+    const unit = listAllUnits().find((u) => u.id === unitId);
+    if (!unit) {
+      return NextResponse.json({ error: "unknown unit" }, { status: 404 });
+    }
+    const norm = (v: number | null): number | null => (v === null ? null : Math.round(Number(v)));
+    const bad = (v: number | null | undefined) =>
+      v != null && (!Number.isFinite(v) || v <= 0 || v > 100000);
+    const minPatch = body.minRate !== undefined ? norm(body.minRate) : undefined;
+    const maxPatch = body.maxRate !== undefined ? norm(body.maxRate) : undefined;
+    if (bad(minPatch) || bad(maxPatch)) {
+      return NextResponse.json(
+        { error: "minRate/maxRate must be positive numbers (or null to clear the pin)" },
+        { status: 400 },
+      );
+    }
+    // Validate the band the unit would END UP with (pins + auto fallbacks).
+    const effMin =
+      minPatch !== undefined
+        ? (minPatch ?? roundRate(unit.baseRate * UNIT_PRICING_DEFAULTS.floorPctOfBase))
+        : unit.minRate;
+    const effMax =
+      maxPatch !== undefined
+        ? (maxPatch ?? roundRate(unit.baseRate * UNIT_PRICING_DEFAULTS.ceilingPctOfBase))
+        : unit.maxRate;
+    if (effMax > 0 && effMin > effMax) {
+      return NextResponse.json(
+        { error: `min price ₪${effMin} can't exceed max price ₪${effMax}` },
+        { status: 400 },
+      );
+    }
+    setUnitMinMaxRates(unitId, {
+      ...(minPatch !== undefined ? { minRate: minPatch } : {}),
+      ...(maxPatch !== undefined ? { maxRate: maxPatch } : {}),
+    });
+    const { repriced, push, pushTxt } = await rebaseAndPush(unitId);
+    const parts: string[] = [];
+    if (minPatch !== undefined)
+      parts.push(minPatch == null ? "min price → auto (80% of Base)" : `min price pinned at ₪${minPatch}`);
+    if (maxPatch !== undefined)
+      parts.push(maxPatch == null ? "max price → auto (120% of Base)" : `max price pinned at ₪${maxPatch}`);
+    logActivity({
+      department: "revenue",
+      worker: "Pricing Specialist",
+      message: `Rates Calendar · ${unitId}: ${parts.join(", ")} — ${repriced} future night(s) rebuilt (${pushTxt}).`,
+      level: push && !push.ok ? "warning" : "success",
+    });
+    return NextResponse.json({ ok: true, repriced, push });
   }
 
   // ---- range shape: { unitId, from, to, ... } --------------------------------

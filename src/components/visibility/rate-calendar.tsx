@@ -64,6 +64,9 @@ interface RateRow {
     currentRate: number;
     baseRate: number;
     minRate: number;
+    maxRate: number;
+    minRatePinned: boolean;
+    maxRatePinned: boolean;
     group: string | null;
     subgroup: string | null;
   };
@@ -357,6 +360,16 @@ export function RateCalendar() {
       await applyOverride({ unitId, baseRate: rate });
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to save base rate");
+    }
+  }
+
+  // Pin (or clear back to auto with null) a unit's price floor/ceiling.
+  async function saveMinMax(unitId: string, field: "minRate" | "maxRate", value: number | null) {
+    setError(null);
+    try {
+      await applyOverride({ unitId, [field]: value });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to save min/max price");
     }
   }
 
@@ -727,6 +740,8 @@ export function RateCalendar() {
             Click any night to open Date Specific Overrides — set a fixed or percent price, min/max
             bounds, minimum stay, or close a whole date range. Price, min-nights and closures are
             pushed straight to MiniHotel (Reverse ARI) on save; min/max bounds are local guardrails.
+            The Min/Max columns are each apartment&rsquo;s price floor/ceiling: blank = auto (80%/120%
+            of Base), a typed value pins the bound so Base edits no longer move it.
           </p>
         </CardHeader>
         <CardContent>
@@ -756,7 +771,25 @@ export function RateCalendar() {
                       <SortMark active={sort.key === "base"} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="sticky left-[17rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th
+                    className="sticky left-[17rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Min price (₪) — the floor every derived nightly price is clamped to. Blank = auto (80% of Base, follows Base edits); type a value to pin it. Discount rules (last-minute, occupancy…) can never price below it."
+                  >
+                    <span className="inline-flex flex-col items-center">
+                      Min
+                      <span className="text-[9px] font-normal">floor</span>
+                    </span>
+                  </th>
+                  <th
+                    className="sticky left-[22rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground"
+                    title="Max price (₪) — the ceiling every derived nightly price is clamped to. Blank = auto (120% of Base, follows Base edits); type a value to pin it."
+                  >
+                    <span className="inline-flex flex-col items-center">
+                      Max
+                      <span className="text-[9px] font-normal">ceiling</span>
+                    </span>
+                  </th>
+                  <th className="sticky left-[27rem] z-20 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -770,7 +803,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">est. −33%</span>
                     </button>
                   </th>
-                  <th className="sticky left-[22rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[32rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -784,7 +817,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">30N</span>
                     </button>
                   </th>
-                  <th className="sticky left-[25.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[35.5rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -798,7 +831,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">60N</span>
                     </button>
                   </th>
-                  <th className="sticky left-[29rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[39rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -812,7 +845,7 @@ export function RateCalendar() {
                       <span className="text-[9px] font-normal">90N</span>
                     </button>
                   </th>
-                  <th className="sticky left-[32.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground">
+                  <th className="sticky left-[42.5rem] z-20 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-2 text-center font-medium text-muted-foreground">
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
@@ -878,6 +911,32 @@ export function RateCalendar() {
                       />
                     </td>
                     <td className="sticky left-[17rem] z-10 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      <BoundRateCell
+                        value={row.unit.minRate}
+                        pinned={row.unit.minRatePinned}
+                        busy={busy}
+                        title={
+                          row.unit.minRatePinned
+                            ? `Min price pinned at ₪${row.unit.minRate} — stays put when Base changes. Clear the field to go back to auto (80% of Base).`
+                            : `Min price auto: ₪${row.unit.minRate} (80% of Base). Type a value to pin the floor — e.g. lower it so last-minute and occupancy discounts can show through.`
+                        }
+                        onSave={(n) => saveMinMax(row.unit.id, "minRate", n)}
+                      />
+                    </td>
+                    <td className="sticky left-[22rem] z-10 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-1.5 text-center align-middle">
+                      <BoundRateCell
+                        value={row.unit.maxRate}
+                        pinned={row.unit.maxRatePinned}
+                        busy={busy}
+                        title={
+                          row.unit.maxRatePinned
+                            ? `Max price pinned at ₪${row.unit.maxRate} — stays put when Base changes. Clear the field to go back to auto (120% of Base).`
+                            : `Max price auto: ₪${row.unit.maxRate} (120% of Base). Type a value to pin the ceiling.`
+                        }
+                        onSave={(n) => saveMinMax(row.unit.id, "maxRate", n)}
+                      />
+                    </td>
+                    <td className="sticky left-[27rem] z-10 w-20 min-w-[5rem] max-w-[5rem] bg-card px-1 py-1.5 text-center align-middle">
                       {row.monthlyEstimate ? (
                         <span
                           className="text-[11px] font-medium tabular-nums text-foreground"
@@ -889,16 +948,16 @@ export function RateCalendar() {
                         <span className="text-muted-foreground/50">—</span>
                       )}
                     </td>
-                    <td className="sticky left-[22rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[32rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
                       <OccPill v={row.occ30} />
                     </td>
-                    <td className="sticky left-[25.5rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[35.5rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
                       <OccPill v={row.occ60} />
                     </td>
-                    <td className="sticky left-[29rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[39rem] z-10 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-1.5 text-center align-middle">
                       <OccPill v={row.occ90} />
                     </td>
-                    <td className="sticky left-[32.5rem] z-10 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-1.5 text-center align-middle">
+                    <td className="sticky left-[42.5rem] z-10 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-1.5 text-center align-middle">
                       <RankCell rk={row.airbnbRank} />
                     </td>
                     {row.cells.map((c) => {
@@ -1073,6 +1132,55 @@ function BaseRateCell({ value, busy, onSave }: { value: number; busy: boolean; o
       inputMode="numeric"
       placeholder="—"
       title="Base rate (₪) — press Enter to save; derived prices rebuild from it"
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
+
+/** Editable price floor/ceiling pin. A typed value pins the bound (it survives
+ *  Base edits); an empty field is auto — the placeholder shows the value the
+ *  bound currently resolves to (80%/120% of Base). Clearing a pinned field
+ *  reverts the bound to auto. */
+function BoundRateCell({
+  value,
+  pinned,
+  busy,
+  title,
+  onSave,
+}: {
+  value: number;
+  pinned: boolean;
+  busy: boolean;
+  title: string;
+  onSave: (n: number | null) => void;
+}) {
+  const [v, setV] = useState(pinned && value ? String(value) : "");
+  useEffect(() => setV(pinned && value ? String(value) : ""), [pinned, value]);
+  const commit = () => {
+    const t = v.trim();
+    if (t === "") {
+      if (pinned) onSave(null); // cleared a pin — back to auto
+      return;
+    }
+    const n = Math.round(parseFloat(t));
+    if (!Number.isFinite(n) || n <= 0 || (pinned && n === value)) {
+      setV(pinned && value ? String(value) : "");
+      return;
+    }
+    onSave(n);
+  };
+  return (
+    <input
+      className={`${inputCls} w-[4.25rem] px-1.5 text-right tabular-nums`}
+      value={v}
+      disabled={busy}
+      inputMode="numeric"
+      placeholder={value ? String(value) : "—"}
+      title={title}
       onChange={(e) => setV(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {

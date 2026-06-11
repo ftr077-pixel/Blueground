@@ -69,6 +69,9 @@ export interface RateRow {
     | "currentRate"
     | "baseRate"
     | "minRate"
+    | "maxRate"
+    | "minRatePinned"
+    | "maxRatePinned"
     | "group"
     | "subgroup"
   >;
@@ -447,6 +450,9 @@ export function getCalendar(from: string, days: number): Calendar {
         currentRate: unit.currentRate,
         baseRate: unit.baseRate,
         minRate: unit.minRate,
+        maxRate: unit.maxRate,
+        minRatePinned: unit.minRatePinned,
+        maxRatePinned: unit.maxRatePinned,
         group: unit.group,
         subgroup: unit.subgroup,
       },
