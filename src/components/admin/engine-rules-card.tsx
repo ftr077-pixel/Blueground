@@ -109,6 +109,9 @@ interface Form {
   freezeOn: boolean;
   hoodSource: string;
   msFlavor: string;
+  recencyOn: boolean;
+  spOn: boolean;
+  spProfile: string;
   epfOn: boolean;
   epfMode: string;
   epfValue: string;
@@ -227,6 +230,8 @@ interface EffectiveConfig {
   };
   freezeUnavailable: { enabled: boolean };
   neighborhoodProfile: { source: string | null };
+  bookingRecency: { enabled: boolean };
+  seasonalProfile: { enabled: boolean; profile: string | null; mode: string; seasons: unknown[] };
   extraPersonFee: { enabled: boolean; mode: string; value: number; afterGuests: number };
   checkinCheckout: {
     enabled: boolean;
@@ -316,6 +321,32 @@ interface CicoProfile {
   archived: boolean;
   allowedCheckin: number[];
   allowedCheckout: number[];
+}
+
+interface SeasonRow {
+  name: string;
+  from: string;
+  to: string;
+  repeating: boolean;
+  min: string;
+  base: string;
+  max: string;
+  msProfile: string;
+  ppProfile: string;
+}
+interface SeasonalPayload {
+  mode: string;
+  seasons: Array<{
+    name: string;
+    from: string;
+    to: string;
+    repeating: boolean;
+    min: number | null;
+    base: number | null;
+    max: number | null;
+    minStayProfile: string | null;
+    pricingProfile: string | null;
+  }>;
 }
 
 interface WizardSuggestion {
@@ -424,6 +455,9 @@ function toForm(e: EffectiveConfig): Form {
     freezeOn: e.freezeUnavailable.enabled,
     hoodSource: e.neighborhoodProfile.source ?? "",
     msFlavor: e.minStayRules.recommendedFlavor || "mtr",
+    recencyOn: e.bookingRecency.enabled,
+    spOn: e.seasonalProfile.enabled,
+    spProfile: e.seasonalProfile.profile ?? "",
     epfOn: e.extraPersonFee.enabled,
     epfMode: e.extraPersonFee.mode || "fixed",
     epfValue:
@@ -528,6 +562,13 @@ export function EngineRulesCard() {
   const [tableData, setTableData] = useState<TableResp | null>(null);
   const [tableBusy, setTableBusy] = useState(false);
 
+  // Smart Presets state
+  const [presetChoice, setPresetChoice] = useState<{ experienced: boolean; propertyType: string } | null>(null);
+  const [presetList, setPresetList] = useState<Array<{ key: string; label: string; blurb: string; items: Array<{ label: string; why: string }> }>>([]);
+  const [presetType, setPresetType] = useState("mtr");
+  const [presetExp, setPresetExp] = useState(true);
+  const [presetLoaded, setPresetLoaded] = useState(false);
+
   // Min Stay Recommendation Engine review state
   const [recData, setRecData] = useState<{
     annualRecommendation: number;
@@ -540,6 +581,17 @@ export function EngineRulesCard() {
   const [cicoProfiles, setCicoProfiles] = useState<CicoProfile[]>([]);
   const [minStayProfiles, setMinStayProfiles] = useState<Array<{ name: string; archived: boolean }>>([]);
   const [obaProfiles, setObaProfiles] = useState<Array<{ name: string; archived: boolean }>>([]);
+  const [pricingProfiles, setPricingProfiles] = useState<Array<{ name: string; archived: boolean }>>([]);
+  const [seasonalProfiles, setSeasonalProfiles] = useState<
+    Array<{ name: string; archived: boolean; payload: SeasonalPayload }>
+  >([]);
+  const [ppSaveName, setPpSaveName] = useState("");
+  // Seasonal profile editor state
+  const [spEditName, setSpEditName] = useState("");
+  const [spEditMode, setSpEditMode] = useState("fixed");
+  const [spSeasons, setSpSeasons] = useState<SeasonRow[]>(
+    Array.from({ length: 4 }, () => ({ name: "", from: "", to: "", repeating: true, min: "", base: "", max: "", msProfile: "", ppProfile: "" })),
+  );
   const [cicoArchivedShown, setCicoArchivedShown] = useState(false);
   const [edName, setEdName] = useState("");
   const [edCheckin, setEdCheckin] = useState<boolean[]>(Array(7).fill(true));
@@ -589,14 +641,55 @@ export function EngineRulesCard() {
       cico: CicoProfile[];
       minStay?: Array<{ name: string; archived: boolean }>;
       oba?: Array<{ name: string; archived: boolean }>;
+      pricing?: Array<{ name: string; archived: boolean }>;
+      seasonal?: Array<{ name: string; archived: boolean; payload: SeasonalPayload }>;
     };
     setCicoProfiles(b.cico);
     setMinStayProfiles(b.minStay ?? []);
     setObaProfiles(b.oba ?? []);
+    setPricingProfiles(b.pricing ?? []);
+    setSeasonalProfiles(b.seasonal ?? []);
   }, []);
   useEffect(() => {
     loadProfiles(cicoArchivedShown).catch(() => undefined);
   }, [loadProfiles, cicoArchivedShown]);
+
+  useEffect(() => {
+    fetch("/api/pricing/presets", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((b: { choice: { experienced: boolean; propertyType: string } | null; presets: typeof presetList }) => {
+        setPresetChoice(b.choice);
+        setPresetList(b.presets);
+        if (b.choice) {
+          setPresetType(b.choice.propertyType);
+          setPresetExp(b.choice.experienced);
+        }
+        setPresetLoaded(true);
+      })
+      .catch(() => setPresetLoaded(true));
+  }, []);
+
+  async function presetsAction(body: Record<string, unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/pricing/presets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const b = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(b?.error || `request failed: ${res.status}`);
+      }
+      setPresetChoice({ experienced: presetExp, propertyType: presetType });
+      if (body.apply) await load(scope);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "preset action failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   if (err) return <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>;
   if (!f) return null;
@@ -723,6 +816,8 @@ export function EngineRulesCard() {
       },
       freezeUnavailable: { enabled: f.freezeOn },
       neighborhoodProfile: { source: f.hoodSource.trim() || null },
+      bookingRecency: { enabled: f.recencyOn },
+      seasonalProfile: { enabled: f.spOn, profile: f.spProfile || null },
       extraPersonFee: {
         enabled: f.epfOn,
         mode: f.epfMode === "percent" ? "percent" : "fixed",
@@ -1074,6 +1169,75 @@ export function EngineRulesCard() {
           </span>
         </div>
 
+        {presetLoaded && (
+          <div className={`${sectionBox} ${!presetChoice ? "border-primary/40 bg-primary/5" : ""}`}>
+            <span className={sectionHead}>
+              Smart Presets — {presetChoice ? "tailored recommendations by property type (editable any time)" : "tell us about your portfolio to get tailored customization recommendations"}
+            </span>
+            <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+              <label className="flex flex-col gap-1">
+                Property type
+                <select className={`${input} w-56`} value={presetType} onChange={(e) => setPresetType(e.target.value)}>
+                  {presetList.map((pr) => (
+                    <option key={pr.key} value={pr.key}>
+                      {pr.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-flex items-center gap-1.5 pb-1.5">
+                <input
+                  type="checkbox"
+                  checked={presetExp}
+                  onChange={(e) => setPresetExp(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                />
+                I&apos;ve used dynamic pricing before
+              </label>
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy}
+                onClick={() => presetsAction({ choice: { experienced: presetExp, propertyType: presetType } })}
+              >
+                Save choice
+              </button>
+              <button
+                type="button"
+                className={btn}
+                disabled={busy}
+                onClick={() =>
+                  presetsAction({ choice: { experienced: presetExp, propertyType: presetType }, apply: { scope } })
+                }
+              >
+                Apply preset to {scopeLabel}
+              </button>
+            </div>
+            {(() => {
+              const pr = presetList.find((x) => x.key === presetType);
+              if (!pr) return null;
+              return (
+                <div className="space-y-1">
+                  <p className="text-[10px] text-muted-foreground/80">{pr.blurb}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {pr.items.map((it) => (
+                      <span key={it.label} title={it.why} className="rounded-md border border-border px-2 py-1 text-[10px]">
+                        💡 {it.label}
+                      </span>
+                    ))}
+                  </div>
+                  {!presetExp && (
+                    <p className="text-[10px] text-muted-foreground/70">
+                      New to dynamic pricing: sensitivities soften one notch and the human gate
+                      tightens to ±10% until you build trust.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-x-5 gap-y-2">
           {toggle("Seasonality", "seasonalityOn")}
           {toggle("Demand / events", "demandOn")}
@@ -1087,6 +1251,7 @@ export function EngineRulesCard() {
           {toggle("Day-of-week", "dayOfWeekOn")}
           {toggle("LOS / quarter discount", "losOn")}
           {toggle("Freeze unavailable prices", "freezeOn")}
+          {toggle("Booking recency", "recencyOn")}
           {toggle("Pricing offset", "offsetOn")}
         </div>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
@@ -1807,6 +1972,174 @@ export function EngineRulesCard() {
               Profiles can&apos;t be deleted — archive instead. Removal semantics still apply: detach
               + push before disabling, or the last pushed restriction lingers on the PMS.
             </p>
+          </div>
+        </div>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Custom seasonal profile — named seasons whose min/base/max REPLACE the listing&apos;s
+            for their dates (blank = listing default; percent mode = % change on listing values),
+            each optionally carrying a Min Stay Profile and a Pricing Profile. Caution: a seasonal
+            base stacks with the seasonality factor — consider sensitivity &quot;No Seasonality&quot;.
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {toggle("Apply seasonal profile", "spOn")}
+            <label className="flex flex-col gap-1">
+              Attached profile
+              <select className={`${input} w-48`} value={f.spProfile} onChange={(e) => set("spProfile", e.target.value)}>
+                <option value="">— none —</option>
+                {seasonalProfiles.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name}
+                    {s.archived ? " (archived — still applies)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="space-y-2 rounded-md border border-border/40 p-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-1">
+                Profile editor
+                <input className={`${input} w-40`} placeholder="Profile name" value={spEditName} onChange={(e) => setSpEditName(e.target.value)} />
+              </label>
+              <select
+                className={`${input} w-44`}
+                value=""
+                onChange={(e) => {
+                  const sp = seasonalProfiles.find((x) => x.name === e.target.value);
+                  if (!sp) return;
+                  setSpEditName(sp.name);
+                  setSpEditMode(sp.payload.mode === "percent" ? "percent" : "fixed");
+                  setSpSeasons(
+                    Array.from({ length: 4 }, (_, i) => {
+                      const s = sp.payload.seasons[i];
+                      if (!s) return { name: "", from: "", to: "", repeating: true, min: "", base: "", max: "", msProfile: "", ppProfile: "" };
+                      return {
+                        name: s.name,
+                        from: s.from,
+                        to: s.to,
+                        repeating: s.repeating,
+                        min: s.min == null ? "" : String(s.min),
+                        base: s.base == null ? "" : String(s.base),
+                        max: s.max == null ? "" : String(s.max),
+                        msProfile: s.minStayProfile ?? "",
+                        ppProfile: s.pricingProfile ?? "",
+                      };
+                    }),
+                  );
+                }}
+              >
+                <option value="">Load existing…</option>
+                {seasonalProfiles.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              <label className="flex flex-col gap-1">
+                Values are
+                <select className={`${input} w-36`} value={spEditMode} onChange={(e) => setSpEditMode(e.target.value)}>
+                  <option value="fixed">Fixed ₪</option>
+                  <option value="percent">% of listing values</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy || !spEditName.trim()}
+                onClick={() =>
+                  profilesAction({
+                    saveSeasonal: {
+                      name: spEditName.trim(),
+                      payload: {
+                        mode: spEditMode === "percent" ? "percent" : "fixed",
+                        seasons: spSeasons
+                          .filter((s) => s.name.trim() !== "" && s.from.trim() !== "" && s.to.trim() !== "")
+                          .map((s) => ({
+                            name: s.name.trim(),
+                            from: s.from.trim(),
+                            to: s.to.trim(),
+                            repeating: s.repeating,
+                            min: s.min.trim() === "" ? null : parseFloat(s.min),
+                            base: s.base.trim() === "" ? null : parseFloat(s.base),
+                            max: s.max.trim() === "" ? null : parseFloat(s.max),
+                            minStayProfile: s.msProfile || null,
+                            pricingProfile: s.ppProfile || null,
+                          })),
+                      },
+                    },
+                  })
+                }
+              >
+                Save seasonal profile
+              </button>
+            </div>
+            <div className="text-[10px] text-muted-foreground/70">
+              Repeating seasons use MM-DD (annual, within Jan–Dec; split year-spanning seasons in
+              two); non-repeating use YYYY-MM-DD and take preference.
+            </div>
+            {spSeasons.map((s, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                <input className={`${input} w-28`} placeholder={`Season ${i + 1}`} value={s.name}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+                <input className={`${input} w-24`} placeholder="MM-DD" value={s.from}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, from: e.target.value } : x)))} />
+                →
+                <input className={`${input} w-24`} placeholder="MM-DD" value={s.to}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, to: e.target.value } : x)))} />
+                <label className="inline-flex items-center gap-1">
+                  <input type="checkbox" className="h-3 w-3 accent-[hsl(var(--primary))]" checked={s.repeating}
+                    onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, repeating: e.target.checked } : x)))} />
+                  yearly
+                </label>
+                min
+                <input className={`${input} w-16`} value={s.min}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, min: e.target.value } : x)))} />
+                base
+                <input className={`${input} w-16`} value={s.base}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, base: e.target.value } : x)))} />
+                max
+                <input className={`${input} w-16`} value={s.max}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, max: e.target.value } : x)))} />
+                <select className={`${input} w-32`} value={s.msProfile}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, msProfile: e.target.value } : x)))}>
+                  <option value="">min-stay: default</option>
+                  {minStayProfiles.map((mp) => (
+                    <option key={mp.name} value={mp.name}>{mp.name}</option>
+                  ))}
+                </select>
+                <select className={`${input} w-32`} value={s.ppProfile}
+                  onChange={(e) => setSpSeasons(spSeasons.map((x, j) => (j === i ? { ...x, ppProfile: e.target.value } : x)))}>
+                  <option value="">pricing: default</option>
+                  {pricingProfiles.map((pp) => (
+                    <option key={pp.name} value={pp.name}>{pp.name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+            <div className="flex flex-wrap items-center gap-2 border-t border-border/40 pt-2">
+              <input className={`${input} w-44`} placeholder="Save 11 sections as pricing profile…" value={ppSaveName} onChange={(e) => setPpSaveName(e.target.value)} />
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy || !ppSaveName.trim()}
+                onClick={() => {
+                  const patch = buildPatch() as Record<string, unknown>;
+                  const keys = ["lastMinute", "occupancy", "safetyMinPrice", "orphanDayPrices", "dayOfWeek", "portfolioOccupancy", "demandEvents", "farOut", "seasonality", "pricingOffset", "smoothing", "extraPersonFee"];
+                  const rules: Record<string, unknown> = {};
+                  for (const k of keys) if (patch[k] !== undefined) rules[k] = patch[k];
+                  profilesAction({ savePricing: { name: ppSaveName.trim(), rules } }).then(() => setPpSaveName(""));
+                }}
+              >
+                Save as pricing profile
+              </button>
+              <span className="text-[10px] text-muted-foreground/70">
+                A Pricing Profile bundles the 11 pricing customizations as currently set above
+                (fixed last-minute/orphan prices are stripped — one profile prices many listings);
+                attach it to seasons via the season rows.
+              </span>
+            </div>
           </div>
         </div>
 

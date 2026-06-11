@@ -16,6 +16,7 @@ import {
   lastMinuteRule,
   adjacentRule,
   orphanDayPriceRule,
+  bookingRecencyRule,
   resolveAdjustmentStack,
   pricingOffsetRule,
   resolveMinPrice,
@@ -218,6 +219,22 @@ function resolveMinStay(
   return { minStay: Math.min(rec, cap), source };
 }
 
+/** The Custom Seasonal Profile season containing `date`, if any. Non-repeating
+ *  seasons (YYYY-MM-DD) take preference over repeating ones (MM-DD, annual). */
+function seasonFor(cfg: typeof PRICING_RULES, date: Date) {
+  const sp = cfg.seasonalProfile;
+  if (!sp.enabled || sp.seasons.length === 0) return null;
+  const iso = date.toISOString().slice(0, 10);
+  const mmdd = iso.slice(5);
+  for (const s of sp.seasons) {
+    if (!s.repeating && iso >= s.from && iso <= s.to) return s;
+  }
+  for (const s of sp.seasons) {
+    if (s.repeating && mmdd >= s.from && mmdd <= s.to) return s;
+  }
+  return null;
+}
+
 /** The core per-night pipeline, BEFORE smoothing and rounding (quoteNight wraps
  *  this — smoothing needs the week's unsmoothed rates). */
 function quoteNightBase(
@@ -229,6 +246,24 @@ function quoteNightBase(
 ): DateQuote {
   const leadDays = leadDaysFrom(asOf, date);
 
+  // Custom Seasonal Profile: the season's min/base/max REPLACE the listing's
+  // for its dates (blank = listing default; percent mode = % change on the
+  // listing values), and a season's Pricing/Min-Stay Profiles swap in a
+  // pre-resolved config (seasonal customizations supersede the scope's).
+  const season = seasonFor(cfg, date);
+  if (season) {
+    if (season.cfg) cfg = season.cfg;
+    const pctMode = cfg.seasonalProfile.mode === "percent" || season.cfg?.seasonalProfile.mode === "percent";
+    const apply = (v: number | null, baseVal: number) =>
+      v == null ? baseVal : Math.round(pctMode ? baseVal * (1 + v / 100) : v);
+    unit = {
+      ...unit,
+      baseRate: apply(season.base, unit.baseRate),
+      minRate: apply(season.min, unit.minRate),
+      maxRate: apply(season.max, unit.maxRate),
+    };
+  }
+
   const factors: FactorResult[] = [];
   const add = (r: FactorResult | null) => {
     if (r) factors.push(r);
@@ -238,6 +273,7 @@ function quoteNightBase(
   add(pacingRule(unit, market, cfg));
   add(occupancyRule(unit, date, leadDays, market, cfg));
   add(portfolioOccupancyRule(unit, date, leadDays, market, cfg));
+  add(bookingRecencyRule(unit, date, leadDays, market, cfg));
   add(farOutRule(unit, date, leadDays, market, cfg));
   // Gap/lead-time adjustment class — PriceLabs stacking: largest discount wins,
   // premiums stack, a mix applies largest discount + every premium. FIXED
@@ -248,8 +284,10 @@ function quoteNightBase(
   const lastMin = lastMinuteRule(unit, date, leadDays, market, cfg);
   const stackCandidates: (FactorResult | null)[] = [adjacentRule(unit, date, market, cfg)];
   let pin: number | null = null;
+  let lmPinned = false;
   if (lastMin?.pin != null) {
     pin = lastMin.pin;
+    lmPinned = true;
     factors.push(lastMin);
   } else if (lastMin) {
     stackCandidates.push(lastMin);
@@ -283,7 +321,13 @@ function quoteNightBase(
 
   let rate = rawRate;
   let bound: DateQuote["bound"] = null;
-  if (rate < minPrice) {
+  if (lmPinned) {
+    // A FIXED last-minute price is one of the documented below-minimum
+    // exceptions ("Customizations which allow Below Minimum Prices") — it's a
+    // manually set price, so neither floor nor ceiling clamps it. The orphan
+    // fixed price is NOT on that list and stays clamped.
+    bound = null;
+  } else if (rate < minPrice) {
     rate = minPrice;
     bound = "floor";
   } else if (rate > unit.maxRate) {
@@ -515,6 +559,10 @@ export function activeRuleSummary(
     { key: "checkinCheckout", label: "Check-in/out restriction", enabled: cfg.checkinCheckout.enabled, note: cfg.checkinCheckout.profile ? `profile "${cfg.checkinCheckout.profile}" (not pushed to MiniHotel)` : "no profile attached" },
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max + advanced min-price rules" },
     { key: "safetyMinPrice", label: "Safety minimum price", enabled: cfg.safetyMinPrice.enabled, note: `LY same-weekday ADR ×${(cfg.safetyMinPrice.pctOfLastYear * 100).toFixed(0)}% — raises-only, needs reservation history` },
+    { key: "bookingRecency", label: "Booking recency", enabled: cfg.bookingRecency.enabled, note: "auto 5–15% on cold unbooked listings, next 30d, respects min" },
+    { key: "freezeUnavailable", label: "Freeze unavailable nights", enabled: cfg.freezeUnavailable.enabled, note: "booked/blocked nights keep their last synced price" },
+    { key: "neighborhoodProfile", label: "Market data source", enabled: cfg.neighborhoodProfile.source != null, note: cfg.neighborhoodProfile.source ? `profile "${cfg.neighborhoodProfile.source}"` : "listing's own neighborhood" },
+    { key: "seasonalProfile", label: "Custom seasonal profile", enabled: cfg.seasonalProfile.enabled, note: cfg.seasonalProfile.profile ? `"${cfg.seasonalProfile.profile}" — ${cfg.seasonalProfile.seasons.length} season(s), ${cfg.seasonalProfile.mode}` : "no profile attached" },
     { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
     { key: "rounding", label: "Rounding", enabled: cfg.rounding.enabled, note: `last ${cfg.rounding.digits} digit(s) → ${cfg.rounding.endings.join("/")}` },
     { key: "smoothing", label: "Smoothing", enabled: cfg.smoothing.enabled, note: cfg.smoothing.mode === "week" ? "uniform weekly rate" : "weekday/weekend averaged separately" },

@@ -262,6 +262,34 @@ export function realizedNightlyRates(unitId: string, from: string, to: string): 
 }
 
 /**
+ * Booking-recency signal for one unit (Booking Recency Factor): days since the
+ * unit's latest live reservation row was received, plus the age of the
+ * reservation FEED overall (days since anything synced). Null when no feed
+ * data exists at all — the factor stays inert without fresh reservation data.
+ * `updated_at` is our proxy for booking receipt (we don't get created-at).
+ */
+export function bookingRecency(unitId: string): { lastBookedDaysAgo: number; feedAgeDays: number } | null {
+  const db = getDb();
+  const feed = db.prepare("SELECT MAX(updated_at) m FROM reservation").get() as { m: string | null };
+  if (!feed.m) return null;
+  const DAY = 86_400_000;
+  const feedAgeDays = Math.max(0, (Date.now() - Date.parse(feed.m)) / DAY);
+  const rows = db
+    .prepare("SELECT updated_at, status FROM reservation WHERE unit_id = ? ORDER BY updated_at DESC LIMIT 50")
+    .all(unitId) as Array<{ updated_at: string | null; status: string | null }>;
+  let last: number | null = null;
+  for (const r of rows) {
+    if (!r.updated_at) continue;
+    if (r.status && CANCELLED_RE.test(r.status)) continue;
+    last = Date.parse(r.updated_at);
+    break;
+  }
+  // No live reservation ever recorded for this unit: treat as "very stale".
+  const lastBookedDaysAgo = last == null ? 9999 : Math.max(0, (Date.now() - last) / DAY);
+  return { lastBookedDaysAgo, feedAgeDays };
+}
+
+/**
  * Actual NET room revenue per calendar month (YYYY-MM), recognized per night across
  * each stay. Cancelled / no-show reservations and test apartments are excluded.
  */

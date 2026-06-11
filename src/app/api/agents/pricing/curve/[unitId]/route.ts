@@ -25,6 +25,7 @@ export async function GET(req: Request, { params }: { params: { unitId: string }
   const curve = quoteCurve(unit, marketProviders(), new Date(), 7, cfg).map((q) => ({
     date: q.date,
     leadDays: q.leadDays,
+    base: q.base,
     rate: q.rate,
     rawRate: q.rawRate,
     bound: q.bound,
