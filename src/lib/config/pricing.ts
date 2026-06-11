@@ -135,6 +135,41 @@ const obaBands = (adjusts: [number, number, number, number]): OccupancyBand[] =>
   { upTo: 1.01, adjust: adjusts[3], label: "full 95%+" },
 ];
 
+/** Per-listing OBA preset profiles (PriceLabs's named options; exact matrices
+ *  are ours, shaped to each profile's description). marketDriven is computed,
+ *  not a matrix. */
+export const OBA_PRESETS: Record<
+  "default" | "aggressive" | "superAggressive" | "stepLastMinute" | "farOutPremium",
+  PortfolioObaWindow[]
+> = {
+  default: [
+    { uptoDays: 15, bands: obaBands([-0.15, -0.05, 0.05, 0.1]) },
+    { uptoDays: 30, bands: obaBands([-0.1, -0.03, 0.03, 0.08]) },
+    { uptoDays: 9999, bands: obaBands([-0.05, 0, 0.03, 0.05]) },
+  ],
+  aggressive: [
+    { uptoDays: 15, bands: obaBands([-0.3, -0.1, 0.08, 0.15]) },
+    { uptoDays: 30, bands: obaBands([-0.2, -0.05, 0.05, 0.12]) },
+    { uptoDays: 9999, bands: obaBands([-0.1, 0, 0.05, 0.08]) },
+  ],
+  superAggressive: [
+    { uptoDays: 15, bands: obaBands([-0.45, -0.2, 0.08, 0.15]) },
+    { uptoDays: 30, bands: obaBands([-0.35, -0.12, 0.05, 0.12]) },
+    { uptoDays: 9999, bands: obaBands([-0.2, -0.05, 0.05, 0.08]) },
+  ],
+  stepLastMinute: [
+    { uptoDays: 7, bands: obaBands([-0.25, -0.25, 0, 0]) },
+    { uptoDays: 14, bands: obaBands([-0.15, -0.15, 0, 0]) },
+    { uptoDays: 30, bands: obaBands([-0.08, -0.08, 0, 0]) },
+    { uptoDays: 9999, bands: obaBands([0, 0, 0, 0]) },
+  ],
+  farOutPremium: [
+    { uptoDays: 60, bands: obaBands([0, 0, 0, 0]) },
+    { uptoDays: 120, bands: obaBands([0, 0, 0.05, 0.08]) },
+    { uptoDays: 9999, bands: obaBands([0.05, 0.05, 0.1, 0.15]) },
+  ],
+};
+
 /** PriceLabs' pre-filled Portfolio OBA profiles by booking-window range. The
  *  exact matrices are ours; the windows mirror the documented targets (short
  *  11–20d, medium 16–30d, long 31–60d to reach ~50% occupancy). */
@@ -169,7 +204,27 @@ export interface PricingRulesConfig {
    *  Booking.com hotel feed.) */
   demandEvents: { enabled: boolean; sensitivity: SeasonalitySensitivity; cap: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
-  occupancy: { enabled: boolean; bands: OccupancyBand[] };
+  /** Occupancy-Based Adjustments: the listing's OWN occupancy over each booking
+   *  window (booked+blocked nights ÷ window nights — MiniHotel isn't in
+   *  PriceLabs's blocked-dates exception list) drives a per-window band matrix.
+   *  Profiles: default / aggressive / superAggressive / stepLastMinute /
+   *  farOutPremium presets, marketDriven (own vs market occupancy, next 60d,
+   *  discount ≤20% / premium ≤15%), or a named custom profile (updating a
+   *  profile propagates everywhere it's attached). */
+  occupancy: {
+    enabled: boolean;
+    profile:
+      | "default"
+      | "marketDriven"
+      | "aggressive"
+      | "stepLastMinute"
+      | "farOutPremium"
+      | "superAggressive"
+      | "custom";
+    /** Named custom profile (repos/profiles); inline windows used when null. */
+    customName: string | null;
+    windows: PortfolioObaWindow[];
+  };
   /** Far Out Prices: gradual ramp, flat premium/discount beyond a threshold, or
    *  market-driven (flavored; capped at ±20% and never before 60 days out —
    *  PriceLabs's documented limits for the market mode). `cap` is signed. */
@@ -224,16 +279,37 @@ export interface PricingRulesConfig {
     value: number;
     afterGuests: number;
   };
-  /** Check-in/Check-out restrictions via named profiles (see repos/profiles).
-   *  allowedCheckin/out are resolved from the attached profile at read time;
-   *  all days when no profile. Engine-side restriction — our MiniHotel Reverse
-   *  ARI contract (§4.2) has no verified CTA/CTD field, so this is not pushed. */
+  /** Check-in/Check-out restrictions: a named profile OR inline day lists
+   *  (profile wins when attached), optional last-minute rules that swap the day
+   *  lists near arrival, and the two Smart options — block check-ins/outs that
+   *  would create short orphan gaps, and re-open days adjacent to bookings.
+   *  Engine-side restriction — our MiniHotel Reverse ARI contract (§4.2) has no
+   *  verified CTA/CTD field, so this is not pushed. */
   checkinCheckout: {
     enabled: boolean;
     profile: string | null;
     allowedCheckin: number[];
     allowedCheckout: number[];
+    /** Up to 3: different day lists within N days of arrival. */
+    lastMinute: Array<{ withinDays: number; checkin: number[]; checkout: number[] }>;
+    smart: {
+      /** Block check-ins/check-outs that would CREATE a gap of ≤ maxGapNights
+       *  (only beyond `beyondDays` from today). */
+      blockGapCreating: boolean;
+      maxGapNights: number;
+      beyondDays: number;
+      /** Re-open check-in/check-out on nights flush against an existing booking. */
+      allowAdjacent: boolean;
+    };
   };
+  /** Rounding (Advanced): snap the FINAL price's trailing `digits` digits to the
+   *  nearest allowed ending. Applied last, after the offset; still respects the
+   *  min/max bounds, and any pinned fixed price bypasses it. */
+  rounding: { enabled: boolean; digits: number; endings: number[] };
+  /** Smoothing (Advanced): average nightly rates across the week containing the
+   *  date — whole week or weekdays/weekends separately (per the Weekend Days
+   *  customization) — for a uniform guest-facing rate. Pinned prices bypass it. */
+  smoothing: { enabled: boolean; mode: "week" | "split"; weekStart: number };
   pricingOffset: {
     enabled: boolean;
     mode: "percent" | "fixed";
@@ -291,6 +367,10 @@ export interface PricingRulesConfig {
    *  order lives in engine.resolveMinStay). MiniHotel's MinimumNights field is
    *  min-stay-THROUGH semantics. */
   minStayRules: {
+    /** Named Min Stay Profile: when attached, the profile's rules REPLACE this
+     *  section wholesale (all-or-nothing — PriceLabs profile semantics). The
+     *  per-unit lowestMinStay floor still applies regardless. */
+    profile: string | null;
     /** recommended = engine-driven (demand tiers + market median); custom = the rules below. */
     mode: "recommended" | "custom";
     /** Highest Minimum Stay Allowed — recommendations never exceed this. */
@@ -349,15 +429,13 @@ export const PRICING_RULES: PricingRulesConfig = {
     sensitivity: 0.1,
     cap: 0.1,
   },
-  /** Occupancy-based adjustment bands (PriceLabs OBA). */
+  /** Occupancy-based adjustments (PriceLabs OBA) — the listing's own window
+   *  occupancy drives per-window bands; MTR default is gentler than PL's. */
   occupancy: {
     enabled: true,
-    bands: [
-      { upTo: 0.5, adjust: -0.05, label: "soft <50%" },
-      { upTo: 0.8, adjust: 0.0, label: "healthy 50–80%" },
-      { upTo: 0.95, adjust: 0.05, label: "tight 80–95%" },
-      { upTo: 1.01, adjust: 0.1, label: "full 95%+" },
-    ] as OccupancyBand[],
+    profile: "default",
+    customName: null,
+    windows: OBA_PRESETS.default,
   },
   /** Far-out premium: distant dates earn a gradual uplift (protects future inventory). */
   farOut: {
@@ -411,13 +489,18 @@ export const PRICING_RULES: PricingRulesConfig = {
     value: 0,
     afterGuests: 2,
   },
-  /** No restriction until a profile is attached (all days bookable). */
+  /** No restriction until a profile is attached or days are narrowed. */
   checkinCheckout: {
     enabled: false,
     profile: null,
     allowedCheckin: [0, 1, 2, 3, 4, 5, 6],
     allowedCheckout: [0, 1, 2, 3, 4, 5, 6],
+    lastMinute: [],
+    smart: { blockGapCreating: false, maxGapNights: 1, beyondDays: 30, allowAdjacent: false },
   },
+  /** Matches the engine's historical ₪5 step (digits=1, endings 0/5). */
+  rounding: { enabled: true, digits: 1, endings: [0, 5] },
+  smoothing: { enabled: false, mode: "week", weekStart: 5 },
   /** Pricing offset (PriceLabs): a final fixed/percent nudge applied AFTER all
    *  other customizations — including the floor/ceiling clamp and fixed-price
    *  overrides — so it can take the pushed rate outside the unit's min/max.
@@ -451,6 +534,7 @@ export const PRICING_RULES: PricingRulesConfig = {
    *  until reservation history exists. */
   safetyMinPrice: { enabled: true, pctOfLastYear: 1.1 },
   minStayRules: {
+    profile: null,
     mode: "recommended",
     highestAllowed: 90,
     custom: { rule: "fixed", weekday: 30, weekend: 30, bookingValue: 0 },

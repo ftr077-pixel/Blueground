@@ -153,6 +153,28 @@ interface Form {
   msOrphanMaxGap: string;
   msOrphanLowest: string;
   msAdaptiveOn: boolean;
+  msProfile: string;
+  // Per-listing OBA
+  obaProfile: string;
+  obaCustomName: string;
+  obaWindows: ObaRow[];
+  // CICO extensions
+  cicoIn: boolean[];
+  cicoOut: boolean[];
+  cicoLmWithin: string;
+  cicoLmIn: boolean[];
+  cicoLmOut: boolean[];
+  cicoSmartBlock: boolean;
+  cicoSmartMaxGap: string;
+  cicoSmartBeyond: string;
+  cicoSmartAdjacent: boolean;
+  // Rounding & smoothing
+  roundOn: boolean;
+  roundDigits: string;
+  roundEndings: string;
+  smoothOn: boolean;
+  smoothMode: string;
+  smoothWeekStart: string;
 }
 
 interface EffectiveConfig {
@@ -161,7 +183,12 @@ interface EffectiveConfig {
   demandEvents: { enabled: boolean; sensitivity: string; cap: number };
   safetyMinPrice: { enabled: boolean; pctOfLastYear: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
-  occupancy: { enabled: boolean };
+  occupancy: {
+    enabled: boolean;
+    profile: string;
+    customName: string | null;
+    windows: Array<{ uptoDays: number; bands: Array<{ upTo: number; adjust: number; label: string }> }>;
+  };
   farOut: {
     enabled: boolean;
     mode: string;
@@ -188,7 +215,16 @@ interface EffectiveConfig {
     quarterlyDiscountPct: number;
   };
   extraPersonFee: { enabled: boolean; mode: string; value: number; afterGuests: number };
-  checkinCheckout: { enabled: boolean; profile: string | null };
+  checkinCheckout: {
+    enabled: boolean;
+    profile: string | null;
+    allowedCheckin: number[];
+    allowedCheckout: number[];
+    lastMinute: Array<{ withinDays: number; checkin: number[]; checkout: number[] }>;
+    smart: { blockGapCreating: boolean; maxGapNights: number; beyondDays: number; allowAdjacent: boolean };
+  };
+  rounding: { enabled: boolean; digits: number; endings: number[] };
+  smoothing: { enabled: boolean; mode: string; weekStart: number };
   pricingOffset: { enabled: boolean; mode: "percent" | "fixed"; value: number };
   weekend: { days: number[] };
   orphanDayPrices: {
@@ -213,6 +249,7 @@ interface EffectiveConfig {
     orphan: { enabled: boolean; mode: string; value: number };
   };
   minStayRules: {
+    profile: string | null;
     mode: string;
     highestAllowed: number;
     custom: { rule: string; weekday: number; weekend: number; bookingValue: number };
@@ -411,6 +448,30 @@ function toForm(e: EffectiveConfig): Form {
     msOrphanMaxGap: String(e.minStayRules.orphanGap.maxGapNights),
     msOrphanLowest: String(e.minStayRules.orphanGap.lowestAllowed),
     msAdaptiveOn: e.minStayRules.adaptiveOccupancy.enabled,
+    msProfile: e.minStayRules.profile ?? "",
+    obaProfile: e.occupancy.profile || "default",
+    obaCustomName: e.occupancy.customName ?? "",
+    obaWindows: [0, 1, 2].map((i) => {
+      const w = e.occupancy.windows[i];
+      if (!w) return { uptoDays: "", soft: "", healthy: "", tight: "", full: "" };
+      const adj = (j: number) => (w.bands[j] ? pct(w.bands[j].adjust) : "0");
+      return { uptoDays: String(w.uptoDays), soft: adj(0), healthy: adj(1), tight: adj(2), full: adj(3) };
+    }),
+    cicoIn: DOW.map((_, i) => e.checkinCheckout.allowedCheckin.includes(i)),
+    cicoOut: DOW.map((_, i) => e.checkinCheckout.allowedCheckout.includes(i)),
+    cicoLmWithin: e.checkinCheckout.lastMinute[0] ? String(e.checkinCheckout.lastMinute[0].withinDays) : "",
+    cicoLmIn: DOW.map((_, i) => e.checkinCheckout.lastMinute[0]?.checkin.includes(i) ?? true),
+    cicoLmOut: DOW.map((_, i) => e.checkinCheckout.lastMinute[0]?.checkout.includes(i) ?? true),
+    cicoSmartBlock: e.checkinCheckout.smart.blockGapCreating,
+    cicoSmartMaxGap: String(e.checkinCheckout.smart.maxGapNights),
+    cicoSmartBeyond: String(e.checkinCheckout.smart.beyondDays),
+    cicoSmartAdjacent: e.checkinCheckout.smart.allowAdjacent,
+    roundOn: e.rounding.enabled,
+    roundDigits: String(e.rounding.digits),
+    roundEndings: e.rounding.endings.join(","),
+    smoothOn: e.smoothing.enabled,
+    smoothMode: e.smoothing.mode || "week",
+    smoothWeekStart: String(e.smoothing.weekStart),
   };
 }
 
@@ -440,12 +501,16 @@ export function EngineRulesCard() {
   const [tableData, setTableData] = useState<TableResp | null>(null);
   const [tableBusy, setTableBusy] = useState(false);
 
-  // Check-in/Check-out profiles state
+  // Check-in/Check-out + Min Stay + OBA profiles state
   const [cicoProfiles, setCicoProfiles] = useState<CicoProfile[]>([]);
+  const [minStayProfiles, setMinStayProfiles] = useState<Array<{ name: string; archived: boolean }>>([]);
+  const [obaProfiles, setObaProfiles] = useState<Array<{ name: string; archived: boolean }>>([]);
   const [cicoArchivedShown, setCicoArchivedShown] = useState(false);
   const [edName, setEdName] = useState("");
   const [edCheckin, setEdCheckin] = useState<boolean[]>(Array(7).fill(true));
   const [edCheckout, setEdCheckout] = useState<boolean[]>(Array(7).fill(true));
+  const [msSaveName, setMsSaveName] = useState("");
+  const [obaSaveName, setObaSaveName] = useState("");
 
   // Preview Prices Graph state
   const [pvUnit, setPvUnit] = useState("");
@@ -485,8 +550,14 @@ export function EngineRulesCard() {
       cache: "no-store",
     });
     if (!res.ok) return;
-    const b = (await res.json()) as { cico: CicoProfile[] };
+    const b = (await res.json()) as {
+      cico: CicoProfile[];
+      minStay?: Array<{ name: string; archived: boolean }>;
+      oba?: Array<{ name: string; archived: boolean }>;
+    };
     setCicoProfiles(b.cico);
+    setMinStayProfiles(b.minStay ?? []);
+    setObaProfiles(b.oba ?? []);
   }, []);
   useEffect(() => {
     loadProfiles(cicoArchivedShown).catch(() => undefined);
@@ -499,7 +570,7 @@ export function EngineRulesCard() {
     setF((c) => (c ? { ...c, [k]: v } : c));
     setPvStale(true);
   };
-  const setRow = <T,>(k: "orphanRanges" | "pobaWindows" | "msLm", i: number, field: keyof T, v: string) => {
+  const setRow = <T,>(k: "orphanRanges" | "pobaWindows" | "obaWindows" | "msLm", i: number, field: keyof T, v: string) => {
     setF((c) => {
       if (!c) return c;
       const rows = [...(c[k] as unknown as T[])];
@@ -538,7 +609,7 @@ export function EngineRulesCard() {
       </select>
     </label>
   );
-  const cell = (k: "orphanRanges" | "pobaWindows" | "msLm", i: number, field: string, v: string, w = "w-16") => (
+  const cell = (k: "orphanRanges" | "pobaWindows" | "obaWindows" | "msLm", i: number, field: string, v: string, w = "w-16") => (
     <input
       className={`${input} ${w}`}
       value={v}
@@ -557,7 +628,25 @@ export function EngineRulesCard() {
       demandEvents: { enabled: f.demandOn, sensitivity: f.demandSens, cap: frac(f.demandCapPct) },
       safetyMinPrice: { enabled: f.smpOn, pctOfLastYear: frac(f.smpPct) },
       pacing: { enabled: f.pacingOn, sensitivity: frac(f.pacingSensPct), cap: frac(f.pacingCapPct) },
-      occupancy: { enabled: f.occupancyOn },
+      occupancy: {
+        enabled: f.occupancyOn,
+        profile: f.obaProfile,
+        customName: f.obaProfile === "custom" ? f.obaCustomName.trim() || null : null,
+        windows:
+          f.obaProfile === "custom" && !f.obaCustomName.trim()
+            ? f.obaWindows
+                .filter((w) => w.uptoDays.trim() !== "")
+                .map((w) => ({
+                  uptoDays: int(w.uptoDays, 9999),
+                  bands: [
+                    { upTo: 0.5, adjust: frac(w.soft), label: "soft <50%" },
+                    { upTo: 0.8, adjust: frac(w.healthy), label: "healthy 50–80%" },
+                    { upTo: 0.95, adjust: frac(w.tight), label: "tight 80–95%" },
+                    { upTo: 1.01, adjust: frac(w.full), label: "full 95%+" },
+                  ],
+                }))
+            : undefined,
+      },
       farOut: {
         enabled: f.farOutOn,
         mode: f.farOutMode,
@@ -598,6 +687,37 @@ export function EngineRulesCard() {
       checkinCheckout: {
         enabled: f.cicoOn,
         profile: f.cicoProfile || null,
+        allowedCheckin: f.cicoIn.flatMap((on, i) => (on ? [i] : [])),
+        allowedCheckout: f.cicoOut.flatMap((on, i) => (on ? [i] : [])),
+        lastMinute:
+          f.cicoLmWithin.trim() === ""
+            ? []
+            : [
+                {
+                  withinDays: int(f.cicoLmWithin, 7),
+                  checkin: f.cicoLmIn.flatMap((on, i) => (on ? [i] : [])),
+                  checkout: f.cicoLmOut.flatMap((on, i) => (on ? [i] : [])),
+                },
+              ],
+        smart: {
+          blockGapCreating: f.cicoSmartBlock,
+          maxGapNights: int(f.cicoSmartMaxGap, 1),
+          beyondDays: int(f.cicoSmartBeyond, 30),
+          allowAdjacent: f.cicoSmartAdjacent,
+        },
+      },
+      rounding: {
+        enabled: f.roundOn,
+        digits: int(f.roundDigits, 1),
+        endings: f.roundEndings
+          .split(",")
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((x) => Number.isFinite(x)),
+      },
+      smoothing: {
+        enabled: f.smoothOn,
+        mode: f.smoothMode === "split" ? "split" : "week",
+        weekStart: int(f.smoothWeekStart, 5),
       },
       pricingOffset: {
         enabled: f.offsetOn,
@@ -652,6 +772,7 @@ export function EngineRulesCard() {
         orphan: { enabled: f.mpOrphanOn, mode: f.mpOrphanMode, value: mpv(f.mpOrphanMode, f.mpOrphanValue) },
       },
       minStayRules: {
+        profile: f.msProfile || null,
         mode: f.msMode === "custom" ? "custom" : "recommended",
         highestAllowed: int(f.msHighest, 90),
         custom: {
@@ -932,6 +1053,114 @@ export function EngineRulesCard() {
 
         <div className={sectionBox}>
           <span className={sectionHead}>
+            Occupancy-based adjustments — the listing&apos;s OWN occupancy per booking window
+            (booked + blocked nights; market-driven compares vs market for the next 60 days,
+            −20%..+15%). Custom profiles propagate everywhere they&apos;re attached.
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {select("Profile", "obaProfile", [
+              { value: "default", label: "PriceLabs-style Default" },
+              { value: "marketDriven", label: "Market-Driven" },
+              { value: "aggressive", label: "Aggressive" },
+              { value: "stepLastMinute", label: "Step Last-Minute Discount" },
+              { value: "farOutPremium", label: "Far-Out Premium" },
+              { value: "superAggressive", label: "Super Aggressive Discounting" },
+              { value: "custom", label: "Custom" },
+            ], "w-56")}
+            {f.obaProfile === "custom" && (
+              <>
+                <label className="flex flex-col gap-1">
+                  Saved profile (blank = inline)
+                  <select
+                    className={`${input} w-44`}
+                    value={f.obaCustomName}
+                    onChange={(e) => set("obaCustomName", e.target.value)}
+                  >
+                    <option value="">— inline windows —</option>
+                    {obaProfiles.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <input
+                  className={`${input} w-36`}
+                  placeholder="Save windows as…"
+                  value={obaSaveName}
+                  onChange={(e) => setObaSaveName(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className={btnGhost}
+                  disabled={busy || !obaSaveName.trim()}
+                  onClick={() => {
+                    const windows = f.obaWindows
+                      .filter((w) => w.uptoDays.trim() !== "")
+                      .map((w) => ({
+                        uptoDays: int(w.uptoDays, 9999),
+                        bands: [
+                          { upTo: 0.5, adjust: frac(w.soft), label: "soft <50%" },
+                          { upTo: 0.8, adjust: frac(w.healthy), label: "healthy 50–80%" },
+                          { upTo: 0.95, adjust: frac(w.tight), label: "tight 80–95%" },
+                          { upTo: 1.01, adjust: frac(w.full), label: "full 95%+" },
+                        ],
+                      }));
+                    profilesAction({ saveOba: { name: obaSaveName.trim(), windows } }).then(() => {
+                      set("obaCustomName", obaSaveName.trim());
+                      setObaSaveName("");
+                    });
+                  }}
+                >
+                  Save as profile
+                </button>
+              </>
+            )}
+          </div>
+          {f.obaProfile === "custom" && !f.obaCustomName && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] text-muted-foreground/70">
+                Per window: adjustment % at &lt;50% / 50–80% / 80–95% / 95%+ own occupancy (−50..+500)
+              </div>
+              {f.obaWindows.map((w, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2">
+                  ≤ {cell("obaWindows", i, "uptoDays", w.uptoDays, "w-16")} d out:
+                  {cell("obaWindows", i, "soft", w.soft, "w-14")}
+                  {cell("obaWindows", i, "healthy", w.healthy, "w-14")}
+                  {cell("obaWindows", i, "tight", w.tight, "w-14")}
+                  {cell("obaWindows", i, "full", w.full, "w-14")} %
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Rounding &amp; smoothing — final cosmetic steps (pinned fixed prices bypass both;
+            rounding still respects min/max)
+          </span>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {toggle("Rounding", "roundOn")}
+            {num("Last digits (1–5)", "roundDigits", "w-16")}
+            {num("Endings (e.g. 0,5 or 4,9)", "roundEndings", "w-28")}
+          </div>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            {toggle("Smoothing", "smoothOn")}
+            {select("Mode", "smoothMode", [
+              { value: "week", label: "Whole week (uniform rate)" },
+              { value: "split", label: "Weekdays vs weekends separately" },
+            ], "w-60")}
+            {select("Week starts", "smoothWeekStart", [
+              { value: "5", label: "Friday" },
+              { value: "6", label: "Saturday" },
+              { value: "0", label: "Sunday" },
+            ], "w-28")}
+          </div>
+        </div>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
             Far-out prices — hold/raise distant dates (market-driven: capped at 20%, never before
             60 days out)
           </span>
@@ -1117,6 +1346,44 @@ export function EngineRulesCard() {
             after/before → far-out → last-minute → default (MiniHotel MinimumNights = min-stay-through)
           </span>
           <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+            <label className="flex flex-col gap-1">
+              Min Stay Profile (replaces the rules below wholesale)
+              <select
+                className={`${input} w-56`}
+                value={f.msProfile}
+                onChange={(e) => set("msProfile", e.target.value)}
+              >
+                <option value="">— none (inline rules) —</option>
+                {minStayProfiles.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                    {p.archived ? " (archived — still applies)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <input
+              className={`${input} w-40`}
+              placeholder="Save rules below as…"
+              value={msSaveName}
+              onChange={(e) => setMsSaveName(e.target.value)}
+            />
+            <button
+              type="button"
+              className={btnGhost}
+              disabled={busy || !msSaveName.trim()}
+              onClick={() => {
+                const patch = buildPatch() as { minStayRules?: Record<string, unknown> };
+                const { profile: _p, ...rules } = (patch.minStayRules ?? {}) as Record<string, unknown>;
+                profilesAction({ saveMinStay: { name: msSaveName.trim(), rules } }).then(() => {
+                  setMsSaveName("");
+                });
+              }}
+            >
+              Save as profile
+            </button>
+          </div>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
             {select("Mode", "msMode", [
               { value: "recommended", label: "PriceLabs-style Recommended (dynamic)" },
               { value: "custom", label: "Custom rules" },
@@ -1215,6 +1482,98 @@ export function EngineRulesCard() {
                   ))}
               </select>
             </label>
+          </div>
+          {!f.cicoProfile && (
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="w-24 text-[10px]">Allow check-in</span>
+                {DOW.map((d, i) => (
+                  <label key={`in-${d}`} className="inline-flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={f.cicoIn[i]}
+                      onChange={(e) => {
+                        const days = [...f.cicoIn];
+                        days[i] = e.target.checked;
+                        set("cicoIn", days);
+                      }}
+                      className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                    />
+                    {d}
+                  </label>
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="w-24 text-[10px]">Allow check-out</span>
+                {DOW.map((d, i) => (
+                  <label key={`out-${d}`} className="inline-flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={f.cicoOut[i]}
+                      onChange={(e) => {
+                        const days = [...f.cicoOut];
+                        days[i] = e.target.checked;
+                        set("cicoOut", days);
+                      }}
+                      className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                    />
+                    {d}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="space-y-1.5 border-t border-border/40 pt-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-medium">Last-minute rule:</span>
+              within
+              <input
+                className={`${input} w-14`}
+                value={f.cicoLmWithin}
+                onChange={(e) => set("cicoLmWithin", e.target.value)}
+                placeholder="d"
+              />
+              d — check-in:
+              {DOW.map((d, i) => (
+                <label key={`lmi-${d}`} className="inline-flex items-center gap-0.5 text-[10px]">
+                  <input
+                    type="checkbox"
+                    checked={f.cicoLmIn[i]}
+                    onChange={(e) => {
+                      const days = [...f.cicoLmIn];
+                      days[i] = e.target.checked;
+                      set("cicoLmIn", days);
+                    }}
+                    className="h-3 w-3 accent-[hsl(var(--primary))]"
+                  />
+                  {d[0]}
+                </label>
+              ))}
+              · check-out:
+              {DOW.map((d, i) => (
+                <label key={`lmo-${d}`} className="inline-flex items-center gap-0.5 text-[10px]">
+                  <input
+                    type="checkbox"
+                    checked={f.cicoLmOut[i]}
+                    onChange={(e) => {
+                      const days = [...f.cicoLmOut];
+                      days[i] = e.target.checked;
+                      set("cicoLmOut", days);
+                    }}
+                    className="h-3 w-3 accent-[hsl(var(--primary))]"
+                  />
+                  {d[0]}
+                </label>
+              ))}
+              <span className="text-[10px] text-muted-foreground/70">(blank window = unused)</span>
+            </div>
+            <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+              <span className="text-[10px] font-medium">Smart settings:</span>
+              {toggle("Block gap-creating check-ins/outs", "cicoSmartBlock")}
+              {num("≤ gap n", "cicoSmartMaxGap", "w-14")}
+              {num("beyond d", "cicoSmartBeyond", "w-14")}
+              {toggle("Allow check-in/out on nights adjacent to bookings", "cicoSmartAdjacent")}
+            </div>
           </div>
           <div className="space-y-2 rounded-md border border-border/40 p-2">
             <div className="flex flex-wrap items-end gap-2">

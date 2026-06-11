@@ -19,6 +19,7 @@ import {
   resolveAdjustmentStack,
   pricingOffsetRule,
   resolveMinPrice,
+  roundToPreference,
   gapInfo,
   isWeekendDay,
   dayOfWeekRule,
@@ -49,6 +50,9 @@ export interface DateQuote {
   /** Check-in/Check-out restriction flags for this weekday (CICO profiles). */
   checkinAllowed: boolean;
   checkoutAllowed: boolean;
+  /** True when a fixed price pinned the night (DSO / last-minute / orphan
+   *  fixed) — pinned nights bypass smoothing and rounding. */
+  pinned: boolean;
 }
 
 function leadDaysFrom(asOf: Date, date: Date): number {
@@ -196,13 +200,14 @@ function resolveMinStay(
   return { minStay: Math.min(rec, cap), source };
 }
 
-/** Quote a single night for a unit. */
-export function quoteNight(
+/** The core per-night pipeline, BEFORE smoothing and rounding (quoteNight wraps
+ *  this — smoothing needs the week's unsmoothed rates). */
+function quoteNightBase(
   unit: Unit,
   date: Date,
   market: MarketProviders,
-  asOf: Date = new Date(),
-  cfg: typeof PRICING_RULES = PRICING_RULES,
+  asOf: Date,
+  cfg: typeof PRICING_RULES,
 ): DateQuote {
   const leadDays = leadDaysFrom(asOf, date);
 
@@ -213,7 +218,7 @@ export function quoteNight(
   add(seasonalityRule(date, market, cfg));
   add(demandRule(unit, date, market, cfg));
   add(pacingRule(unit, market, cfg));
-  add(occupancyRule(unit, date, market, cfg));
+  add(occupancyRule(unit, date, leadDays, market, cfg));
   add(portfolioOccupancyRule(unit, date, leadDays, market, cfg));
   add(farOutRule(unit, date, leadDays, market, cfg));
   // Gap/lead-time adjustment class — PriceLabs stacking: largest discount wins,
@@ -287,13 +292,7 @@ export function quoteNight(
 
   const { minStay, source } = resolveMinStay(unit, date, leadDays, market, cfg, rate);
   const effectiveMonthlyRate = Math.round(rate * 30 * (1 - losDiscountForStay(unit, 30, cfg)));
-
-  // Check-in/Check-out restriction for this weekday (engine-side; not pushed —
-  // no verified CTA/CTD field in the MiniHotel Reverse ARI contract).
-  const dow = date.getUTCDay();
-  const cc = cfg.checkinCheckout;
-  const checkinAllowed = !cc.enabled || cc.allowedCheckin.includes(dow);
-  const checkoutAllowed = !cc.enabled || cc.allowedCheckout.includes(dow);
+  const { checkinAllowed, checkoutAllowed } = resolveCico(unit, date, leadDays, market, cfg);
 
   return {
     date: date.toISOString().slice(0, 10),
@@ -310,6 +309,135 @@ export function quoteNight(
     effectiveMonthlyRate,
     checkinAllowed,
     checkoutAllowed,
+    pinned: pin != null || bound === "override",
+  };
+}
+
+/**
+ * Check-in/Check-out restriction for this weekday: profile or inline day lists,
+ * last-minute rules swapping the lists near arrival, and the Smart options —
+ * re-open days flush against bookings, and block check-ins/outs that would
+ * CREATE a short orphan gap. Engine-side; not pushed (no verified CTA/CTD field
+ * in the MiniHotel Reverse ARI contract).
+ */
+function resolveCico(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  market: MarketProviders,
+  cfg: typeof PRICING_RULES,
+): { checkinAllowed: boolean; checkoutAllowed: boolean } {
+  const cc = cfg.checkinCheckout;
+  if (!cc.enabled) return { checkinAllowed: true, checkoutAllowed: true };
+  const dow = date.getUTCDay();
+  let inDays = cc.allowedCheckin;
+  let outDays = cc.allowedCheckout;
+  const lm = cc.lastMinute
+    .filter((r) => r.withinDays > 0 && leadDays <= r.withinDays)
+    .sort((a, b) => a.withinDays - b.withinDays)[0];
+  if (lm) {
+    inDays = lm.checkin;
+    outDays = lm.checkout;
+  }
+  let checkinAllowed = inDays.includes(dow);
+  let checkoutAllowed = outDays.includes(dow);
+
+  if (cc.smart.allowAdjacent) {
+    // Flush against an existing booking: arrival the day a stay ends, departure
+    // the day the next stay begins — no gap either way.
+    if (!checkinAllowed && !market.isBooked(unit, date) &&
+        market.isBooked(unit, new Date(date.getTime() - DAY_MS))) {
+      checkinAllowed = true;
+    }
+    if (!checkoutAllowed && market.isBooked(unit, date)) {
+      checkoutAllowed = true;
+    }
+  }
+  if (cc.smart.blockGapCreating && leadDays > cc.smart.beyondDays) {
+    const g = Math.max(1, cc.smart.maxGapNights);
+    // A check-in here would strand a short open run BEHIND it.
+    if (checkinAllowed && !market.isBooked(unit, date)) {
+      let run = 0;
+      while (run < g + 1 && !market.isBooked(unit, new Date(date.getTime() - (run + 1) * DAY_MS))) run++;
+      if (run >= 1 && run <= g && market.isBooked(unit, new Date(date.getTime() - (run + 1) * DAY_MS))) {
+        checkinAllowed = false;
+      }
+    }
+    // A check-out here would strand a short open run AHEAD (until the next stay).
+    if (checkoutAllowed) {
+      let run = 0;
+      while (run < g + 1 && !market.isBooked(unit, new Date(date.getTime() + run * DAY_MS))) run++;
+      if (run >= 1 && run <= g && market.isBooked(unit, new Date(date.getTime() + run * DAY_MS))) {
+        checkoutAllowed = false;
+      }
+    }
+  }
+  return { checkinAllowed, checkoutAllowed };
+}
+
+/** Quote a single night: the base pipeline plus Smoothing (week / weekday-vs-
+ *  weekend averaging) and the Rounding preference — both cosmetic finishers
+ *  that pinned fixed prices bypass, with rounding still respecting min/max. */
+export function quoteNight(
+  unit: Unit,
+  date: Date,
+  market: MarketProviders,
+  asOf: Date = new Date(),
+  cfg: typeof PRICING_RULES = PRICING_RULES,
+): DateQuote {
+  const q = quoteNightBase(unit, date, market, asOf, cfg);
+  let rate = q.rate;
+  const factors = q.factors;
+
+  if (cfg.smoothing.enabled && !q.pinned) {
+    const offset = (date.getUTCDay() - cfg.smoothing.weekStart + 7) % 7;
+    const weekStart = new Date(date.getTime() - offset * DAY_MS);
+    const classOf = (d: Date) => (cfg.smoothing.mode === "week" ? true : isWeekendDay(d, cfg) === isWeekendDay(date, cfg));
+    const rates: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(weekStart.getTime() + i * DAY_MS);
+      if (!classOf(d)) continue;
+      rates.push(d.getTime() === date.getTime() ? q.rate : quoteNightBase(unit, d, market, asOf, cfg).rate);
+    }
+    if (rates.length > 1) {
+      const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
+      if (Math.round(avg) !== Math.round(rate)) {
+        factors.push({
+          key: "smoothing",
+          label: "Smoothing",
+          factor: avg / Math.max(1, rate),
+          detail: `${cfg.smoothing.mode === "week" ? "weekly" : isWeekendDay(date, cfg) ? "weekend" : "weekday"} average over ${rates.length} night(s)`,
+        });
+        rate = avg;
+      }
+    }
+  }
+
+  if (cfg.rounding.enabled && !q.pinned) {
+    let rounded = roundToPreference(rate, cfg.rounding.digits, cfg.rounding.endings);
+    // Rounding respects min/max: only clamp when ROUNDING crossed the bound
+    // (an offset that legitimately sits outside stays outside).
+    if (rate >= q.minPrice && rounded < q.minPrice) rounded = Math.ceil(q.minPrice);
+    if (rate <= unit.maxRate && rounded > unit.maxRate) rounded = Math.floor(unit.maxRate);
+    if (rounded !== Math.round(rate)) {
+      factors.push({
+        key: "rounding",
+        label: "Rounding",
+        factor: rounded / Math.max(1, rate),
+        detail: `→ ₪${rounded} (last ${cfg.rounding.digits} digit(s) ending ${cfg.rounding.endings.join("/")})`,
+      });
+    }
+    rate = rounded;
+  } else {
+    rate = Math.round(rate);
+  }
+
+  if (rate === q.rate) return q;
+  return {
+    ...q,
+    rate,
+    factors,
+    effectiveMonthlyRate: Math.round(rate * 30 * (1 - losDiscountForStay(unit, 30, cfg))),
   };
 }
 
@@ -357,7 +485,7 @@ export function activeRuleSummary(
     { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: `monthly market curve (${sens.label})` },
     { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap (${(SEASONALITY_SENSITIVITY[cfg.demandEvents.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended).label})` },
     { key: "pacing", label: "Booking pace", enabled: cfg.pacing.enabled, note: `±${(cfg.pacing.cap * 100).toFixed(0)}% cap` },
-    { key: "occupancy", label: "Occupancy bands", enabled: cfg.occupancy.enabled, note: `${cfg.occupancy.bands.length} bands` },
+    { key: "occupancy", label: "Occupancy (OBA)", enabled: cfg.occupancy.enabled, note: cfg.occupancy.profile === "marketDriven" ? "market-driven ≤60d (−20%..+15%)" : cfg.occupancy.profile === "custom" ? `custom${cfg.occupancy.customName ? ` "${cfg.occupancy.customName}"` : ""} — ${cfg.occupancy.windows.length} windows` : `${cfg.occupancy.profile} profile — ${cfg.occupancy.windows.length} windows` },
     { key: "farOut", label: "Far-out premium", enabled: cfg.farOut.enabled, note: cfg.farOut.mode === "marketDriven" ? `market-driven (${cfg.farOut.marketFlavor}) ≥60d, ≤20%` : `${cfg.farOut.mode} >${cfg.farOut.thresholdDays}d` },
     { key: "lastMinute", label: "Last-minute prices", enabled: cfg.lastMinute.enabled, note: cfg.lastMinute.mode === "marketDriven" ? `market-driven (${cfg.lastMinute.marketFlavor}) ≤${Math.min(90, cfg.lastMinute.windowDays)}d` : `${cfg.lastMinute.mode} ≤${Math.min(90, cfg.lastMinute.windowDays)}d` },
     { key: "adjacent", label: "Adjacent factor", enabled: cfg.adjacent.enabled, note: `${adjNote}, ${cfg.adjacent.daysBefore}d before / ${cfg.adjacent.daysAfter}d after bookings` },
@@ -370,7 +498,9 @@ export function activeRuleSummary(
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max + advanced min-price rules" },
     { key: "safetyMinPrice", label: "Safety minimum price", enabled: cfg.safetyMinPrice.enabled, note: `LY same-weekday ADR ×${(cfg.safetyMinPrice.pctOfLastYear * 100).toFixed(0)}% — raises-only, needs reservation history` },
     { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
-    { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: `${cfg.minStayRules.mode} — lowest-allowed → orphan → DSO → adjacent → far-out → last-minute → default` },
+    { key: "rounding", label: "Rounding", enabled: cfg.rounding.enabled, note: `last ${cfg.rounding.digits} digit(s) → ${cfg.rounding.endings.join("/")}` },
+    { key: "smoothing", label: "Smoothing", enabled: cfg.smoothing.enabled, note: cfg.smoothing.mode === "week" ? "uniform weekly rate" : "weekday/weekend averaged separately" },
+    { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: `${cfg.minStayRules.profile ? `profile "${cfg.minStayRules.profile}"` : cfg.minStayRules.mode} — lowest-allowed → orphan → DSO → adjacent → far-out → last-minute → default` },
     { key: "gate", label: "Human gate", enabled: true, note: `>±${gatePct}% → Action Center` },
   ];
 }

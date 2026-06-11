@@ -30,6 +30,13 @@ export interface RateCell {
   /** Per-date price floor/ceiling overrides (clamp the derived price). */
   minPrice: number | null;
   maxPrice: number | null;
+  /** Dynamic "% of recommended price" override (signed %), reapplied to the
+   *  derived rate on every read — unlike a fixed price it keeps moving. */
+  pctAdjust: number | null;
+  /** Override auto-disables after this date (PriceLabs DSO expiry). */
+  expiresOn: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
   note: string | null;
 }
 
@@ -45,7 +52,16 @@ export interface RankInfo {
 export interface RateRow {
   unit: Pick<
     Unit,
-    "id" | "name" | "neighborhood" | "bedrooms" | "platform" | "currentRate" | "baseRate" | "group" | "subgroup"
+    | "id"
+    | "name"
+    | "neighborhood"
+    | "bedrooms"
+    | "platform"
+    | "currentRate"
+    | "baseRate"
+    | "minRate"
+    | "group"
+    | "subgroup"
   >;
   cells: RateCell[];
   /** Occupancy over the next 30/60/90 nights from today (sold ÷ sellable), null when unknown. */
@@ -85,6 +101,10 @@ export interface OverridePatch {
   booked?: boolean | null;
   minPrice?: number | null;
   maxPrice?: number | null;
+  /** Dynamic % of recommended price (signed %, e.g. -10). Cleared by null. */
+  pctAdjust?: number | null;
+  /** Auto-disable the override after this date (null = never). */
+  expiresOn?: string | null;
   note?: string | null;
 }
 
@@ -100,6 +120,9 @@ interface OverrideSql {
   updated_at: string | null;
   min_price: number | null;
   max_price: number | null;
+  pct_adjust: number | null;
+  expires_on: string | null;
+  created_at: string | null;
   note: string | null;
 }
 
@@ -246,14 +269,21 @@ export function getCalendar(from: string, days: number): Calendar {
       let source: RateCell["source"] = "derived";
 
       const o = ov.get(unit.id + "|" + date);
+      // An expired override (PriceLabs DSO expiry) keeps its row for audit but
+      // stops steering price/min-stay — the default algorithm takes over.
+      const expired = o?.expires_on != null && hotelToday() > o.expires_on;
       if (o) {
-        if (o.price != null) price = o.price;
-        // A fixed override price is final; min/max clamp only the derived price.
-        else if (price != null) {
-          if (o.min_price != null && price < o.min_price) price = o.min_price;
-          if (o.max_price != null && price > o.max_price) price = o.max_price;
+        if (!expired) {
+          if (o.price != null) price = o.price;
+          else if (price != null) {
+            // Dynamic "% of recommended": reapplied to the derived rate every
+            // read (stays dynamic), then clamped by the per-date min/max.
+            if (o.pct_adjust != null) price = Math.max(0, Math.round(price * (1 + o.pct_adjust / 100)));
+            if (o.min_price != null && price < o.min_price) price = o.min_price;
+            if (o.max_price != null && price > o.max_price) price = o.max_price;
+          }
+          if (o.min_nights != null) minNights = o.min_nights;
         }
-        if (o.min_nights != null) minNights = o.min_nights;
         if (o.closed != null) isClosed = o.closed === 1;
         if (o.booked != null) isBooked = o.booked === 1;
         if (o.available != null) available = o.available;
@@ -272,6 +302,10 @@ export function getCalendar(from: string, days: number): Calendar {
         source,
         minPrice: o?.min_price ?? null,
         maxPrice: o?.max_price ?? null,
+        pctAdjust: expired ? null : (o?.pct_adjust ?? null),
+        expiresOn: o?.expires_on ?? null,
+        createdAt: o?.created_at ?? null,
+        updatedAt: o?.updated_at ?? null,
         note: o?.note ?? null,
       };
     });
@@ -312,6 +346,7 @@ export function getCalendar(from: string, days: number): Calendar {
         platform: unit.platform,
         currentRate: unit.currentRate,
         baseRate: unit.baseRate,
+        minRate: unit.minRate,
         group: unit.group,
         subgroup: unit.subgroup,
       },
@@ -382,6 +417,38 @@ export function getCalendar(from: string, days: number): Calendar {
 }
 
 // ----------------------------------------------------------- booked-night feed
+/** Unavailable nights (booked OR blocked) for one unit over [from, from+days).
+ *  Feeds OBA window occupancy: blocked dates count as booked for MiniHotel
+ *  (it's not in PriceLabs's blocked-dates exception list). */
+export function unavailableDatesForUnit(unitId: string, from: string, days: number): Set<string> {
+  const out = new Set<string>();
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit || days <= 0) return out;
+  const fromIdx = dayIndex(from);
+  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  const booked = hasBaseline ? bookedSet(unit, fromIdx + days - 1) : new Set<number>();
+  const closed = hasBaseline ? closedSet(unit, fromIdx, fromIdx + days - 1) : new Set<number>();
+  const rows = getDb()
+    .prepare(
+      "SELECT date, booked, closed FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND (booked IS NOT NULL OR closed IS NOT NULL)",
+    )
+    .all(unitId, from, isoAddDays(from, days - 1)) as Array<{
+    date: string;
+    booked: number | null;
+    closed: number | null;
+  }>;
+  const ov = new Map(rows.map((r) => [r.date, r]));
+  for (let i = 0; i < days; i++) {
+    const date = isoAddDays(from, i);
+    const idx = fromIdx + i;
+    const o = ov.get(date);
+    const isBooked = o?.booked != null ? o.booked === 1 : booked.has(idx);
+    const isClosed = o?.closed != null ? o.closed === 1 : closed.has(idx);
+    if (isBooked || isClosed) out.add(date);
+  }
+  return out;
+}
+
 /**
  * Booked nights for one unit over [from, from+days) — the same baseline blocks
  * + override booked flags the calendar renders. Feeds the pricing engine's
@@ -471,18 +538,22 @@ export function upsertOverride(
     booked: boolCol(patch.booked, existing?.booked ?? null),
     min_price: patch.minPrice !== undefined ? patch.minPrice : (existing?.min_price ?? null),
     max_price: patch.maxPrice !== undefined ? patch.maxPrice : (existing?.max_price ?? null),
+    pct_adjust: patch.pctAdjust !== undefined ? patch.pctAdjust : (existing?.pct_adjust ?? null),
+    expires_on: patch.expiresOn !== undefined ? patch.expiresOn : (existing?.expires_on ?? null),
     note: patch.note !== undefined ? patch.note : (existing?.note ?? null),
     source,
+    created_at: existing?.created_at ?? new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
 
   db.prepare(
-    `INSERT INTO rate_calendar (unit_id, date, price, available, min_nights, closed, booked, min_price, max_price, note, source, updated_at)
-     VALUES (@unit_id, @date, @price, @available, @min_nights, @closed, @booked, @min_price, @max_price, @note, @source, @updated_at)
+    `INSERT INTO rate_calendar (unit_id, date, price, available, min_nights, closed, booked, min_price, max_price, pct_adjust, expires_on, note, source, created_at, updated_at)
+     VALUES (@unit_id, @date, @price, @available, @min_nights, @closed, @booked, @min_price, @max_price, @pct_adjust, @expires_on, @note, @source, @created_at, @updated_at)
      ON CONFLICT(unit_id, date) DO UPDATE SET
        price = @price, available = @available, min_nights = @min_nights,
        closed = @closed, booked = @booked, min_price = @min_price, max_price = @max_price,
-       note = @note, source = @source, updated_at = @updated_at`,
+       pct_adjust = @pct_adjust, expires_on = @expires_on,
+       note = @note, source = @source, created_at = @created_at, updated_at = @updated_at`,
   ).run(merged);
 }
 
@@ -537,6 +608,11 @@ export function rebaseFuturePrices(
 
       let price = basePrice(unit, date, idx); // unit already carries the new base
       if (o) {
+        // A live dynamic % override keeps steering off the new baseline.
+        const expired = o.expires_on != null && from > o.expires_on;
+        if (o.pct_adjust != null && !expired) {
+          price = Math.max(0, Math.round(price * (1 + o.pct_adjust / 100)));
+        }
         if (o.min_price != null && price < o.min_price) price = o.min_price;
         if (o.max_price != null && price > o.max_price) price = o.max_price;
         // Synced price is superseded by the new anchor; the derived price shows.
@@ -548,7 +624,8 @@ export function rebaseFuturePrices(
     db.prepare(
       `DELETE FROM rate_calendar WHERE unit_id = ? AND price IS NULL AND available IS NULL
        AND min_nights IS NULL AND closed IS NULL AND booked IS NULL
-       AND min_price IS NULL AND max_price IS NULL AND note IS NULL`,
+       AND min_price IS NULL AND max_price IS NULL AND pct_adjust IS NULL
+       AND expires_on IS NULL AND note IS NULL`,
     ).run(unitId);
   });
   tx();
@@ -570,12 +647,19 @@ export interface RangeOverride {
   daysOfWeek?: number[];
   /** Fixed final nightly price (null clears the price field). */
   price?: number | null;
-  /** Percent adjustment vs each night's derived price, e.g. -10 or 15. */
+  /** Percent adjustment, e.g. -10 or 15. Mode picks the PriceLabs semantics:
+   *  "fixed" materializes % of the derived baseline into a static price
+   *  ("% of base price"); "dynamic" stores the % and reapplies it to the
+   *  recommended rate on every read ("% of recommended price" — stays dynamic,
+   *  honors the per-date min/max). */
   pricePct?: number;
+  pricePctMode?: "fixed" | "dynamic";
   minPrice?: number | null;
   maxPrice?: number | null;
   minNights?: number | null;
   closed?: boolean | null;
+  /** Auto-disable the override after this date (PriceLabs DSO expiry). */
+  expiresOn?: string | null;
   note?: string | null;
   /** Remove overrides for the matching nights instead of writing. */
   clear?: boolean;
@@ -646,7 +730,13 @@ export function applyOverrideRange(o: RangeOverride): {
         const sold = existing.booked != null ? existing.booked === 1 : bookedBaseline.has(idx);
         const cell: AppliedCell = { date };
         // Only re-send fields the deleted override had actually pinned.
-        if (!sold && (existing.price != null || existing.min_price != null || existing.max_price != null)) {
+        if (
+          !sold &&
+          (existing.price != null ||
+            existing.pct_adjust != null ||
+            existing.min_price != null ||
+            existing.max_price != null)
+        ) {
           cell.price = basePrice(unit, date, idx);
         }
         if (existing.min_nights != null) cell.minNights = DEFAULT_MIN_NIGHTS;
@@ -655,27 +745,46 @@ export function applyOverrideRange(o: RangeOverride): {
         continue;
       }
       const patch: OverridePatch = {};
-      if (o.price !== undefined) patch.price = o.price;
-      else if (o.pricePct !== undefined) {
-        // Percent of the night's derived baseline; units with no baseline yet
-        // (unsynced imports) have nothing to take a percent of — skip those.
+      if (o.price !== undefined) {
+        patch.price = o.price;
+        if (o.price !== null) patch.pctAdjust = null; // a fixed price replaces a dynamic %
+      } else if (o.pricePct !== undefined) {
+        // Units with no baseline yet (unsynced imports) have nothing to take a
+        // percent of — skip those.
         if (!hasBaseline) continue;
-        patch.price = Math.max(0, Math.round(basePrice(unit, date, dayIndex(date)) * (1 + o.pricePct / 100)));
+        if (o.pricePctMode === "dynamic") {
+          // "% of recommended": stored and reapplied at read time.
+          patch.pctAdjust = o.pricePct;
+          patch.price = null;
+        } else {
+          // "% of base (fixed)": materialized into a static price.
+          patch.price = Math.max(0, Math.round(basePrice(unit, date, dayIndex(date)) * (1 + o.pricePct / 100)));
+          patch.pctAdjust = null;
+        }
       }
       if (o.minPrice !== undefined) patch.minPrice = o.minPrice;
       if (o.maxPrice !== undefined) patch.maxPrice = o.maxPrice;
       if (o.minNights !== undefined) patch.minNights = o.minNights;
       if (o.closed !== undefined) patch.closed = o.closed;
+      if (o.expiresOn !== undefined) patch.expiresOn = o.expiresOn;
       if (o.note !== undefined) patch.note = o.note;
       if (Object.keys(patch).length === 0) continue;
       upsertOverride(o.unitId, date, patch, "manual");
       // Fields explicitly cleared (null) push their replacement default, not
       // silence — same removal semantics as the clear path.
       const cell: AppliedCell = { date };
-      if (patch.price !== undefined) {
+      if (patch.pctAdjust != null && hasBaseline) {
+        // Push the dynamic %'s CURRENT resolution (it keeps moving locally).
+        let p = Math.max(0, Math.round(basePrice(unit, date, dayIndex(date)) * (1 + patch.pctAdjust / 100)));
+        if (patch.minPrice != null && p < patch.minPrice) p = patch.minPrice;
+        if (patch.maxPrice != null && p > patch.maxPrice) p = patch.maxPrice;
+        cell.price = p;
+      } else if (patch.price !== undefined) {
         if (patch.price !== null) cell.price = patch.price;
-        else if (hasBaseline) cell.price = basePrice(unit, date, dayIndex(date));
-        else unresolved++;
+        else if (patch.pctAdjust == null) {
+          if (hasBaseline) cell.price = basePrice(unit, date, dayIndex(date));
+          else unresolved++;
+        }
       }
       if (patch.minNights !== undefined) {
         cell.minNights = patch.minNights !== null ? patch.minNights : DEFAULT_MIN_NIGHTS;

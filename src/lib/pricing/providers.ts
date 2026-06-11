@@ -9,7 +9,7 @@
 
 import { listUnits, type Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
-import { bookedDatesForUnit } from "@/lib/repos/rates";
+import { bookedDatesForUnit, unavailableDatesForUnit } from "@/lib/repos/rates";
 import { realizedNightlyRates } from "@/lib/repos/reservations";
 import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
 
@@ -64,6 +64,11 @@ export interface MarketProviders {
    *  Wired to MiniHotel reservations (revenue ÷ nights per stay date). */
   lastYearNightly(unit: Unit, isoDate: string): number | null;
 
+  /** The unit's OWN occupancy over a lead-day window [fromDay..toDay] from
+   *  today — unavailable nights (booked + blocked; MiniHotel isn't in the
+   *  blocked-dates exception list) ÷ window nights. Feeds per-listing OBA. */
+  windowOccupancy(unit: Unit, fromDay: number, toDay: number): number;
+
   /** Operator/calendar override for a unit+date, or null.
    *  PRODUCTION SEAM: a unit_date_overrides table edited by the operator. */
   dateOverride(unit: Unit, date: Date): DateOverride | null;
@@ -91,6 +96,7 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
   const allUnits = () => (unitsCache ??= listUnits());
   const groupOccCache = new Map<string, number | null>();
   const lyCache = new Map<string, Map<string, number>>();
+  const unavailCache = new Map<string, Set<string>>();
 
   return {
     isBooked(unit: Unit, date: Date): boolean {
@@ -134,6 +140,22 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
         lyCache.set(unit.id, m);
       }
       return m.get(isoDate) ?? null;
+    },
+    windowOccupancy(unit: Unit, fromDay: number, toDay: number): number {
+      let s = unavailCache.get(unit.id);
+      if (!s) {
+        s = unavailableDatesForUnit(unit.id, todayIso, 430);
+        unavailCache.set(unit.id, s);
+      }
+      const t0 = Date.parse(todayIso + "T00:00:00Z");
+      const lo = Math.max(0, Math.min(fromDay, toDay));
+      const hi = Math.min(429, Math.max(fromDay, toDay));
+      let unavailable = 0;
+      for (let d = lo; d <= hi; d++) {
+        if (s.has(new Date(t0 + d * DAY).toISOString().slice(0, 10))) unavailable++;
+      }
+      const span = hi - lo + 1;
+      return span > 0 ? unavailable / span : 0;
     },
   };
 }

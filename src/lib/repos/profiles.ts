@@ -81,3 +81,79 @@ export function setCicoArchived(name: string, archived: boolean): CicoProfile[] 
   setSetting(CICO_KEY, JSON.stringify(out));
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Generic named-payload profiles, same lifecycle as CICO (upsert by name,
+// archive instead of delete, archived-but-attached keeps applying). Used for
+// Min Stay Profiles (a full minStayRules payload) and custom OBA profiles
+// (a windows matrix). Updating a profile automatically propagates to every
+// scope it's attached to, because attachment stores only the NAME and the
+// payload resolves at read time.
+
+export interface NamedProfile<T> {
+  name: string;
+  archived: boolean;
+  payload: T;
+}
+
+function listNamed<T>(key: string, includeArchived: boolean): NamedProfile<T>[] {
+  const raw = getSetting(key);
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw) as NamedProfile<T>[];
+    if (!Array.isArray(arr)) return [];
+    const all = arr.filter((p) => p && typeof p.name === "string" && p.name.trim() !== "");
+    return includeArchived ? all : all.filter((p) => !p.archived);
+  } catch {
+    return [];
+  }
+}
+
+function upsertNamed<T>(key: string, name: string, payload: T): NamedProfile<T>[] {
+  const n = name.trim().slice(0, 60);
+  if (!n) throw new Error("profile name required");
+  const all = listNamed<T>(key, true);
+  const existing = all.find((p) => p.name === n);
+  const next: NamedProfile<T> = { name: n, archived: existing?.archived ?? false, payload };
+  const out = existing ? all.map((p) => (p.name === n ? next : p)) : [...all, next];
+  setSetting(key, JSON.stringify(out));
+  return out;
+}
+
+function archiveNamed<T>(key: string, name: string, archived: boolean): NamedProfile<T>[] {
+  const all = listNamed<T>(key, true);
+  if (!all.some((p) => p.name === name)) throw new Error(`unknown profile "${name}"`);
+  const out = all.map((p) => (p.name === name ? { ...p, archived } : p));
+  setSetting(key, JSON.stringify(out));
+  return out;
+}
+
+const MIN_STAY_KEY = "min_stay_profiles";
+const OBA_KEY = "oba_profiles";
+
+/** Min Stay Profile payload: the minStayRules section sans `profile` (a profile
+ *  can't reference another profile). */
+export type MinStayProfilePayload = Record<string, unknown>;
+
+export const listMinStayProfiles = (includeArchived = false) =>
+  listNamed<MinStayProfilePayload>(MIN_STAY_KEY, includeArchived);
+export const findMinStayProfile = (name: string | null | undefined) =>
+  name ? (listMinStayProfiles(true).find((p) => p.name === name) ?? null) : null;
+export const upsertMinStayProfile = (name: string, payload: MinStayProfilePayload) =>
+  upsertNamed(MIN_STAY_KEY, name, payload);
+export const setMinStayProfileArchived = (name: string, archived: boolean) =>
+  archiveNamed<MinStayProfilePayload>(MIN_STAY_KEY, name, archived);
+
+/** Custom OBA profile payload: a booking-window band matrix. */
+export interface ObaProfilePayload {
+  windows: Array<{ uptoDays: number; bands: Array<{ upTo: number; adjust: number; label: string }> }>;
+}
+
+export const listObaProfiles = (includeArchived = false) =>
+  listNamed<ObaProfilePayload>(OBA_KEY, includeArchived);
+export const findObaProfile = (name: string | null | undefined) =>
+  name ? (listObaProfiles(true).find((p) => p.name === name) ?? null) : null;
+export const upsertObaProfile = (name: string, payload: ObaProfilePayload) =>
+  upsertNamed(OBA_KEY, name, payload);
+export const setObaProfileArchived = (name: string, archived: boolean) =>
+  archiveNamed<ObaProfilePayload>(OBA_KEY, name, archived);

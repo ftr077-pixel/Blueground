@@ -40,6 +40,10 @@ interface RateCell {
   source: "derived" | "manual" | "minihotel";
   minPrice: number | null;
   maxPrice: number | null;
+  pctAdjust: number | null;
+  expiresOn: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
   note: string | null;
 }
 interface RankInfo {
@@ -59,6 +63,7 @@ interface RateRow {
     platform: string;
     currentRate: number;
     baseRate: number;
+    minRate: number;
     group: string | null;
     subgroup: string | null;
   };
@@ -596,6 +601,7 @@ export function RateCalendar() {
             if (!g) return 0;
             return data.rows.filter((r) => r.unit.group === g || r.unit.subgroup === g).length;
           })()}
+          unitMinRate={selCell.unit.minRate}
           busy={busy}
           onClose={() => setSel(null)}
           onApply={applyOverride}
@@ -1003,6 +1009,7 @@ function OverridePanel({
   defaultMinNights,
   groupName,
   groupCount,
+  unitMinRate,
   busy,
   onApply,
   onClose,
@@ -1018,6 +1025,8 @@ function OverridePanel({
   /** The unit's customization group (group ?? subgroup) for group-level DSOs. */
   groupName: string | null;
   groupCount: number;
+  /** The listing's minimum price — fixed overrides below it get a warning. */
+  unitMinRate: number;
   busy: boolean;
   onApply: (body: Record<string, unknown>) => Promise<number>;
   onClose: () => void;
@@ -1026,8 +1035,13 @@ function OverridePanel({
   const [end, setEnd] = useState(cell.date);
   const [dowOn, setDowOn] = useState(false);
   const [dow, setDow] = useState<boolean[]>(Array(7).fill(true));
-  const [priceMode, setPriceMode] = useState<"fixed" | "pct">("fixed");
-  const [priceVal, setPriceVal] = useState("");
+  const [priceMode, setPriceMode] = useState<"fixed" | "pct" | "pctDyn">(
+    cell.pctAdjust != null ? "pctDyn" : "fixed",
+  );
+  const [priceVal, setPriceVal] = useState(cell.pctAdjust != null ? String(cell.pctAdjust) : "");
+  const [expiry, setExpiry] = useState(cell.expiresOn ?? "");
+  const [copyFrom, setCopyFrom] = useState("");
+  const [copyTo, setCopyTo] = useState("");
   const [minPriceVal, setMinPriceVal] = useState(cell.minPrice == null ? "" : String(cell.minPrice));
   const [maxPriceVal, setMaxPriceVal] = useState(cell.maxPrice == null ? "" : String(cell.maxPrice));
   const [minNightsVal, setMinNightsVal] = useState("");
@@ -1088,7 +1102,7 @@ function OverridePanel({
     };
   }, [start, end, windowFrom, windowDays, cells, unitId]);
 
-  const pct = priceMode === "pct" ? parseFloat(priceVal) : NaN;
+  const pct = priceMode !== "fixed" ? parseFloat(priceVal) : NaN;
   const fixedPrice =
     priceMode === "fixed" && priceVal.trim() !== "" ? Math.max(0, Math.round(parseFloat(priceVal) || 0)) : null;
 
@@ -1105,7 +1119,7 @@ function OverridePanel({
     let newTotal: number | null = null;
     if (fixedPrice != null) {
       newTotal = fixedPrice * covered; // a fixed price applies to every selected night
-    } else if (priceMode === "pct" && priceVal.trim() !== "" && Number.isFinite(pct)) {
+    } else if (priceMode !== "fixed" && priceVal.trim() !== "" && Number.isFinite(pct)) {
       newTotal = priced.reduce((s, c) => s + Math.max(0, Math.round(c.price * (1 + pct / 100))), 0);
     }
     return {
@@ -1148,7 +1162,13 @@ function OverridePanel({
       else {
         if (n < -90 || n > 500) return "Percent must be between -90 and 500.";
         body.pricePct = n;
+        // "% of recommended" stays dynamic (reapplied to the derived rate each
+        // read, honors per-date min/max); "% of base" materializes a fixed price.
+        body.pricePctMode = priceMode === "pctDyn" ? "dynamic" : "fixed";
       }
+    }
+    if (expiry.trim() !== (cell.expiresOn ?? "")) {
+      body.expiresOn = expiry.trim() === "" ? null : expiry.trim();
     }
     const intOf = (s: string) => Math.max(0, Math.round(parseFloat(s)));
     if (minPriceVal.trim() !== "") body.minPrice = intOf(minPriceVal);
@@ -1179,6 +1199,10 @@ function OverridePanel({
     }
     try {
       const n = await onApply(body);
+      // "Copy to another date range": fire the same override at the copy range.
+      if (!clear && copyFrom && copyTo) {
+        await onApply({ ...body, from: copyFrom, to: copyTo });
+      }
       if (clear) {
         setOkMsg(`Removed overrides on ${n} night(s).`);
       } else {
@@ -1279,7 +1303,17 @@ function OverridePanel({
                   checked={priceMode === "pct"}
                   onChange={() => setPriceMode("pct")}
                 />
-                Percent
+                % of base
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-foreground">
+                <input
+                  type="radio"
+                  name="price-mode"
+                  className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  checked={priceMode === "pctDyn"}
+                  onChange={() => setPriceMode("pctDyn")}
+                />
+                % of recommended
               </label>
               <div className="relative">
                 <input
@@ -1296,8 +1330,20 @@ function OverridePanel({
             </div>
             {priceMode === "pct" && (
               <p className="text-[10px] text-muted-foreground">
-                Percent adjusts each night&rsquo;s current calendar price (e.g. -10 lowers every night in the
-                range by 10%).
+                Materialized once off each night&rsquo;s current price — the result is a STATIC
+                price (no further dynamic adjustments), like PriceLabs&rsquo; &ldquo;% of base&rdquo;.
+              </p>
+            )}
+            {priceMode === "pctDyn" && (
+              <p className="text-[10px] text-muted-foreground">
+                Stored as a % and reapplied to the recommended rate on every read — stays DYNAMIC
+                and honors the per-date min/max, like PriceLabs&rsquo; &ldquo;% of recommended price&rdquo;.
+              </p>
+            )}
+            {priceMode === "fixed" && fixedPrice != null && fixedPrice < unitMinRate && (
+              <p className="text-[10px] font-medium text-amber-600">
+                ⚠ ₪{fixedPrice} is below this listing&rsquo;s minimum price (₪{unitMinRate}). A fixed
+                override bypasses the min/max — double-check before applying.
               </p>
             )}
             <div className="flex gap-3">
@@ -1363,6 +1409,43 @@ function OverridePanel({
               maxLength={500}
             />
           </label>
+          <div className="flex flex-wrap gap-3">
+            <label className={fieldLabelCls}>
+              Override expiry (auto-disable after)
+              <input
+                type="date"
+                className={`${inputCls} w-40`}
+                value={expiry}
+                onChange={(e) => setExpiry(e.target.value)}
+              />
+            </label>
+            <label className={fieldLabelCls}>
+              Copy to another range — from
+              <input
+                type="date"
+                className={`${inputCls} w-40`}
+                value={copyFrom}
+                onChange={(e) => setCopyFrom(e.target.value)}
+              />
+            </label>
+            <label className={fieldLabelCls}>
+              to
+              <input
+                type="date"
+                className={`${inputCls} w-40`}
+                value={copyTo}
+                onChange={(e) => setCopyTo(e.target.value)}
+              />
+            </label>
+          </div>
+          {(cell.createdAt || cell.updatedAt) && (
+            <p className="text-[10px] text-muted-foreground/70">
+              Override on {cell.date}: created {cell.createdAt?.slice(0, 10) ?? "—"} · updated{" "}
+              {cell.updatedAt?.slice(0, 10) ?? "—"}
+              {cell.expiresOn ? ` · expires ${cell.expiresOn}` : ""}
+              {cell.pctAdjust != null ? ` · dynamic ${cell.pctAdjust > 0 ? "+" : ""}${cell.pctAdjust}% of recommended` : ""}
+            </p>
+          )}
 
           {err && <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>}
           {okMsg && <p className="text-[11px] text-[hsl(var(--success))]">{okMsg}</p>}

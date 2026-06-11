@@ -383,6 +383,12 @@ function init(db: Database.Database) {
   ensureColumn(db, "units", "customization_group", "TEXT");
   ensureColumn(db, "units", "customization_subgroup", "TEXT");
 
+  // Date-Specific Override extensions: dynamic % of recommended price, expiry,
+  // and a creation timestamp (updated_at already exists).
+  ensureColumn(db, "rate_calendar", "pct_adjust", "REAL");
+  ensureColumn(db, "rate_calendar", "expires_on", "TEXT");
+  ensureColumn(db, "rate_calendar", "created_at", "TEXT");
+
   // Migrations for DBs created before these columns existed.
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");

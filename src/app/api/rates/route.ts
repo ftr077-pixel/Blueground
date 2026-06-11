@@ -43,6 +43,8 @@ export async function PATCH(req: Request) {
     to?: string;
     daysOfWeek?: number[];
     pricePct?: number;
+    pricePctMode?: "fixed" | "dynamic";
+    expiresOn?: string | null;
     minPrice?: number | null;
     maxPrice?: number | null;
     note?: string | null;
@@ -140,6 +142,15 @@ export async function PATCH(req: Request) {
         return NextResponse.json({ error: "pricePct must be between -90 and 500" }, { status: 400 });
       }
       range.pricePct = pct;
+      // "dynamic" = % of recommended (reapplied at read, stays dynamic);
+      // default "fixed" = % of base materialized into a static price.
+      range.pricePctMode = body.pricePctMode === "dynamic" ? "dynamic" : "fixed";
+    }
+    if (body.expiresOn !== undefined) {
+      if (body.expiresOn !== null && !DATE_RE.test(String(body.expiresOn))) {
+        return NextResponse.json({ error: "expiresOn must be YYYY-MM-DD or null" }, { status: 400 });
+      }
+      range.expiresOn = body.expiresOn === null ? null : String(body.expiresOn);
     }
     if (body.minPrice !== undefined)
       range.minPrice = body.minPrice === null ? null : Math.max(0, Math.round(Number(body.minPrice)));
@@ -166,6 +177,7 @@ export async function PATCH(req: Request) {
       range.maxPrice !== undefined ||
       range.minNights !== undefined ||
       range.closed !== undefined ||
+      range.expiresOn !== undefined ||
       range.note !== undefined;
     if (!hasField) {
       return NextResponse.json({ error: "nothing to update" }, { status: 400 });
@@ -205,7 +217,9 @@ export async function PATCH(req: Request) {
     if (range.clear) parts.push("overrides removed — defaults re-pushed");
     if (range.price != null) parts.push(`rate ₪${range.price}`);
     if (range.pricePct !== undefined)
-      parts.push(`rate ${range.pricePct > 0 ? "+" : ""}${range.pricePct}%`);
+      parts.push(`rate ${range.pricePct > 0 ? "+" : ""}${range.pricePct}%${range.pricePctMode === "dynamic" ? " of recommended (dynamic)" : " of base (fixed)"}`);
+    if (range.expiresOn !== undefined)
+      parts.push(range.expiresOn ? `expires ${range.expiresOn}` : "no expiry");
     if (range.minPrice != null) parts.push(`min ₪${range.minPrice}`);
     if (range.maxPrice != null) parts.push(`max ₪${range.maxPrice}`);
     if (range.minNights != null) parts.push(`min ${range.minNights}n`);
