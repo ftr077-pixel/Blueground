@@ -45,7 +45,7 @@ export interface RankInfo {
 export interface RateRow {
   unit: Pick<
     Unit,
-    "id" | "name" | "neighborhood" | "bedrooms" | "platform" | "currentRate" | "baseRate"
+    "id" | "name" | "neighborhood" | "bedrooms" | "platform" | "currentRate" | "baseRate" | "group" | "subgroup"
   >;
   cells: RateCell[];
   /** Occupancy over the next 30/60/90 nights from today (sold ÷ sellable), null when unknown. */
@@ -312,6 +312,8 @@ export function getCalendar(from: string, days: number): Calendar {
         platform: unit.platform,
         currentRate: unit.currentRate,
         baseRate: unit.baseRate,
+        group: unit.group,
+        subgroup: unit.subgroup,
       },
       cells,
       occ30: occOf(0),

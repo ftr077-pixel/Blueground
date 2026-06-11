@@ -6,36 +6,76 @@ import {
   getRuleOverrides,
   saveRuleOverrides,
   resetRuleOverrides,
+  rulesWithOverrides,
+  scopeStoreKey,
   type RuleOverrides,
+  type RuleScope,
 } from "@/lib/pricing/rules-config";
+import { listGroupNames } from "@/lib/repos/groups";
+import { listUnits } from "@/lib/repos/units";
 
 export const dynamic = "force-dynamic";
 
-function payload() {
+// Scope = "account" (default) | "group:<name>" | "unit:<id>" — PriceLabs's
+// account / group / listing customization levels. A group blob applies whether
+// listings attach it as group or sub-group.
+function validScope(scope: string | null): RuleScope | { error: string } {
+  const s = (scope || "account").trim();
+  if (s === "account") return s;
+  if (s.startsWith("group:")) {
+    const name = s.slice(6);
+    if (!listGroupNames().includes(name)) return { error: `unknown group "${name}"` };
+    return s;
+  }
+  if (s.startsWith("unit:")) {
+    const id = s.slice(5);
+    if (!listUnits().some((u) => u.id === id)) return { error: `unknown unit "${id}"` };
+    return s;
+  }
+  return { error: "scope must be account, group:<name> or unit:<id>" };
+}
+
+function payload(scope: RuleScope) {
+  const overrides = getRuleOverrides(scope);
   return {
+    scope,
     defaults: { ...PRICING_RULES, humanGatePct: PRICING_AGENT.humanGatePct },
-    overrides: getRuleOverrides(),
-    effective: { ...effectiveRules(), humanGatePct: effectiveHumanGatePct() },
+    overrides,
+    // The scope's standalone effective view: ITS overrides on code defaults
+    // (PriceLabs levels don't combine — see rules-config resolveChain).
+    effective:
+      scope === "account"
+        ? { ...effectiveRules(), humanGatePct: effectiveHumanGatePct() }
+        : { ...rulesWithOverrides(overrides), humanGatePct: effectiveHumanGatePct() },
+    groups: listGroupNames(),
   };
 }
 
 // Settings → Pricing engine rules. Browser-facing (behind the dashboard login).
-export async function GET() {
-  return NextResponse.json(payload());
+export async function GET(req: Request) {
+  const scope = validScope(new URL(req.url).searchParams.get("scope"));
+  if (typeof scope !== "string") return NextResponse.json(scope, { status: 400 });
+  return NextResponse.json(payload(scope));
 }
 
-// PUT { ...RuleOverrides } merges a partial patch; PUT { reset: true } clears all.
+// PUT { scope?, ...RuleOverrides } merges a partial patch into the scope;
+// PUT { scope?, reset: true } clears the scope's overrides.
 export async function PUT(req: Request) {
-  let body: (RuleOverrides & { reset?: boolean }) | null;
+  let body: (RuleOverrides & { reset?: boolean; scope?: string }) | null;
   try {
-    body = (await req.json()) as RuleOverrides & { reset?: boolean };
+    body = (await req.json()) as RuleOverrides & { reset?: boolean; scope?: string };
   } catch {
     return NextResponse.json({ error: "invalid json" }, { status: 400 });
   }
+  const scope = validScope(body?.scope ?? null);
+  if (typeof scope !== "string") return NextResponse.json(scope, { status: 400 });
+  // Guard against a scope string that can't map to a settings key.
+  scopeStoreKey(scope);
   if (body?.reset) {
-    resetRuleOverrides();
-    return NextResponse.json({ ok: true, ...payload() });
+    resetRuleOverrides(scope);
+    return NextResponse.json({ ok: true, ...payload(scope) });
   }
-  saveRuleOverrides(body ?? {});
-  return NextResponse.json({ ok: true, ...payload() });
+  const { reset: _r, scope: _s, ...patch } = body ?? {};
+  saveRuleOverrides(patch, scope);
+  return NextResponse.json({ ok: true, ...payload(scope) });
 }

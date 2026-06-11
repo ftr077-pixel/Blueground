@@ -59,6 +59,8 @@ interface RateRow {
     platform: string;
     currentRate: number;
     baseRate: number;
+    group: string | null;
+    subgroup: string | null;
   };
   cells: RateCell[];
   occ30: number | null;
@@ -588,6 +590,12 @@ export function RateCalendar() {
           windowFrom={data.from}
           windowDays={data.days}
           defaultMinNights={data.defaultMinNights}
+          groupName={selCell.unit.group ?? selCell.unit.subgroup ?? null}
+          groupCount={(() => {
+            const g = selCell.unit.group ?? selCell.unit.subgroup;
+            if (!g) return 0;
+            return data.rows.filter((r) => r.unit.group === g || r.unit.subgroup === g).length;
+          })()}
           busy={busy}
           onClose={() => setSel(null)}
           onApply={applyOverride}
@@ -993,6 +1001,8 @@ function OverridePanel({
   windowFrom,
   windowDays,
   defaultMinNights,
+  groupName,
+  groupCount,
   busy,
   onApply,
   onClose,
@@ -1005,6 +1015,9 @@ function OverridePanel({
   windowFrom: string;
   windowDays: number;
   defaultMinNights: number;
+  /** The unit's customization group (group ?? subgroup) for group-level DSOs. */
+  groupName: string | null;
+  groupCount: number;
   busy: boolean;
   onApply: (body: Record<string, unknown>) => Promise<number>;
   onClose: () => void;
@@ -1020,6 +1033,7 @@ function OverridePanel({
   const [minNightsVal, setMinNightsVal] = useState("");
   const [avail, setAvail] = useState<"" | "close" | "open">("");
   const [note, setNote] = useState(cell.note ?? "");
+  const [applyGroup, setApplyGroup] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [okMsg, setOkMsg] = useState<string | null>(null);
 
@@ -1117,6 +1131,7 @@ function OverridePanel({
   function buildBody(clear: boolean): Record<string, unknown> | string {
     if (nights === 0) return "Pick a valid date range.";
     const body: Record<string, unknown> = { unitId, from: start, to: end };
+    if (applyGroup && groupName) body.applyToGroup = true;
     if (dowOn) {
       const sel = dow.flatMap((on, i) => (on ? [i] : []));
       if (sel.length === 0) return "Select at least one day of the week.";
@@ -1391,6 +1406,17 @@ function OverridePanel({
               )}
             </div>
             <div className="flex items-center gap-2">
+              {groupName && (
+                <label className="mr-auto inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={applyGroup}
+                    onChange={(e) => setApplyGroup(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                  />
+                  Apply to all {groupCount} listings in “{groupName}”
+                </label>
+              )}
               <button
                 type="button"
                 className={btnGhost}

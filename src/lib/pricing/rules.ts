@@ -18,6 +18,9 @@ export interface FactorResult {
   factor: number;
   /** Optional ₪ additive (fixed-mode adjustments), applied after all multipliers. */
   add?: number;
+  /** Optional absolute nightly price pin (e.g. fixed orphan-day price): the
+   *  engine sets the pre-clamp raw rate to this, ignoring factor/add. */
+  pin?: number;
   detail: string;
 }
 
@@ -101,11 +104,162 @@ export function dayOfWeekRule(date: Date, cfg: Rules): FactorResult | null {
   return { key: "dayOfWeek", label: "Day-of-week", factor, detail: pct(factor) };
 }
 
+/** Does this date fall on a configured weekend day ("Weekend Days" customization)? */
+export function isWeekendDay(date: Date, cfg: Rules): boolean {
+  return cfg.weekend.days.includes(date.getUTCDay());
+}
+
+/** Orphan-gap detection: if `date` is an open night inside a short gap bounded
+ *  by booked nights on BOTH sides (within `maxScan` days each way), returns the
+ *  gap length in nights. Open calendar edges are not gaps. */
+export function gapInfo(
+  unit: Unit,
+  date: Date,
+  m: MarketProviders,
+  maxScan = 45,
+): { len: number } | null {
+  if (m.isBooked(unit, date)) return null;
+  let before = 0; // open nights strictly before `date` until the previous booking
+  let found = false;
+  for (let k = 1; k <= maxScan; k++) {
+    if (m.isBooked(unit, shiftDay(date, -k))) {
+      found = true;
+      break;
+    }
+    before++;
+  }
+  if (!found) return null;
+  let after = 0;
+  found = false;
+  for (let k = 1; k <= maxScan; k++) {
+    if (m.isBooked(unit, shiftDay(date, k))) {
+      found = true;
+      break;
+    }
+    after++;
+  }
+  if (!found) return null;
+  return { len: before + after + 1 };
+}
+
+/** PriceLabs "Orphan Day Prices": adjust (or pin) the price of short open gaps
+ *  between bookings. First matching range wins (ranges are ascending by gap
+ *  length). Percent entries join the last-minute/adjacent stacking rules; a
+ *  fixed entry is an absolute nightly price the engine pins pre-clamp. */
+export function orphanDayPriceRule(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): FactorResult | null {
+  const c = cfg.orphanDayPrices;
+  if (!c.enabled || c.ranges.length === 0) return null;
+  const gap = gapInfo(unit, date, m);
+  if (!gap) return null;
+  const range = c.ranges.find(
+    (r) =>
+      gap.len <= r.upToGapNights && (r.withinDays == null || leadDays <= r.withinDays),
+  );
+  if (!range) return null;
+  const value = isWeekendDay(date, cfg) ? range.weekend : range.weekday;
+  if (range.mode === "fixed") {
+    if (value <= 0) return null;
+    return {
+      key: "orphanDay",
+      label: "Orphan day",
+      factor: 1,
+      pin: value,
+      detail: `gap ${gap.len}n — fixed ₪${value}`,
+    };
+  }
+  if (value === 0) return null;
+  const word = value < 0 ? "discount" : "premium";
+  return {
+    key: "orphanDay",
+    label: "Orphan day",
+    factor: 1 + value,
+    detail: `gap ${gap.len}n — ${pct(1 + value)} ${word}`,
+  };
+}
+
+/** Portfolio Occupancy-Based Adjustments: price off the COMBINED occupancy of
+ *  the unit's customization group, with a different band profile per
+ *  booking-window column. Layered pre-clamp, so the unit's min/max still hold.
+ *  No-op for ungrouped units (a single unit swings 0↔100%). */
+export function portfolioOccupancyRule(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): FactorResult | null {
+  const c = cfg.portfolioOccupancy;
+  if (!c.enabled || c.windows.length === 0) return null;
+  const occ = m.groupOccupancy(unit, date);
+  if (occ == null) return null;
+  const win = c.windows.find((w) => leadDays <= w.uptoDays) ?? c.windows[c.windows.length - 1];
+  const band = win.bands.find((b) => occ < b.upTo) ?? win.bands[win.bands.length - 1];
+  const adjust = Math.max(-0.5, Math.min(5, band.adjust));
+  if (adjust === 0) return null;
+  return {
+    key: "portfolioOccupancy",
+    label: "Portfolio occupancy",
+    factor: 1 + adjust,
+    detail: `${unit.group}: ${(occ * 100).toFixed(0)}% booked ≤${win.uptoDays}d out ${pct(1 + adjust)}`,
+  };
+}
+
+/** Advanced Minimum Price resolution for one night. farOut/weekend floors only
+ *  ever RAISE the listing min (both can apply — the higher wins); last-minute
+ *  and orphan floors REPLACE it, and may sit below the listing min (their
+ *  documented purpose: looser floors where conversion matters most). */
+export function resolveMinPrice(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): { min: number; source: string } {
+  const c = cfg.minPrices;
+  const compute = (mode: "fixed" | "pctBase" | "pctMin", value: number) =>
+    mode === "fixed"
+      ? value
+      : mode === "pctBase"
+        ? unit.baseRate * (1 + value)
+        : unit.minRate * (1 + value);
+  let min = unit.minRate;
+  let source = "listing";
+  if (c.farOut.enabled && leadDays >= c.farOut.beyondDays) {
+    const v = compute(c.farOut.mode, c.farOut.value);
+    if (v > min) {
+      min = v;
+      source = "far-out";
+    }
+  }
+  if (c.weekend.enabled && isWeekendDay(date, cfg)) {
+    const v = compute(c.weekend.mode, c.weekend.value);
+    if (v > min) {
+      min = v;
+      source = source === "far-out" ? "far-out + weekend" : "weekend";
+    }
+  }
+  if (c.lastMinute.enabled && leadDays <= c.lastMinute.withinDays) {
+    min = compute(c.lastMinute.mode, c.lastMinute.value);
+    source = "last-minute";
+  }
+  if (c.orphan.enabled && gapInfo(unit, date, m)) {
+    min = compute(c.orphan.mode, c.orphan.value);
+    source = "orphan";
+  }
+  return { min: Math.max(0, Math.round(min)), source };
+}
+
 /** PriceLabs "Adjacent Factor": adjust the open days right before/after a
  *  booking — a discount fills the gap, a premium discourages back-to-back
- *  turnovers. Skips weekends (Fri/Sat here) unless opted in, and never fires on
- *  the booked night itself. Stacks with last-minute (and orphan-day, when it
- *  lands) via resolveAdjustmentStack. */
+ *  turnovers. Skips weekends (per the Weekend Days customization) unless opted
+ *  in, and never fires on the booked night itself. Stacks with last-minute and
+ *  orphan-day via resolveAdjustmentStack. */
 export function adjacentRule(
   unit: Unit,
   date: Date,
@@ -115,8 +269,7 @@ export function adjacentRule(
   const c = cfg.adjacent;
   if (!c.enabled || c.value === 0 || (c.daysBefore <= 0 && c.daysAfter <= 0)) return null;
   if (m.isBooked(unit, date)) return null; // the adjustment targets the open neighbors
-  const dow = date.getUTCDay();
-  if (!c.applyOnWeekends && (dow === 5 || dow === 6)) return null;
+  if (!c.applyOnWeekends && isWeekendDay(date, cfg)) return null;
 
   let near: "after" | "before" | null = null;
   for (let k = 1; k <= c.daysAfter && !near; k++) {

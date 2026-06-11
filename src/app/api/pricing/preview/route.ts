@@ -5,10 +5,8 @@ import { marketProviders } from "@/lib/pricing/providers";
 import { quoteNight } from "@/lib/pricing/engine";
 import { PRICING_RULES } from "@/lib/config/pricing";
 import {
-  effectiveRules,
-  getRuleOverrides,
-  mergeRuleOverrides,
-  rulesWithOverrides,
+  effectiveRulesForUnit,
+  effectiveRulesForUnitWithPatch,
   type RuleOverrides,
 } from "@/lib/pricing/rules-config";
 
@@ -33,7 +31,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  let body: { unitId?: string; candidate?: RuleOverrides; horizonDays?: number };
+  let body: { unitId?: string; candidate?: RuleOverrides; horizonDays?: number; scope?: string };
   try {
     body = await req.json();
   } catch {
@@ -45,10 +43,11 @@ export async function POST(req: Request) {
 
   const market = marketProviders();
   const asOf = new Date();
-  const saved = effectiveRules();
-  const candidate = rulesWithOverrides(
-    mergeRuleOverrides(getRuleOverrides(), body.candidate ?? {}),
-  );
+  // Saved = the unit's full scope chain today; candidate = the same chain AS IF
+  // the patch were saved at the edited scope. Previewing a group the listing
+  // doesn't belong to honestly shows no effect — same as a real Save would.
+  const saved = effectiveRulesForUnit(unit);
+  const candidate = effectiveRulesForUnitWithPatch(unit, body.scope ?? "account", body.candidate ?? {});
   const defaults = PRICING_RULES;
   const booked = bookedDatesForUnit(unit.id, asOf.toISOString().slice(0, 10), horizon + 1);
 

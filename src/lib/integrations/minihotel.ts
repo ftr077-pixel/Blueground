@@ -518,6 +518,9 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
       // Omit fields we don't want to change (per the API contract).
       const d: Record<string, unknown> = { Date: it.date };
       if (it.available != null) d.Availability = it.available;
+      // MiniHotel's MinimumNights is min-stay-THROUGH semantics (PriceLabs:
+      // "Min-Stay Through — specific to MiniHotel and Lodgify"): the minimum
+      // must hold for every stay date, not just check-in.
       if (it.minNights != null) d.MinimumNights = it.minNights;
       if (it.closed != null) d.Close = it.closed;
       if (it.price != null) d.Rates = [{ PriceList: conn.rateCode, Price: it.price }];

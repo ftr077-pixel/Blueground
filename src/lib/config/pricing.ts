@@ -107,6 +107,45 @@ export const PRICING_OFFSET_LIMITS = {
   fixed: { min: -40, max: 500 },
 } as const;
 
+/** How a minimum-price customization expresses its value (PriceLabs options):
+ *  fixed ₪, % change on the base price, or % change on the listing min price. */
+export type MinPriceMode = "fixed" | "pctBase" | "pctMin";
+
+/** One booking-window column of a Portfolio Occupancy profile. */
+export interface PortfolioObaWindow {
+  /** Window applies to lead times ≤ this many days (ascending; last is catch-all). */
+  uptoDays: number;
+  bands: OccupancyBand[];
+}
+
+const obaBands = (adjusts: [number, number, number, number]): OccupancyBand[] => [
+  { upTo: 0.5, adjust: adjusts[0], label: "soft <50%" },
+  { upTo: 0.8, adjust: adjusts[1], label: "healthy 50–80%" },
+  { upTo: 0.95, adjust: adjusts[2], label: "tight 80–95%" },
+  { upTo: 1.01, adjust: adjusts[3], label: "full 95%+" },
+];
+
+/** PriceLabs' pre-filled Portfolio OBA profiles by booking-window range. The
+ *  exact matrices are ours; the windows mirror the documented targets (short
+ *  11–20d, medium 16–30d, long 31–60d to reach ~50% occupancy). */
+export const PORTFOLIO_OBA_PRESETS: Record<"short" | "medium" | "long", PortfolioObaWindow[]> = {
+  short: [
+    { uptoDays: 10, bands: obaBands([-0.15, -0.05, 0.05, 0.15]) },
+    { uptoDays: 20, bands: obaBands([-0.1, 0, 0.05, 0.1]) },
+    { uptoDays: 9999, bands: obaBands([-0.05, 0, 0.03, 0.08]) },
+  ],
+  medium: [
+    { uptoDays: 15, bands: obaBands([-0.15, -0.05, 0.05, 0.15]) },
+    { uptoDays: 30, bands: obaBands([-0.1, 0, 0.05, 0.1]) },
+    { uptoDays: 9999, bands: obaBands([-0.05, 0, 0.03, 0.08]) },
+  ],
+  long: [
+    { uptoDays: 30, bands: obaBands([-0.12, -0.04, 0.04, 0.12]) },
+    { uptoDays: 60, bands: obaBands([-0.08, 0, 0.04, 0.08]) },
+    { uptoDays: 9999, bands: obaBands([-0.04, 0, 0.02, 0.06]) },
+  ],
+};
+
 /** The full rule-engine configuration. Code defaults live in PRICING_RULES;
  *  operator overrides (Settings → Pricing engine rules) are deep-merged over
  *  them at read time via src/lib/pricing/rules-config.ts. */
@@ -138,6 +177,77 @@ export interface PricingRulesConfig {
     mode: "percent" | "fixed";
     /** Signed; fraction when percent (−0.4..5), ₪ when fixed (−40..500). */
     value: number;
+  };
+  /** "Weekend Days" customization: which UTC weekdays (0=Sun..6=Sat) count as
+   *  weekend for orphan/min-stay/min-price weekday-vs-weekend splits. TLV
+   *  default Fri/Sat. (Display weekends in the Rates Calendar are unchanged.) */
+  weekend: { days: number[] };
+  /** Orphan Day Prices: adjust the price of short open gaps between bookings.
+   *  Up to 5 ranges by ascending gap length; values are weekday/weekend split.
+   *  percent = signed fraction; fixed = an absolute nightly price (a pin, not
+   *  an adjustment — PriceLabs "Fixed Pricing"). Percent entries join the
+   *  last-minute/adjacent stacking rules. */
+  orphanDayPrices: {
+    enabled: boolean;
+    ranges: Array<{
+      upToGapNights: number;
+      mode: "percent" | "fixed";
+      weekday: number;
+      weekend: number;
+      /** Only within this lead time (days), or null = always. */
+      withinDays: number | null;
+    }>;
+  };
+  /** Portfolio Occupancy-Based Adjustments: price each date off the COMBINED
+   *  occupancy of the unit's customization group, per booking-window column.
+   *  No-op for units without a group (single units swing 0↔100%). Applied
+   *  pre-clamp, so floors/ceilings still hold (unlike the pricing offset). */
+  portfolioOccupancy: {
+    enabled: boolean;
+    profile: "short" | "medium" | "long" | "custom";
+    /** The active matrix; presets fill it, "custom" lets the operator edit. */
+    windows: PortfolioObaWindow[];
+  };
+  /** Advanced Minimum Price settings — date-conditional floors that replace or
+   *  raise the listing min. farOut/weekend only ever RAISE the floor;
+   *  lastMinute/orphan REPLACE it (and may sit below the listing min — that's
+   *  their documented point). */
+  minPrices: {
+    farOut: { enabled: boolean; beyondDays: number; mode: MinPriceMode; value: number };
+    weekend: { enabled: boolean; mode: MinPriceMode; value: number };
+    lastMinute: { enabled: boolean; withinDays: number; mode: MinPriceMode; value: number };
+    orphan: { enabled: boolean; mode: MinPriceMode; value: number };
+  };
+  /** Dynamic Minimum Stay restrictions (full PriceLabs hierarchy; resolution
+   *  order lives in engine.resolveMinStay). MiniHotel's MinimumNights field is
+   *  min-stay-THROUGH semantics. */
+  minStayRules: {
+    /** recommended = engine-driven (demand tiers + market median); custom = the rules below. */
+    mode: "recommended" | "custom";
+    /** Highest Minimum Stay Allowed — recommendations never exceed this. */
+    highestAllowed: number;
+    /** Custom default rule: fixed weekday/weekend nights, or a min booking value
+     *  (₪) the stay must gross (nights ≈ value ÷ nightly rate). */
+    custom: { rule: "fixed" | "bookingValue"; weekday: number; weekend: number; bookingValue: number };
+    /** Up to 3 last-minute rules: lower the min stay near check-in. */
+    lastMinute: Array<{ withinDays: number; weekday: number; weekend: number }>;
+    /** Adjacent-day min stays: allow shorter stays that butt up against an
+     *  existing booking. after = night right after a checkout; before = stays
+     *  that end flush against the next booking (no gap created). */
+    adjacent: { enabled: boolean; afterNights: number; beforeFlushFit: boolean };
+    /** Orphan-gap min stay: shrink the min stay to make short gaps bookable.
+     *  Only ever REDUCES (PriceLabs rule), with its own floor (Lowest Orphan
+     *  Gap Allowed — may sit below the unit's lowestMinStay). */
+    orphanGap: {
+      enabled: boolean;
+      strategy: "lengthOfGap" | "gapMinus1" | "gapMinus2" | "fixed";
+      fixedNights: number;
+      maxGapNights: number;
+      lowestAllowed: number;
+    };
+    /** Adaptive Occupancy Adjustment: −1 night when own forward occupancy runs
+     *  10–20% (relative) below market, −2 beyond that; never below the floor. */
+    adaptiveOccupancy: { enabled: boolean };
   };
   minStayHierarchy: { farOutThresholdDays: number; farOutNights: number };
 }
@@ -225,6 +335,35 @@ export const PRICING_RULES: PricingRulesConfig = {
     enabled: false,
     mode: "percent",
     value: 0,
+  },
+  /** TLV weekend: Friday + Saturday nights. */
+  weekend: { days: [5, 6] },
+  /** PriceLabs ships this ON with a 20% discount on ≤2-night gaps; for a 30+
+   *  night portfolio orphan gaps are rare, so it ships implemented but OFF. */
+  orphanDayPrices: {
+    enabled: false,
+    ranges: [{ upToGapNights: 2, mode: "percent", weekday: -0.2, weekend: -0.2, withinDays: null }],
+  },
+  /** Needs customization groups to mean anything (single units swing 0↔100%). */
+  portfolioOccupancy: {
+    enabled: false,
+    profile: "long",
+    windows: PORTFOLIO_OBA_PRESETS.long,
+  },
+  minPrices: {
+    farOut: { enabled: false, beyondDays: 60, mode: "pctBase", value: 0 },
+    weekend: { enabled: false, mode: "pctBase", value: 0 },
+    lastMinute: { enabled: false, withinDays: 14, mode: "pctMin", value: 0 },
+    orphan: { enabled: false, mode: "pctMin", value: 0 },
+  },
+  minStayRules: {
+    mode: "recommended",
+    highestAllowed: 90,
+    custom: { rule: "fixed", weekday: 30, weekend: 30, bookingValue: 0 },
+    lastMinute: [],
+    adjacent: { enabled: false, afterNights: 30, beforeFlushFit: false },
+    orphanGap: { enabled: false, strategy: "lengthOfGap", fixedNights: 1, maxGapNights: 4, lowestAllowed: 1 },
+    adaptiveOccupancy: { enabled: true },
   },
   /** Minimum-stay hierarchy extras (the demand-flex tiers live in PRICING_AGENT). */
   minStayHierarchy: {

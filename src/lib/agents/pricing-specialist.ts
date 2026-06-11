@@ -10,7 +10,7 @@ import {
 } from "@/lib/repos/units";
 import { unitRateAnchors } from "@/lib/repos/rates";
 import { PRICING_AGENT, UNIT_PRICING_DEFAULTS, roundRate } from "@/lib/config/pricing";
-import { effectiveRules, effectiveHumanGatePct } from "@/lib/pricing/rules-config";
+import { effectiveRulesForUnit, effectiveHumanGatePct } from "@/lib/pricing/rules-config";
 import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { representativeQuote, type FactorResult } from "@/lib/pricing/engine";
 
@@ -68,9 +68,6 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
   const ranAt = asOf.toISOString();
   const units = listUnits();
   const anchors = unitRateAnchors();
-  // Effective config = code defaults + operator overrides (Settings → Pricing
-  // engine rules), read fresh each pass so saves apply without a redeploy.
-  const cfg = effectiveRules();
   const gatePct = effectiveHumanGatePct();
   const decisions: PricingDecision[] = [];
   const skipped: string[] = [];
@@ -107,6 +104,10 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
       setUnitRateAnchor(unit.id, base, current, minRate, maxRate);
       unit = { ...unit, baseRate: base, currentRate: current, minRate, maxRate };
     }
+    // Per-unit effective config: account → group → sub-group → listing scopes
+    // (Settings → Pricing engine rules), read fresh each pass so saves apply
+    // without a redeploy.
+    const cfg = effectiveRulesForUnit(unit);
     const q = representativeQuote(unit, providers, asOf, cfg);
     const newRate = q.rate;
     const deltaPct = ((newRate - unit.currentRate) / unit.currentRate) * 100;

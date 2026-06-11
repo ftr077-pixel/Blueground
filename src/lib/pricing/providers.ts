@@ -7,7 +7,7 @@
 // the engine. Each method below carries a "PRODUCTION SEAM" note describing the
 // real input. Comp-set min-nights is ALREADY wired to live scraper data.
 
-import type { Unit } from "@/lib/repos/units";
+import { listUnits, type Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { bookedDatesForUnit } from "@/lib/repos/rates";
 import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
@@ -43,28 +43,78 @@ export interface MarketProviders {
   compMedianMinNights(): number | null;
 
   /** True when the unit's calendar shows a confirmed booking on this night.
-   *  Feeds the Adjacent Factor rule. Wired to the Rates Calendar's booked cells
-   *  (MiniHotel actuals + baseline blocks); closed-only nights don't count. */
+   *  Feeds the Adjacent Factor and orphan-gap rules. Wired to the Rates
+   *  Calendar's booked cells (MiniHotel actuals + baseline blocks);
+   *  closed-only nights don't count. */
   isBooked(unit: Unit, date: Date): boolean;
+
+  /** Combined occupancy of the unit's customization group for a date (booked
+   *  members ÷ members), or null when the unit has no group / the group has
+   *  fewer than 2 members. Feeds Portfolio Occupancy-Based Adjustments. */
+  groupOccupancy(unit: Unit, date: Date): number | null;
+
+  /** Own vs market forward occupancy over the next ~90 nights, or null when
+   *  the market side is unknown. Feeds the Adaptive Occupancy min-stay
+   *  reduction (own running relatively below market ⇒ shorter min stay). */
+  occupancy90(unit: Unit): { own: number; market: number } | null;
 
   /** Operator/calendar override for a unit+date, or null.
    *  PRODUCTION SEAM: a unit_date_overrides table edited by the operator. */
   dateOverride(unit: Unit, date: Date): DateOverride | null;
 }
 
-// Shared booked-night probe: lazily loads each unit's booked set once per
-// provider instance, spanning 31 days back (the adjacency scan can look up to
-// 30 days behind a quoted night) through the 1-year preview horizon.
-function bookedProbe(): (unit: Unit, date: Date) => boolean {
-  const cache = new Map<string, Set<string>>();
-  const start = new Date(Date.now() - 31 * 86_400_000).toISOString().slice(0, 10);
-  return (unit, date) => {
-    let set = cache.get(unit.id);
-    if (!set) {
-      set = bookedDatesForUnit(unit.id, start, 430);
-      cache.set(unit.id, set);
+// Shared calendar-derived signals: per provider instance, lazily loads each
+// unit's booked set once (spanning 31 days back — the adjacency scan can look
+// up to 30 days behind a quoted night — through the 1-year preview horizon),
+// and derives group occupancy + own forward occupancy from the same sets.
+function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
+  const DAY = 86_400_000;
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const todayIso = iso(new Date());
+  const start = iso(new Date(Date.now() - 31 * DAY));
+  const sets = new Map<string, Set<string>>();
+  const setFor = (id: string) => {
+    let s = sets.get(id);
+    if (!s) {
+      s = bookedDatesForUnit(id, start, 430);
+      sets.set(id, s);
     }
-    return set.has(date.toISOString().slice(0, 10));
+    return s;
+  };
+  let unitsCache: Unit[] | null = null;
+  const allUnits = () => (unitsCache ??= listUnits());
+  const groupOccCache = new Map<string, number | null>();
+
+  return {
+    isBooked(unit: Unit, date: Date): boolean {
+      return setFor(unit.id).has(iso(date));
+    },
+    groupOccupancy(unit: Unit, date: Date): number | null {
+      const g = unit.group;
+      if (!g) return null;
+      const key = g + "|" + iso(date);
+      const hit = groupOccCache.get(key);
+      if (hit !== undefined) return hit;
+      // A group customization counts listings attached as group OR sub-group.
+      const members = allUnits().filter((u) => u.group === g || u.subgroup === g);
+      const occ =
+        members.length < 2
+          ? null
+          : members.filter((u) => setFor(u.id).has(iso(date))).length / members.length;
+      groupOccCache.set(key, occ);
+      return occ;
+    },
+    occupancy90(unit: Unit): { own: number; market: number } | null {
+      const market = marketOcc90(unit);
+      if (market == null || market <= 0) return null;
+      const s = setFor(unit.id);
+      let own = 0;
+      const t0 = Date.parse(todayIso + "T00:00:00Z");
+      for (let i = 0; i < 90; i++) {
+        if (s.has(new Date(t0 + i * DAY).toISOString().slice(0, 10))) own++;
+      }
+      return { own: own / 90, market };
+    },
   };
 }
 
@@ -91,7 +141,9 @@ const HOOD_DEMAND: Record<string, { base: number; driver: string }> = {
 /** Deterministic, demo-quality providers. Swap for real implementations at go-live. */
 export function mockProviders(): MarketProviders {
   const compMedian = marketMinNightsBenchmark().median;
+  const signals = calendarSignals(() => 0.85); // market norm
   return {
+    ...signals,
     seasonalityIndex() {
       return null; // use the configured monthly curve
     },
@@ -110,7 +162,6 @@ export function mockProviders(): MarketProviders {
     compMedianMinNights() {
       return compMedian;
     },
-    isBooked: bookedProbe(),
     dateOverride() {
       return null;
     },
@@ -163,8 +214,12 @@ export function airRoiProviders(): MarketProviders {
   const globalOcc = summaries.length ? mean(summaries.map((s) => s.occupancy)) : 0.85;
   const globalMinNights = summaries.length ? Math.round(mean(summaries.map((s) => s.min_nights))) : null;
   const scraperMedian = marketMinNightsBenchmark().median;
+  const signals = calendarSignals(
+    (unit) => prepped.get(unit.neighborhood)?.snap.summary?.occupancy ?? globalOcc,
+  );
 
   return {
+    ...signals,
     seasonalityIndex(date) {
       const ratios: number[] = [];
       for (const p of prepped.values()) {
@@ -201,7 +256,6 @@ export function airRoiProviders(): MarketProviders {
     compMedianMinNights() {
       return globalMinNights ?? scraperMedian;
     },
-    isBooked: bookedProbe(),
     dateOverride() {
       return null;
     },

@@ -379,6 +379,10 @@ function init(db: Database.Database) {
   ensureColumn(db, "reservation", "vat_basis", "TEXT");
   ensureColumn(db, "reservation", "country", "TEXT");
 
+  // Customization groups (PriceLabs account → group → sub-group → listing).
+  ensureColumn(db, "units", "customization_group", "TEXT");
+  ensureColumn(db, "units", "customization_subgroup", "TEXT");
+
   // Migrations for DBs created before these columns existed.
   ensureColumn(db, "tracked_listings", "guests", "INTEGER");
   ensureColumn(db, "tracked_listings", "start_dates", "TEXT");
