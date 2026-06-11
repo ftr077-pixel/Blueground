@@ -43,7 +43,7 @@ export interface SyncResult {
   unmappedTypes: string[];
   errors: string[]; // ERR codes MiniHotel reported (non-fatal — collected, not thrown)
   note?: string; // e.g. "loaded via availability search after the bulk feed was blocked"
-  reservations?: number; // PMS reservations found in the window (undefined = pull didn't run)
+  reservations?: number; // PMS reservations found in the 12-month horizon (undefined = pull didn't run)
   bookedNights?: number; // sold nights written to the calendar from those reservations
   message?: string;
 }
@@ -55,6 +55,11 @@ const todayLocal = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
 const plusDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+
+// How far ahead every Sync pulls the PMS reservation list — operator stays are
+// booked up to a year out, so the calendar's sold nights must reach that far
+// even when the viewed price window is only 30/60/90 days.
+const RESERVATION_DAYS = 365;
 
 function escXml(s: string): string {
   return s
@@ -402,33 +407,65 @@ export async function syncFromMiniHotel(opts: {
 
     // 3) Reservations → sold nights. The price feeds say what's for sale; the
     //    PMS reservation list (Room Status Inquiry) says what's actually SOLD.
-    //    Pull it for the same window so occupancy reads true all the way out —
-    //    independent of bulk-feed blocks or the fallback's night cap.
+    //    Stays land up to a year out, so this pull ALWAYS covers the next 12
+    //    months regardless of the viewed price window — one request for the
+    //    full range, falling back to quarter-sized chunks if MiniHotel rejects
+    //    it. Night-sets union per room type, so overlap between chunks is safe.
+    const resTo = plusDays(from, RESERVATION_DAYS - 1);
+    const resv: AriReservation[] = [];
+    let resPulled = false;
     try {
-      const rxml = await fetchRoomStatusRange(conn, from, to);
-      const resv = parseRoomStatusReservations(rxml);
-      extractMiniHotelErrors(rxml).forEach((e) => {
+      const rxml = await fetchRoomStatusRange(conn, from, resTo);
+      const got = parseRoomStatusReservations(rxml);
+      const rerrs = extractMiniHotelErrors(rxml);
+      rerrs.forEach((e) => {
         if (!errors.includes(e)) errors.push(e);
       });
-      if (resv.length > 0) {
-        soldByType = new Map();
-        reservationsSeen = 0;
-        for (const r of resv) {
-          if (!r.roomType) continue;
-          if (r.status && /^(cl|cxl|ns)$|cancel|no.?show|void|declin|reject/i.test(r.status)) continue;
-          reservationsSeen++;
-          const key = r.roomType.trim().toUpperCase();
-          let set = soldByType.get(key);
-          if (!set) soldByType.set(key, (set = new Set()));
-          // checkOut is the departure date — the guest's last NIGHT is the day before.
-          for (let d = r.checkIn; d < r.checkOut; d = plusDays(d, 1)) {
-            if (d >= from && d <= to) set.add(d);
-          }
+      // Zero reservations alongside an error = a failed pull, not an empty year.
+      if (got.length > 0 || rerrs.length === 0) {
+        resv.push(...got);
+        resPulled = true;
+      }
+    } catch {
+      /* fall through to chunked pulls */
+    }
+    if (!resPulled) {
+      for (let i = 0; i < RESERVATION_DAYS; i += 92) {
+        const cFrom = plusDays(from, i);
+        const cTo = plusDays(from, Math.min(i + 91, RESERVATION_DAYS - 1));
+        try {
+          const rxml = await fetchRoomStatusRange(conn, cFrom, cTo);
+          resv.push(...parseRoomStatusReservations(rxml));
+          extractMiniHotelErrors(rxml).forEach((e) => {
+            if (!errors.includes(e)) errors.push(e);
+          });
+          resPulled = true;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "reservation pull failed";
+          if (!errors.includes(msg)) errors.push(msg);
         }
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "reservation pull failed";
-      if (!errors.includes(msg)) errors.push(msg);
+    }
+    if (resPulled && resv.length > 0) {
+      soldByType = new Map();
+      reservationsSeen = 0;
+      const counted = new Set<string>(); // a stay can appear in two chunks — count it once
+      for (const r of resv) {
+        if (!r.roomType) continue;
+        if (r.status && /^(cl|cxl|ns)$|cancel|no.?show|void|declin|reject/i.test(r.status)) continue;
+        const stayKey = `${r.resNumber}|${r.roomType}|${r.checkIn}|${r.checkOut}`;
+        if (!counted.has(stayKey)) {
+          counted.add(stayKey);
+          reservationsSeen++;
+        }
+        const key = r.roomType.trim().toUpperCase();
+        let set = soldByType.get(key);
+        if (!set) soldByType.set(key, (set = new Set()));
+        // checkOut is the departure date — the guest's last NIGHT is the day before.
+        for (let d = r.checkIn; d < r.checkOut; d = plusDays(d, 1)) {
+          if (d >= from && d <= resTo) set.add(d);
+        }
+      }
     }
   }
 
@@ -469,13 +506,14 @@ export async function syncFromMiniHotel(opts: {
     }
   }
 
-  // Reservation truth: mark each mapped unit's sold nights across the WHOLE
-  // window (cancellations heal — previously-booked nights with no reservation
-  // flip back to open).
+  // Reservation truth: mark each mapped unit's sold nights across the FULL
+  // 12-month reservation horizon (not just the viewed price window), so far-out
+  // stays show wherever the operator scrolls. Cancellations heal — previously
+  // booked nights with no reservation behind them flip back to open.
   let bookedNights = 0;
   if (soldByType) {
     const windowDates: string[] = [];
-    for (let i = 0; i < days; i++) windowDates.push(plusDays(from, i));
+    for (let i = 0; i < RESERVATION_DAYS; i++) windowDates.push(plusDays(from, i));
     for (const [code, units] of byType) {
       const sold = soldByType.get(code) ?? new Set<string>();
       for (const unitId of units) bookedNights += setBookedNights(unitId, windowDates, sold);

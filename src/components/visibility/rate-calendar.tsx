@@ -423,7 +423,7 @@ export function RateCalendar() {
         const errText = `${errs.slice(0, 2).join(" | ")}${errs.length > 2 ? " …" : ""}`;
         const resTxt =
           d.reservations != null
-            ? ` · ${d.bookedNights ?? 0} sold night(s) from ${d.reservations} reservation(s)`
+            ? ` · ${d.bookedNights ?? 0} sold night(s) from ${d.reservations} reservation(s) over the next 12 months`
             : "";
         // Nothing written + an error = MiniHotel's bulk feed aborted on one bad
         // room type (it can't be told to skip rooms). Say so plainly — "skipped"
