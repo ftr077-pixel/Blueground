@@ -1,23 +1,7 @@
-import { TrendingUp } from "lucide-react";
-import { AnalyticsPanel } from "@/components/visibility/analytics-panel";
+import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
+// Position Trends retired — its portfolio-visibility chart now lives at the
+// top of the Search & Profit board (/visibility).
 export default function Page() {
-  return (
-    <div className="space-y-6">
-      <header className="flex items-start gap-4">
-        <div className="grid h-12 w-12 place-items-center rounded-xl border border-border bg-card">
-          <TrendingUp className="h-5 w-5" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Position Trends</h1>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Visibility over time and the biggest rank movers between scans.
-          </p>
-        </div>
-      </header>
-      <AnalyticsPanel />
-    </div>
-  );
+  redirect("/visibility");
 }

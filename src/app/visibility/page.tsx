@@ -1,5 +1,6 @@
 import { Radar } from "lucide-react";
 import { VisibilityPanel } from "@/components/visibility/visibility-panel";
+import { PortfolioTrendCard } from "@/components/visibility/portfolio-trend-card";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,8 @@ export default function VisibilityPage() {
           </div>
         </div>
       </header>
+
+      <PortfolioTrendCard />
 
       <VisibilityPanel />
     </div>
