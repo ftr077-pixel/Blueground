@@ -9,6 +9,7 @@
 
 import type { Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
+import { bookedDatesForUnit } from "@/lib/repos/rates";
 import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
 
 export interface DateOverride {
@@ -41,9 +42,30 @@ export interface MarketProviders {
   /** Median competitor minimum-stay (nights), or null. Wired to live scraper data. */
   compMedianMinNights(): number | null;
 
+  /** True when the unit's calendar shows a confirmed booking on this night.
+   *  Feeds the Adjacent Factor rule. Wired to the Rates Calendar's booked cells
+   *  (MiniHotel actuals + baseline blocks); closed-only nights don't count. */
+  isBooked(unit: Unit, date: Date): boolean;
+
   /** Operator/calendar override for a unit+date, or null.
    *  PRODUCTION SEAM: a unit_date_overrides table edited by the operator. */
   dateOverride(unit: Unit, date: Date): DateOverride | null;
+}
+
+// Shared booked-night probe: lazily loads each unit's booked set once per
+// provider instance, spanning 31 days back (the adjacency scan can look up to
+// 30 days behind a quoted night) through the 1-year preview horizon.
+function bookedProbe(): (unit: Unit, date: Date) => boolean {
+  const cache = new Map<string, Set<string>>();
+  const start = new Date(Date.now() - 31 * 86_400_000).toISOString().slice(0, 10);
+  return (unit, date) => {
+    let set = cache.get(unit.id);
+    if (!set) {
+      set = bookedDatesForUnit(unit.id, start, 430);
+      cache.set(unit.id, set);
+    }
+    return set.has(date.toISOString().slice(0, 10));
+  };
 }
 
 // 0..1 deterministic noise so demo signals are stable within a day.
@@ -88,6 +110,7 @@ export function mockProviders(): MarketProviders {
     compMedianMinNights() {
       return compMedian;
     },
+    isBooked: bookedProbe(),
     dateOverride() {
       return null;
     },
@@ -178,6 +201,7 @@ export function airRoiProviders(): MarketProviders {
     compMedianMinNights() {
       return globalMinNights ?? scraperMedian;
     },
+    isBooked: bookedProbe(),
     dateOverride() {
       return null;
     },

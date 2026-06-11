@@ -1395,7 +1395,7 @@ function OverridePanel({
                 type="button"
                 className={btnGhost}
                 disabled={busy}
-                title="Remove existing overrides on the selected nights"
+                title="Remove existing overrides on the selected nights — the baseline price and default min-stay are re-pushed to MiniHotel in the same action, so the removed restriction can't linger on the PMS"
                 onClick={() => submit(true)}
               >
                 Clear

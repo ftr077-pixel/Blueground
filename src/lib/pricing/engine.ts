@@ -13,10 +13,14 @@ import {
   occupancyRule,
   farOutRule,
   lastMinuteRule,
+  adjacentRule,
+  resolveAdjustmentStack,
+  pricingOffsetRule,
   dayOfWeekRule,
   losDiscountForStay,
   type FactorResult,
 } from "@/lib/pricing/rules";
+import { SEASONALITY_SENSITIVITY } from "@/lib/config/pricing";
 
 export type { FactorResult } from "@/lib/pricing/rules";
 
@@ -103,11 +107,21 @@ export function quoteNight(
   add(pacingRule(unit, market, cfg));
   add(occupancyRule(unit, date, market, cfg));
   add(farOutRule(leadDays, cfg));
-  add(lastMinuteRule(leadDays, cfg));
+  // Gap/lead-time adjustment class — PriceLabs stacking: largest discount wins,
+  // premiums stack, a mix applies largest discount + every premium.
+  for (const f of resolveAdjustmentStack(
+    [lastMinuteRule(leadDays, cfg), adjacentRule(unit, date, market, cfg)],
+    unit.baseRate,
+  )) {
+    factors.push(f);
+  }
   add(dayOfWeekRule(date, cfg));
 
-  const raw = factors.reduce((acc, f) => acc * f.factor, unit.baseRate);
-  const rawRate = roundRate(raw);
+  // Multiplicative factors compound on the base; fixed (₪) adjustments from
+  // fixed-mode rules are added after, before the floor/ceiling clamp.
+  const mult = factors.reduce((acc, f) => acc * f.factor, unit.baseRate);
+  const fixedAdj = factors.reduce((acc, f) => acc + (f.add ?? 0), 0);
+  const rawRate = roundRate(Math.max(0, mult + fixedAdj));
 
   let rate = rawRate;
   let bound: DateQuote["bound"] = null;
@@ -125,6 +139,15 @@ export function quoteNight(
     rate = roundRate(ov.rate);
     bound = "override";
     factors.push({ key: "override", label: "Date override", factor: rate / unit.baseRate, detail: ov.note ?? "operator override" });
+  }
+
+  // Pricing offset is the one adjustment that runs after EVERYTHING — the
+  // clamp and even a fixed override — and may take the rate outside min/max
+  // (documented PriceLabs behavior; used for channel-fee parity).
+  const off = pricingOffsetRule(rate, cfg);
+  if (off) {
+    rate = Math.max(PRICING_AGENT.roundingStep, roundRate(off.rate));
+    factors.push(off.entry);
   }
 
   const { minStay, source } = resolveMinStay(unit, date, leadDays, market, cfg);
@@ -176,17 +199,26 @@ export function activeRuleSummary(
   cfg: typeof PRICING_RULES = PRICING_RULES,
   gatePct: number = PRICING_AGENT.humanGatePct,
 ) {
+  const sens = SEASONALITY_SENSITIVITY[cfg.seasonality.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended;
+  const adjNote = cfg.adjacent.mode === "percent"
+    ? `${(cfg.adjacent.value * 100).toFixed(0)}%`
+    : `₪${cfg.adjacent.value}`;
+  const offNote = cfg.pricingOffset.mode === "percent"
+    ? `${(cfg.pricingOffset.value * 100).toFixed(0)}%`
+    : `₪${cfg.pricingOffset.value}`;
   return [
     { key: "base", label: "Base rate anchor", enabled: true, note: "per-unit base × factors" },
-    { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: "monthly market curve" },
+    { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: `monthly market curve (${sens.label})` },
     { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap` },
     { key: "pacing", label: "Booking pace", enabled: cfg.pacing.enabled, note: `±${(cfg.pacing.cap * 100).toFixed(0)}% cap` },
     { key: "occupancy", label: "Occupancy bands", enabled: cfg.occupancy.enabled, note: `${cfg.occupancy.bands.length} bands` },
     { key: "farOut", label: "Far-out premium", enabled: cfg.farOut.enabled, note: `>${cfg.farOut.thresholdDays}d` },
     { key: "lastMinute", label: "Last-minute discount", enabled: cfg.lastMinute.enabled, note: "STR — off for MTR" },
+    { key: "adjacent", label: "Adjacent factor", enabled: cfg.adjacent.enabled, note: `${adjNote}, ${cfg.adjacent.daysBefore}d before / ${cfg.adjacent.daysAfter}d after bookings` },
     { key: "dayOfWeek", label: "Day-of-week", enabled: cfg.dayOfWeek.enabled, note: "STR — off for MTR" },
     { key: "los", label: "LOS / monthly discount", enabled: cfg.los.enabled, note: "weekly / monthly / quarter" },
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max" },
+    { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
     { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: "floor → demand → market → far-out → override" },
     { key: "gate", label: "Human gate", enabled: true, note: `>±${gatePct}% → Action Center` },
   ];

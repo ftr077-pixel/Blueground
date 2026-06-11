@@ -78,20 +78,67 @@ export interface OccupancyBand {
   label: string;
 }
 
+/** Seasonality Factor Sensitivity (PriceLabs presets). Scales how strongly the
+ *  seasonal curve moves prices: factor = 1 + (index − 1) × amplitude, so
+ *  "conservative" tones highs down / lifts lows up and "aggressive" amplifies. */
+export type SeasonalitySensitivity =
+  | "none"
+  | "conservative"
+  | "moderately_conservative"
+  | "recommended"
+  | "moderately_aggressive"
+  | "aggressive";
+
+export const SEASONALITY_SENSITIVITY: Record<
+  SeasonalitySensitivity,
+  { amplitude: number; label: string }
+> = {
+  none: { amplitude: 0, label: "No Seasonality" },
+  conservative: { amplitude: 0.5, label: "Conservative" },
+  moderately_conservative: { amplitude: 0.75, label: "Moderately Conservative" },
+  recommended: { amplitude: 1, label: "Recommended" },
+  moderately_aggressive: { amplitude: 1.25, label: "Moderately Aggressive" },
+  aggressive: { amplitude: 1.5, label: "Aggressive" },
+};
+
+/** PriceLabs Pricing Offset bounds: discounts cap at 40 (% or ₪), premiums at 500. */
+export const PRICING_OFFSET_LIMITS = {
+  percent: { min: -0.4, max: 5 },
+  fixed: { min: -40, max: 500 },
+} as const;
+
 /** The full rule-engine configuration. Code defaults live in PRICING_RULES;
  *  operator overrides (Settings → Pricing engine rules) are deep-merged over
  *  them at read time via src/lib/pricing/rules-config.ts. */
 export interface PricingRulesConfig {
   currentRateLeadDays: number;
   curveHorizonDays: number;
-  seasonality: { enabled: boolean; monthlyIndex: number[] };
+  seasonality: { enabled: boolean; sensitivity: SeasonalitySensitivity; monthlyIndex: number[] };
   demandEvents: { enabled: boolean; cap: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
   occupancy: { enabled: boolean; bands: OccupancyBand[] };
   farOut: { enabled: boolean; thresholdDays: number; cap: number; rampDays: number };
   lastMinute: { enabled: boolean; windowDays: number; maxDiscount: number };
+  adjacent: {
+    enabled: boolean;
+    mode: "percent" | "fixed";
+    /** Signed: negative = discount, positive = premium. Fraction when percent, ₪ when fixed. */
+    value: number;
+    /** Open days before a booking's first night that qualify (0..30). */
+    daysBefore: number;
+    /** Open days after a booking's last night that qualify (0..30). */
+    daysAfter: number;
+    /** PriceLabs default: adjacency skips weekends (Fri/Sat here) unless opted in. */
+    applyOnWeekends: boolean;
+  };
   dayOfWeek: { enabled: boolean; multiplier: number[] };
   los: { enabled: boolean; quarterlyMinNights: number; quarterlyDiscountPct: number };
+  pricingOffset: {
+    enabled: boolean;
+    mode: "percent" | "fixed";
+    /** Signed; fraction when percent (−0.4..5), ₪ when fixed (−40..500). */
+    value: number;
+  };
   minStayHierarchy: { farOutThresholdDays: number; farOutNights: number };
 }
 
@@ -103,9 +150,11 @@ export const PRICING_RULES: PricingRulesConfig = {
   /** Horizon (days) for the per-date price curve. */
   curveHorizonDays: 180,
 
-  /** Broad seasonal trend — multiplier per calendar month (Jan..Dec), around 1.0. */
+  /** Broad seasonal trend — multiplier per calendar month (Jan..Dec), around 1.0.
+   *  Sensitivity scales the swing (PriceLabs presets); "recommended" = as-is. */
   seasonality: {
     enabled: true,
+    sensitivity: "recommended",
     monthlyIndex: [0.92, 0.93, 0.98, 1.05, 1.08, 1.06, 1.1, 1.12, 1.07, 1.02, 0.95, 1.0],
   },
   /** Date-specific demand (events, holidays, neighborhood heat). */
@@ -143,6 +192,18 @@ export const PRICING_RULES: PricingRulesConfig = {
     windowDays: 14,
     maxDiscount: 0.15,
   },
+  /** Adjacent factor (PriceLabs): adjust the open days right before/after a
+   *  booking — discount to fill gaps, premium to discourage back-to-back
+   *  turnovers. Stacks with last-minute per PriceLabs rules (largest discount
+   *  wins; premiums stack). OFF for MTR: month-boundary gaps are rare. */
+  adjacent: {
+    enabled: false,
+    mode: "percent",
+    value: -0.1,
+    daysBefore: 2,
+    daysAfter: 2,
+    applyOnWeekends: false,
+  },
   /** Day-of-week multiplier — OFF for MTR (a multi-week stay spans every weekday).
    *  Index Sun=0 .. Sat=6 (TLV weekend = Fri/Sat). */
   dayOfWeek: {
@@ -155,6 +216,15 @@ export const PRICING_RULES: PricingRulesConfig = {
     enabled: true,
     quarterlyMinNights: 90,
     quarterlyDiscountPct: 0.25,
+  },
+  /** Pricing offset (PriceLabs): a final fixed/percent nudge applied AFTER all
+   *  other customizations — including the floor/ceiling clamp and fixed-price
+   *  overrides — so it can take the pushed rate outside the unit's min/max.
+   *  Channel-fee parity tool; OFF by default. */
+  pricingOffset: {
+    enabled: false,
+    mode: "percent",
+    value: 0,
   },
   /** Minimum-stay hierarchy extras (the demand-flex tiers live in PRICING_AGENT). */
   minStayHierarchy: {
