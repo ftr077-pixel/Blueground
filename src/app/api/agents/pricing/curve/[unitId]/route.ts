@@ -32,6 +32,7 @@ export async function GET(req: Request, { params }: { params: { unitId: string }
     effectiveMonthlyRate: q.effectiveMonthlyRate,
     checkinAllowed: q.checkinAllowed,
     checkoutAllowed: q.checkoutAllowed,
+    pinned: q.pinned,
     extraPersonFee: guests > 0 ? extraPersonFee(q.rate, guests, cfg) : null,
     factors: q.factors,
   }));

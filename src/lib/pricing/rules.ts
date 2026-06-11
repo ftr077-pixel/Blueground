@@ -74,17 +74,78 @@ export function pacingRule(unit: Unit, m: MarketProviders, cfg: Rules): FactorRe
   return { key: "pacing", label: "Booking pace", factor, detail: `${pct(factor)} — pacing ${word} norm` };
 }
 
-export function occupancyRule(unit: Unit, date: Date, m: MarketProviders, cfg: Rules): FactorResult | null {
-  if (!cfg.occupancy.enabled) return null;
-  const occ = m.occupancy(unit, date);
-  const band = cfg.occupancy.bands.find((b) => occ < b.upTo) ?? cfg.occupancy.bands[cfg.occupancy.bands.length - 1];
-  if (band.adjust === 0) return null;
+/** Occupancy-Based Adjustments: the listing's OWN occupancy over the booking
+ *  window containing this date drives the window's band matrix ("3 booked of
+ *  15 nights ⇒ 20% ⇒ discount the remaining open days"). marketDriven compares
+ *  own vs market occupancy for the next 60 days (discount ≤20%, premium ≤15% —
+ *  PriceLabs's documented caps). Fixed-price pins bypass it in the engine. */
+export function occupancyRule(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): FactorResult | null {
+  const c = cfg.occupancy;
+  if (!c.enabled) return null;
+  if (c.profile === "marketDriven") {
+    if (leadDays > 60) return null;
+    const market = m.occupancy90(unit)?.market;
+    if (market == null || market <= 0) return null;
+    const own = m.windowOccupancy(unit, 0, 60);
+    const adjust = Math.max(-0.2, Math.min(0.15, (own - market) * 0.75));
+    if (Math.abs(adjust) < 0.005) return null;
+    return {
+      key: "occupancy",
+      label: "Occupancy",
+      factor: 1 + adjust,
+      detail: `own ${(own * 100).toFixed(0)}% vs market ${(market * 100).toFixed(0)}% ${pct(1 + adjust)} (market-driven)`,
+    };
+  }
+  if (c.windows.length === 0) return null;
+  let lo = 0;
+  let win = c.windows[c.windows.length - 1];
+  for (const w of c.windows) {
+    if (leadDays <= w.uptoDays) {
+      win = w;
+      break;
+    }
+    lo = w.uptoDays + 1;
+  }
+  const hi = win.uptoDays >= 9999 ? Math.max(lo + 30, 180) : win.uptoDays;
+  const occ = m.windowOccupancy(unit, lo, hi);
+  const band = win.bands.find((b) => occ < b.upTo) ?? win.bands[win.bands.length - 1];
+  const adjust = Math.max(-0.5, Math.min(5, band.adjust));
+  if (adjust === 0) return null;
   return {
     key: "occupancy",
     label: "Occupancy",
-    factor: 1 + band.adjust,
-    detail: `${(occ * 100).toFixed(0)}% (${band.label}) ${pct(1 + band.adjust)}`,
+    factor: 1 + adjust,
+    detail: `${(occ * 100).toFixed(0)}% booked in the ${lo}–${win.uptoDays >= 9999 ? "…" : win.uptoDays}d window ${pct(1 + adjust)}`,
   };
+}
+
+/** Rounding preference: snap `value`'s trailing `digits` digits to the nearest
+ *  allowed ending (e.g. digits=1 endings=[4,9]: 2823 → 2824; digits=2
+ *  endings=[0,50]: 178 → 200/150 whichever is nearer). */
+export function roundToPreference(value: number, digits: number, endings: number[]): number {
+  const d = Math.max(1, Math.min(5, Math.round(digits)));
+  const mod = 10 ** d;
+  const base = Math.floor(value / mod) * mod;
+  let best = Math.round(value);
+  let bestDist = Infinity;
+  for (const raw of endings) {
+    const e = Math.abs(Math.round(raw)) % mod;
+    for (const cand of [base - mod + e, base + e, base + mod + e]) {
+      if (cand <= 0) continue;
+      const dist = Math.abs(cand - value);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = cand;
+      }
+    }
+  }
+  return best;
 }
 
 /** Far Out Prices: gradual ramp (default), flat beyond the threshold, or

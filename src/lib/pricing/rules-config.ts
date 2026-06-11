@@ -22,7 +22,8 @@ import {
   type PortfolioObaWindow,
 } from "@/lib/config/pricing";
 import type { Unit } from "@/lib/repos/units";
-import { findCicoProfile } from "@/lib/repos/profiles";
+import { findCicoProfile, findMinStayProfile, findObaProfile } from "@/lib/repos/profiles";
+import { OBA_PRESETS } from "@/lib/config/pricing";
 import { getSetting, setSetting } from "@/lib/repos/visibility";
 
 const RULES_KEY = "pricing_rule_overrides";
@@ -45,7 +46,12 @@ export interface RuleOverrides {
   seasonality?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity };
   demandEvents?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity; cap?: number };
   pacing?: { enabled?: boolean; sensitivity?: number; cap?: number };
-  occupancy?: { enabled?: boolean };
+  occupancy?: {
+    enabled?: boolean;
+    profile?: PricingRulesConfig["occupancy"]["profile"];
+    customName?: string | null;
+    windows?: PortfolioObaWindow[];
+  };
   farOut?: {
     enabled?: boolean;
     mode?: "gradual" | "flat" | "marketDriven";
@@ -85,7 +91,21 @@ export interface RuleOverrides {
     value?: number;
     afterGuests?: number;
   };
-  checkinCheckout?: { enabled?: boolean; profile?: string | null };
+  checkinCheckout?: {
+    enabled?: boolean;
+    profile?: string | null;
+    allowedCheckin?: number[];
+    allowedCheckout?: number[];
+    lastMinute?: Array<{ withinDays: number; checkin: number[]; checkout: number[] }>;
+    smart?: {
+      blockGapCreating?: boolean;
+      maxGapNights?: number;
+      beyondDays?: number;
+      allowAdjacent?: boolean;
+    };
+  };
+  rounding?: { enabled?: boolean; digits?: number; endings?: number[] };
+  smoothing?: { enabled?: boolean; mode?: "week" | "split"; weekStart?: number };
   pricingOffset?: { enabled?: boolean; mode?: "percent" | "fixed"; value?: number };
   weekend?: { days?: number[] };
   orphanDayPrices?: {
@@ -111,6 +131,7 @@ export interface RuleOverrides {
   };
   safetyMinPrice?: { enabled?: boolean; pctOfLastYear?: number };
   minStayRules?: {
+    profile?: string | null;
     mode?: "recommended" | "custom";
     highestAllowed?: number;
     custom?: { rule?: "fixed" | "bookingValue"; weekday?: number; weekend?: number; bookingValue?: number };
@@ -141,6 +162,8 @@ const SECTION_KEYS = [
   "los",
   "extraPersonFee",
   "checkinCheckout",
+  "rounding",
+  "smoothing",
   "pricingOffset",
   "weekend",
   "orphanDayPrices",
@@ -166,6 +189,8 @@ export const RULE_SECTIONS: Array<{ key: RuleSectionKey; label: string }> = [
   { key: "los", label: "LOS / discounts" },
   { key: "extraPersonFee", label: "Extra person" },
   { key: "checkinCheckout", label: "Check-in/out" },
+  { key: "rounding", label: "Rounding" },
+  { key: "smoothing", label: "Smoothing" },
   { key: "pricingOffset", label: "Offset" },
   { key: "weekend", label: "Weekend days" },
   { key: "orphanDayPrices", label: "Orphan prices" },
@@ -379,16 +404,82 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   epf.value = epf.mode === "percent" ? clampNum(epf.value, 0, 1, 0) : clampNum(epf.value, 0, 100000, 0);
   epf.afterGuests = clampInt(epf.afterGuests, 1, 20, d.extraPersonFee.afterGuests);
 
-  // Resolve the attached CICO profile's day lists at read time (all days when
-  // no profile / unknown profile). Archived profiles keep applying (PriceLabs).
-  const cco = { enabled: o.checkinCheckout?.enabled ?? d.checkinCheckout.enabled, profile: o.checkinCheckout?.profile ?? d.checkinCheckout.profile };
-  const cicoProf = findCicoProfile(cco.profile);
-  const checkinCheckout = {
-    enabled: cco.enabled,
-    profile: cco.profile,
-    allowedCheckin: cicoProf?.allowedCheckin ?? d.checkinCheckout.allowedCheckin,
-    allowedCheckout: cicoProf?.allowedCheckout ?? d.checkinCheckout.allowedCheckout,
+  // Resolve the attached CICO profile's day lists at read time; inline day
+  // lists apply when no profile (all days when neither). Archived profiles
+  // keep applying (PriceLabs). Plus last-minute rules + the Smart options.
+  const days = (xs: number[] | undefined, fb: number[]): number[] => {
+    const v = Array.isArray(xs)
+      ? [...new Set(xs.map((x) => Math.round(x)).filter((x) => x >= 0 && x <= 6))]
+      : [];
+    return v.length ? v.sort() : fb;
   };
+  const cco = o.checkinCheckout;
+  const cicoProf = findCicoProfile(cco?.profile ?? d.checkinCheckout.profile);
+  const checkinCheckout = {
+    enabled: cco?.enabled ?? d.checkinCheckout.enabled,
+    profile: cco?.profile ?? d.checkinCheckout.profile,
+    allowedCheckin:
+      cicoProf?.allowedCheckin ?? days(cco?.allowedCheckin, d.checkinCheckout.allowedCheckin),
+    allowedCheckout:
+      cicoProf?.allowedCheckout ?? days(cco?.allowedCheckout, d.checkinCheckout.allowedCheckout),
+    lastMinute: (cco?.lastMinute ?? d.checkinCheckout.lastMinute)
+      .filter((r) => r && Number.isFinite(r.withinDays) && r.withinDays > 0)
+      .slice(0, 3)
+      .map((r) => ({
+        withinDays: clampInt(r.withinDays, 1, 365, 7),
+        checkin: days(r.checkin, [0, 1, 2, 3, 4, 5, 6]),
+        checkout: days(r.checkout, [0, 1, 2, 3, 4, 5, 6]),
+      })),
+    smart: {
+      blockGapCreating: cco?.smart?.blockGapCreating ?? d.checkinCheckout.smart.blockGapCreating,
+      maxGapNights: clampInt(cco?.smart?.maxGapNights, 1, 7, d.checkinCheckout.smart.maxGapNights),
+      beyondDays: clampInt(cco?.smart?.beyondDays, 0, 365, d.checkinCheckout.smart.beyondDays),
+      allowAdjacent: cco?.smart?.allowAdjacent ?? d.checkinCheckout.smart.allowAdjacent,
+    },
+  };
+
+  // Per-listing OBA: preset matrices, market-driven (computed), or a named
+  // custom profile resolved at read time (updates propagate everywhere).
+  const occO = o.occupancy;
+  const obaProfile =
+    occO?.profile &&
+    ["default", "marketDriven", "aggressive", "stepLastMinute", "farOutPremium", "superAggressive", "custom"].includes(occO.profile)
+      ? occO.profile
+      : d.occupancy.profile;
+  const customName = occO?.customName ?? d.occupancy.customName;
+  const namedOba = obaProfile === "custom" ? findObaProfile(customName) : null;
+  const rawObaWindows =
+    obaProfile === "marketDriven"
+      ? []
+      : obaProfile === "custom"
+        ? (namedOba?.payload.windows ?? occO?.windows ?? d.occupancy.windows)
+        : OBA_PRESETS[obaProfile as keyof typeof OBA_PRESETS];
+  const occupancy = {
+    enabled: occO?.enabled ?? d.occupancy.enabled,
+    profile: obaProfile,
+    customName,
+    windows: (rawObaWindows ?? [])
+      .slice(0, 6)
+      .map((w) => ({
+        uptoDays: clampInt(w.uptoDays, 1, 9999, 9999),
+        bands: w.bands.map((b) => ({ ...b, adjust: clampNum(b.adjust, -0.5, 5, 0) })),
+      }))
+      .sort((a, b) => a.uptoDays - b.uptoDays),
+  };
+
+  const rounding = { ...d.rounding, ...o.rounding };
+  rounding.digits = clampInt(rounding.digits, 1, 5, d.rounding.digits);
+  const mod = 10 ** rounding.digits;
+  const endings = (o.rounding?.endings ?? d.rounding.endings)
+    .map((x) => Math.abs(Math.round(x)) % mod)
+    .filter((x, i, arr) => Number.isFinite(x) && arr.indexOf(x) === i);
+  rounding.endings = endings.length ? endings : d.rounding.endings;
+
+  const smoothing = { ...d.smoothing, ...o.smoothing };
+  smoothing.mode = smoothing.mode === "split" ? "split" : "week";
+  smoothing.weekStart = [0, 5, 6].includes(Math.round(smoothing.weekStart))
+    ? Math.round(smoothing.weekStart)
+    : d.smoothing.weekStart;
 
   const demandSens =
     o.demandEvents?.sensitivity && o.demandEvents.sensitivity in SEASONALITY_SENSITIVITY
@@ -398,8 +489,15 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   const safetyMinPrice = { ...d.safetyMinPrice, ...o.safetyMinPrice };
   safetyMinPrice.pctOfLastYear = clampNum(safetyMinPrice.pctOfLastYear, 0.5, 3, d.safetyMinPrice.pctOfLastYear);
 
-  const ms = o.minStayRules;
+  // A named Min Stay Profile replaces the section's rules wholesale
+  // (all-or-nothing — PriceLabs profile semantics); the unit floor still holds.
+  const msProfileName = o.minStayRules?.profile ?? null;
+  const msProfile = findMinStayProfile(msProfileName);
+  const ms = msProfile
+    ? (msProfile.payload as RuleOverrides["minStayRules"])
+    : o.minStayRules;
   const minStayRules: PricingRulesConfig["minStayRules"] = {
+    profile: msProfile ? msProfileName : null,
     mode: ms?.mode === "custom" ? "custom" : "recommended",
     highestAllowed: clampInt(ms?.highestAllowed, 1, 365, d.minStayRules.highestAllowed),
     custom: {
@@ -443,7 +541,7 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     seasonality: { ...d.seasonality, ...o.seasonality, sensitivity: sens },
     demandEvents: { ...d.demandEvents, ...o.demandEvents, sensitivity: demandSens },
     pacing: { ...d.pacing, ...o.pacing },
-    occupancy: { ...d.occupancy, ...o.occupancy },
+    occupancy,
     farOut,
     lastMinute: {
       enabled: lastMinute.enabled,
@@ -457,6 +555,8 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     los,
     extraPersonFee: epf,
     checkinCheckout,
+    rounding,
+    smoothing,
     pricingOffset,
     weekend,
     orphanDayPrices,
