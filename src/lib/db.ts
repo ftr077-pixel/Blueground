@@ -502,6 +502,12 @@ function seed(db: Database.Database) {
     // re-add seed apartments alongside them. Calendar overrides are keyed by
     // unit id, so overrides made on portfolio units (BG-1…BG-115) survive.
     const migrate = db.transaction(() => {
+      // Mid-transaction the BG units are gone while pricing_history /
+      // rate_calendar rows still reference them; with foreign_keys = ON the
+      // immediate check aborts init on every request. Defer the check to
+      // commit (auto-resets), then drop only the children whose unit is gone
+      // for good — rows on re-inserted portfolio ids survive as promised.
+      db.pragma("defer_foreign_keys = ON");
       const imported = (
         db.prepare("SELECT COUNT(*) AS c FROM units WHERE id NOT LIKE 'BG-%'").get() as { c: number }
       ).c;
@@ -509,6 +515,8 @@ function seed(db: Database.Database) {
       if (imported === 0) {
         for (const u of SEED_UNITS) insertUnit.run(u);
       }
+      db.prepare("DELETE FROM pricing_history WHERE unit_id NOT IN (SELECT id FROM units)").run();
+      db.prepare("DELETE FROM rate_calendar WHERE unit_id NOT IN (SELECT id FROM units)").run();
       db.prepare("UPDATE meta SET value = ? WHERE key = 'seeded'").run(SEED_VERSION);
     });
     migrate();
@@ -646,6 +654,10 @@ function purgeDemoData(db: Database.Database) {
   const purged = db.prepare("SELECT value FROM meta WHERE key = 'demo_purged'").get();
   if (purged) return;
   const tx = db.transaction(() => {
+    // Demo approvals may carry real decision rows (the operator clicked
+    // approve/reject while testing) — FK child rows go first or the whole
+    // purge aborts on every request with foreign_keys = ON.
+    db.prepare("DELETE FROM decisions WHERE item_id IN ('ac-001','ac-002','ac-003')").run();
     db.prepare("DELETE FROM approval_items WHERE id IN ('ac-001','ac-002','ac-003')").run();
     db.prepare("DELETE FROM activity_events WHERE id LIKE 'evt-%'").run();
     db.prepare("DELETE FROM search_results WHERE run_id = 'seed-proof-run'").run();
