@@ -192,7 +192,7 @@ export const PORTFOLIO_OBA_PRESETS: Record<"short" | "medium" | "long", Portfoli
 };
 
 /** The full rule-engine configuration. Code defaults live in PRICING_RULES;
- *  operator overrides (Settings → Pricing engine rules) are deep-merged over
+ *  operator overrides (Pricing Configuration → engine rules) are deep-merged over
  *  them at read time via src/lib/pricing/rules-config.ts. */
 export interface PricingRulesConfig {
   currentRateLeadDays: number;

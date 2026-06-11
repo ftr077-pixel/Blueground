@@ -105,7 +105,7 @@ export function runPricingPass(providers: MarketProviders = marketProviders()): 
       unit = { ...unit, baseRate: base, currentRate: current, minRate, maxRate };
     }
     // Per-unit effective config: account → group → sub-group → listing scopes
-    // (Settings → Pricing engine rules), read fresh each pass so saves apply
+    // (Pricing Configuration → engine rules), read fresh each pass so saves apply
     // without a redeploy.
     const cfg = effectiveRulesForUnit(unit);
     const q = representativeQuote(unit, providers, asOf, cfg);

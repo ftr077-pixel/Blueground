@@ -193,7 +193,7 @@ export function PricingPanel() {
                 Pricing rule engine · {rules.filter((r) => r.enabled).length}/{rules.length} active
               </span>
               <a
-                href="/settings#engine-rules"
+                href="/pricing-configuration#engine-rules"
                 className="text-[10px] text-primary hover:underline"
               >
                 Configure →
