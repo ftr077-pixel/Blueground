@@ -379,6 +379,34 @@ export function getCalendar(from: string, days: number): Calendar {
   };
 }
 
+// ----------------------------------------------------------- booked-night feed
+/**
+ * Booked nights for one unit over [from, from+days) — the same baseline blocks
+ * + override booked flags the calendar renders. Feeds the pricing engine's
+ * adjacency rule (MarketProviders.isBooked). Closed-only nights are NOT booked:
+ * the Adjacent Factor keys off reservations, not maintenance blocks.
+ */
+export function bookedDatesForUnit(unitId: string, from: string, days: number): Set<string> {
+  const out = new Set<string>();
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit || days <= 0) return out;
+  const fromIdx = dayIndex(from);
+  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  const baseline = hasBaseline ? bookedSet(unit, fromIdx + days - 1) : new Set<number>();
+  const rows = getDb()
+    .prepare(
+      "SELECT date, booked FROM rate_calendar WHERE unit_id = ? AND date >= ? AND date <= ? AND booked IS NOT NULL",
+    )
+    .all(unitId, from, isoAddDays(from, days - 1)) as { date: string; booked: number }[];
+  const ov = new Map(rows.map((r) => [r.date, r.booked === 1]));
+  for (let i = 0; i < days; i++) {
+    const date = isoAddDays(from, i);
+    const flag = ov.get(date);
+    if (flag !== undefined ? flag : baseline.has(fromIdx + i)) out.add(date);
+  }
+  return out;
+}
+
 // --------------------------------------------------------------- rate anchors
 function median(xs: number[]): number {
   if (!xs.length) return 0;
@@ -553,7 +581,8 @@ export interface RangeOverride {
 
 export const MAX_RANGE_NIGHTS = 370;
 
-/** A night actually written by applyOverrideRange — enough to push to MiniHotel. */
+/** A night actually written by applyOverrideRange — enough to push to MiniHotel.
+ *  On `clear`, cells carry the REPLACEMENT (default) values to re-push. */
 export interface AppliedCell {
   date: string;
   price?: number | null;
@@ -561,7 +590,12 @@ export interface AppliedCell {
   closed?: boolean | null;
 }
 
-export function applyOverrideRange(o: RangeOverride): { nights: number; written: AppliedCell[] } {
+export function applyOverrideRange(o: RangeOverride): {
+  nights: number;
+  written: AppliedCell[];
+  /** Cleared nights with no default to send — last pushed values stay live on the PMS. */
+  unresolved: number;
+} {
   const unit = listUnits().find((u) => u.id === o.unitId);
   if (!unit) throw new Error("unknown unit");
 
@@ -579,14 +613,43 @@ export function applyOverrideRange(o: RangeOverride): { nights: number; written:
 
   const db = getDb();
   let nights = 0;
+  let unresolved = 0;
   const written: AppliedCell[] = [];
   const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  const bookedBaseline = hasBaseline ? bookedSet(unit, toIdx) : new Set<number>();
+  const closedBaseline = hasBaseline ? closedSet(unit, fromIdx, toIdx) : new Set<number>();
   const del = db.prepare("DELETE FROM rate_calendar WHERE unit_id = ? AND date = ?");
+  const sel = db.prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date = ?");
 
   const tx = db.transaction(() => {
     for (const date of dates) {
       if (o.clear) {
-        nights += del.run(o.unitId, date).changes;
+        // PriceLabs removal semantics ("What happens when Minimum Stay or
+        // Check-in/Check-out restriction is removed"): deleting a restriction
+        // must not leave the last-pushed value live on the PMS. Compute each
+        // cleared night's replacement — derived price, default min-stay,
+        // baseline closed state — and hand it back so the caller re-pushes the
+        // defaults immediately instead of going silent.
+        const existing = sel.get(o.unitId, date) as OverrideSql | undefined;
+        const changes = del.run(o.unitId, date).changes;
+        nights += changes;
+        if (!changes || !existing) continue;
+        if (!hasBaseline) {
+          // Article's caveat verbatim: with no default to send, the last pushed
+          // value remains on the PMS until the operator sets one.
+          unresolved++;
+          continue;
+        }
+        const idx = dayIndex(date);
+        const sold = existing.booked != null ? existing.booked === 1 : bookedBaseline.has(idx);
+        const cell: AppliedCell = { date };
+        // Only re-send fields the deleted override had actually pinned.
+        if (!sold && (existing.price != null || existing.min_price != null || existing.max_price != null)) {
+          cell.price = basePrice(unit, date, idx);
+        }
+        if (existing.min_nights != null) cell.minNights = DEFAULT_MIN_NIGHTS;
+        if (existing.closed != null) cell.closed = closedBaseline.has(idx);
+        if (cell.price != null || cell.minNights != null || cell.closed != null) written.push(cell);
         continue;
       }
       const patch: OverridePatch = {};
@@ -604,10 +667,52 @@ export function applyOverrideRange(o: RangeOverride): { nights: number; written:
       if (o.note !== undefined) patch.note = o.note;
       if (Object.keys(patch).length === 0) continue;
       upsertOverride(o.unitId, date, patch, "manual");
-      written.push({ date, price: patch.price, minNights: patch.minNights, closed: patch.closed });
+      // Fields explicitly cleared (null) push their replacement default, not
+      // silence — same removal semantics as the clear path.
+      const cell: AppliedCell = { date };
+      if (patch.price !== undefined) {
+        if (patch.price !== null) cell.price = patch.price;
+        else if (hasBaseline) cell.price = basePrice(unit, date, dayIndex(date));
+        else unresolved++;
+      }
+      if (patch.minNights !== undefined) {
+        cell.minNights = patch.minNights !== null ? patch.minNights : DEFAULT_MIN_NIGHTS;
+      }
+      if (patch.closed !== undefined) {
+        cell.closed = patch.closed !== null ? patch.closed : closedBaseline.has(dayIndex(date));
+      }
+      written.push(cell);
       nights++;
     }
   });
   tx();
-  return { nights, written };
+  return { nights, written, unresolved };
+}
+
+/**
+ * Replacement values to push when single-night fields are explicitly cleared
+ * (null) — the PriceLabs-safe flow: send the default in the same sync as the
+ * removal so the old restriction can't linger on the PMS.
+ */
+export function clearedReplacements(
+  unitId: string,
+  date: string,
+  patch: OverridePatch,
+): { price?: number; minNights?: number; closed?: boolean; unresolved: boolean } {
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit) return { unresolved: true };
+  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  const idx = dayIndex(date);
+  const out: { price?: number; minNights?: number; closed?: boolean; unresolved: boolean } = {
+    unresolved: false,
+  };
+  if (patch.price === null) {
+    if (hasBaseline) out.price = basePrice(unit, date, idx);
+    else out.unresolved = true;
+  }
+  if (patch.minNights === null) out.minNights = DEFAULT_MIN_NIGHTS;
+  if (patch.closed === null) {
+    out.closed = hasBaseline ? closedSet(unit, idx, idx).has(idx) : false;
+  }
+  return out;
 }

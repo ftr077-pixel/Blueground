@@ -3,6 +3,7 @@ import {
   getCalendar,
   upsertOverride,
   applyOverrideRange,
+  clearedReplacements,
   rebaseFuturePrices,
   unitExists,
   type OverridePatch,
@@ -155,7 +156,7 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ error: "nothing to update" }, { status: 400 });
     }
 
-    let applied: { nights: number; written: AppliedCell[] };
+    let applied: { nights: number; written: AppliedCell[]; unresolved: number };
     try {
       applied = applyOverrideRange(range);
     } catch (e) {
@@ -166,19 +167,20 @@ export async function PATCH(req: Request) {
     }
     const nights = applied.nights;
 
-    // Push the written nights to MiniHotel (Reverse ARI). Skip on clear, and skip
-    // nights that only changed local-only guardrails (min/max price) with nothing
-    // MiniHotel can store. Local save already happened; the push result is surfaced.
+    // Push the written nights to MiniHotel (Reverse ARI). On clear, `written`
+    // carries the REPLACEMENT defaults (derived price / default min-stay), so a
+    // removed restriction is overwritten on the PMS in the same action — the
+    // PriceLabs-documented footgun is "turn it off and the last pushed value
+    // lingers"; we re-push instead. Nights that only changed local-only
+    // guardrails (min/max price) have nothing MiniHotel can store and are skipped.
     let push: PushResult | undefined;
-    if (!range.clear) {
-      const items = applied.written
-        .map((w) => ({ unitId, date: w.date, price: w.price, minNights: w.minNights, closed: w.closed }))
-        .filter((w) => w.price != null || w.minNights != null || w.closed != null);
-      if (items.length) push = await pushRatesToMiniHotel(items);
-    }
+    const items = applied.written
+      .map((w) => ({ unitId, date: w.date, price: w.price, minNights: w.minNights, closed: w.closed }))
+      .filter((w) => w.price != null || w.minNights != null || w.closed != null);
+    if (items.length) push = await pushRatesToMiniHotel(items);
 
     const parts: string[] = [];
-    if (range.clear) parts.push("overrides removed");
+    if (range.clear) parts.push("overrides removed — defaults re-pushed");
     if (range.price != null) parts.push(`rate ₪${range.price}`);
     if (range.pricePct !== undefined)
       parts.push(`rate ${range.pricePct > 0 ? "+" : ""}${range.pricePct}%`);
@@ -188,19 +190,22 @@ export async function PATCH(req: Request) {
     if (range.closed !== undefined && range.closed !== null)
       parts.push(range.closed ? "closed" : "opened");
     const dowTxt = dow && dow.length ? ` (${dow.map((d) => "SMTWTFS"[d]).join("")})` : "";
-    const pushTxt = !push
+    let pushTxt = !push
       ? "staged locally"
       : push.ok
         ? `pushed ${push.pushed} night(s) to MiniHotel`
         : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
+    if (applied.unresolved > 0) {
+      pushTxt += `; ${applied.unresolved} night(s) have no default to send — last pushed values remain on MiniHotel`;
+    }
     logActivity({
       department: "revenue",
       worker: "Pricing Specialist",
       message: `Rates Calendar · ${unitId} ${from}→${to}${dowTxt}: ${parts.join(", ")} — ${nights} night(s) (${pushTxt}).`,
-      level: push && !push.ok ? "warning" : "success",
+      level: (push && !push.ok) || applied.unresolved > 0 ? "warning" : "success",
     });
 
-    return NextResponse.json({ ok: true, nights, push });
+    return NextResponse.json({ ok: true, nights, push, unresolved: applied.unresolved });
   }
 
   // ---- legacy single-date shape: { unitId, date, ... } ------------------------
@@ -223,10 +228,18 @@ export async function PATCH(req: Request) {
 
   upsertOverride(unitId, date, patch, "manual");
 
-  // Push the edit straight to MiniHotel (Reverse ARI). The local override is
-  // saved regardless; the push result tells the operator whether it went live.
+  // Push the edit straight to MiniHotel (Reverse ARI). Fields explicitly
+  // cleared (null) push their replacement default — removing a restriction
+  // must overwrite it on the PMS, not leave the last pushed value live.
+  const repl = clearedReplacements(unitId, date, patch);
   const push = await pushRatesToMiniHotel([
-    { unitId, date, price: patch.price, minNights: patch.minNights, closed: patch.closed },
+    {
+      unitId,
+      date,
+      price: patch.price === null ? (repl.price ?? null) : patch.price,
+      minNights: patch.minNights === null ? (repl.minNights ?? null) : patch.minNights,
+      closed: patch.closed === null ? (repl.closed ?? null) : patch.closed,
+    },
   ]);
 
   const parts: string[] = [];
