@@ -60,3 +60,43 @@ export function combinedOccupancy(units: Unit[], days = 30): number | null {
   for (const u of units) booked += bookedDatesForUnit(u.id, from, days).size;
   return booked / (units.length * days);
 }
+
+// ------------------------------------------------------ Group Creation Wizard
+export type WizardStrategy = "city" | "bedroom" | "city_bedroom";
+
+export interface WizardSuggestion {
+  name: string;
+  /** Every listing matching the bucket (the UI greys out already-grouped ones). */
+  unitIds: string[];
+  /** Subset of unitIds that already belong to a group — a listing can only be
+   *  in one group, so these can't be auto-assigned (PriceLabs wizard rule). */
+  alreadyGrouped: string[];
+}
+
+/** Suggest group structures from listing attributes. "City" maps to our
+ *  neighborhoods; the City + Bedroom default is PriceLabs's recommended
+ *  granularity. Suggestions only — nothing is applied until the operator
+ *  confirms (the wizard never auto-groups). */
+export function wizardSuggestions(strategy: WizardStrategy): WizardSuggestion[] {
+  const keyOf = (u: Unit) =>
+    strategy === "city"
+      ? u.neighborhood
+      : strategy === "bedroom"
+        ? `${u.bedrooms}BR`
+        : `${u.neighborhood} · ${u.bedrooms}BR`;
+  const buckets = new Map<string, Unit[]>();
+  for (const u of listUnits()) {
+    const k = keyOf(u);
+    const arr = buckets.get(k);
+    if (arr) arr.push(u);
+    else buckets.set(k, [u]);
+  }
+  return [...buckets.entries()]
+    .filter(([, us]) => us.length >= 2) // a group of one defeats the purpose
+    .map(([name, us]) => ({
+      name,
+      unitIds: us.map((u) => u.id),
+      alreadyGrouped: us.filter((u) => u.group || u.subgroup).map((u) => u.id),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}

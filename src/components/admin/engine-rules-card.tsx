@@ -68,7 +68,10 @@ interface Form {
   seasonalityOn: boolean;
   seasonalitySens: string;
   demandOn: boolean;
+  demandSens: string;
   demandCapPct: string;
+  smpOn: boolean;
+  smpPct: string;
   pacingOn: boolean;
   pacingSensPct: string;
   pacingCapPct: string;
@@ -155,7 +158,8 @@ interface Form {
 interface EffectiveConfig {
   currentRateLeadDays: number;
   seasonality: { enabled: boolean; sensitivity: string };
-  demandEvents: { enabled: boolean; cap: number };
+  demandEvents: { enabled: boolean; sensitivity: string; cap: number };
+  safetyMinPrice: { enabled: boolean; pctOfLastYear: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
   occupancy: { enabled: boolean };
   farOut: {
@@ -263,6 +267,32 @@ interface CicoProfile {
   allowedCheckout: number[];
 }
 
+interface WizardSuggestion {
+  name: string;
+  unitIds: string[];
+  alreadyGrouped: string[];
+}
+
+interface TableResp {
+  sections: Array<{ key: string; label: string }>;
+  rows: Array<{
+    unitId: string;
+    name: string;
+    neighborhood: string;
+    group: string | null;
+    subgroup: string | null;
+    sources: Record<string, string | null>;
+  }>;
+}
+
+const SOURCE_COLOR: Record<string, string> = {
+  listing: "#16a34a",
+  subgroup: "#7c3aed",
+  group: "#2563eb",
+  account: "#d97706",
+};
+const sourceKind = (s: string | null) => (s ? s.split(":")[0] : "default");
+
 const pct = (f: number) => String(Math.round(f * 1000) / 10);
 const frac = (s: string) => (parseFloat(s) || 0) / 100;
 const int = (s: string, fb = 0) => {
@@ -299,7 +329,10 @@ function toForm(e: EffectiveConfig): Form {
     seasonalityOn: e.seasonality.enabled,
     seasonalitySens: e.seasonality.sensitivity || "recommended",
     demandOn: e.demandEvents.enabled,
+    demandSens: e.demandEvents.sensitivity || "recommended",
     demandCapPct: pct(e.demandEvents.cap),
+    smpOn: e.safetyMinPrice.enabled,
+    smpPct: pct(e.safetyMinPrice.pctOfLastYear),
     pacingOn: e.pacing.enabled,
     pacingSensPct: pct(e.pacing.sensitivity),
     pacingCapPct: pct(e.pacing.cap),
@@ -396,6 +429,16 @@ export function EngineRulesCard() {
   const [assignGroup, setAssignGroup] = useState("");
   const [assignSub, setAssignSub] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  // Group Creation Wizard state
+  const [wizStrategy, setWizStrategy] = useState("city_bedroom");
+  const [wizSuggestions, setWizSuggestions] = useState<WizardSuggestion[] | null>(null);
+  const [wizPicked, setWizPicked] = useState<Set<string>>(new Set());
+  const [wizNames, setWizNames] = useState<Record<string, string>>({});
+
+  // Table View state
+  const [tableData, setTableData] = useState<TableResp | null>(null);
+  const [tableBusy, setTableBusy] = useState(false);
 
   // Check-in/Check-out profiles state
   const [cicoProfiles, setCicoProfiles] = useState<CicoProfile[]>([]);
@@ -511,7 +554,8 @@ export function EngineRulesCard() {
       currentRateLeadDays: int(f.currentRateLeadDays),
       humanGatePct: parseFloat(f.humanGatePct) || 15,
       seasonality: { enabled: f.seasonalityOn, sensitivity: f.seasonalitySens },
-      demandEvents: { enabled: f.demandOn, cap: frac(f.demandCapPct) },
+      demandEvents: { enabled: f.demandOn, sensitivity: f.demandSens, cap: frac(f.demandCapPct) },
+      safetyMinPrice: { enabled: f.smpOn, pctOfLastYear: frac(f.smpPct) },
       pacing: { enabled: f.pacingOn, sensitivity: frac(f.pacingSensPct), cap: frac(f.pacingCapPct) },
       occupancy: { enabled: f.occupancyOn },
       farOut: {
@@ -725,6 +769,66 @@ export function EngineRulesCard() {
     }
   }
 
+  async function wizardSuggest() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(`/api/pricing/groups?wizard=${wizStrategy}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`wizard failed: ${res.status}`);
+      const b = (await res.json()) as { suggestions: WizardSuggestion[] };
+      setWizSuggestions(b.suggestions);
+      setWizPicked(new Set(b.suggestions.filter((s) => s.unitIds.length > s.alreadyGrouped.length).map((s) => s.name)));
+      setWizNames({});
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "wizard failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function wizardApply() {
+    if (!wizSuggestions) return;
+    const apply = wizSuggestions
+      .filter((s) => wizPicked.has(s.name))
+      .map((s) => ({ name: (wizNames[s.name] ?? s.name).trim() || s.name, unitIds: s.unitIds }));
+    if (apply.length === 0) return;
+    await groupsAction({ wizard: apply });
+    setWizSuggestions(null);
+  }
+
+  async function loadTable() {
+    setTableBusy(true);
+    try {
+      const res = await fetch("/api/pricing/rules/table", { cache: "no-store" });
+      if (res.ok) setTableData((await res.json()) as TableResp);
+    } finally {
+      setTableBusy(false);
+    }
+  }
+
+  function downloadTableCsv() {
+    if (!tableData) return;
+    const head = ["listing", "neighborhood", "group", "subgroup", ...tableData.sections.map((s) => s.label)];
+    const lines = [head.join(",")];
+    for (const r of tableData.rows) {
+      lines.push(
+        [
+          `"${r.name}"`,
+          `"${r.neighborhood}"`,
+          r.group ?? "",
+          r.subgroup ?? "",
+          ...tableData.sections.map((s) => r.sources[s.key] ?? "default"),
+        ].join(","),
+      );
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "customizations-table.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   async function reviewChanges() {
     if (!pvUnit) return;
     setPvBusy(true);
@@ -808,6 +912,7 @@ export function EngineRulesCard() {
         </div>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
           {select("Seasonality sensitivity", "seasonalitySens", SENS_OPTIONS)}
+          {select("Demand factor sensitivity", "demandSens", SENS_OPTIONS)}
           {num("Demand cap %", "demandCapPct")}
           {num("Pace sensitivity %", "pacingSensPct")}
           {num("Pace cap %", "pacingCapPct")}
@@ -994,6 +1099,16 @@ export function EngineRulesCard() {
             % values are signed changes (e.g. −20 = 20% below base/min). Per-date minimums for
             events live in the Rates Calendar&apos;s Date Specific Overrides.
           </p>
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-3 border-t border-border/40 pt-2">
+            {toggle("Safety minimum price", "smpOn")}
+            {num("% of last year", "smpPct", "w-20")}
+            <span className="pb-1 text-[10px] text-muted-foreground/70">
+              Floors each night at last year&apos;s realized same-weekday rate (STLY ±1 week,
+              weighted; event dates take the max) × this factor — 110% is the safe choice.
+              Raises-only, never below the listing min; inert until MiniHotel reservation history
+              covers the dates.
+            </span>
+          </div>
         </div>
 
         <div className={sectionBox}>
@@ -1337,7 +1452,133 @@ export function EngineRulesCard() {
               </label>
             ))}
           </div>
+          <div className="space-y-2 rounded-md border border-border/40 p-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <span className="w-full text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                Group Creation Wizard — suggests groups from listing attributes; nothing is applied
+                until you confirm (already-grouped listings are never moved)
+              </span>
+              <label className="flex flex-col gap-1">
+                Strategy
+                <select
+                  className={`${input} w-44`}
+                  value={wizStrategy}
+                  onChange={(e) => setWizStrategy(e.target.value)}
+                >
+                  <option value="city_bedroom">City + Bedroom (default)</option>
+                  <option value="city">City</option>
+                  <option value="bedroom">Bedroom</option>
+                </select>
+              </label>
+              <button type="button" className={btnGhost} disabled={busy} onClick={wizardSuggest}>
+                Suggest groups
+              </button>
+              {wizSuggestions && (
+                <button type="button" className={btn} disabled={busy || wizPicked.size === 0} onClick={wizardApply}>
+                  Create &amp; assign {wizPicked.size} group(s)
+                </button>
+              )}
+            </div>
+            {wizSuggestions && wizSuggestions.length === 0 && (
+              <p className="text-[10px] text-muted-foreground/70">No buckets with 2+ listings found.</p>
+            )}
+            {wizSuggestions && wizSuggestions.length > 0 && (
+              <div className="max-h-44 space-y-1 overflow-y-auto">
+                {wizSuggestions.map((s) => {
+                  const free = s.unitIds.length - s.alreadyGrouped.length;
+                  return (
+                    <div key={s.name} className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+                        checked={wizPicked.has(s.name)}
+                        onChange={(e) => {
+                          const next = new Set(wizPicked);
+                          if (e.target.checked) next.add(s.name);
+                          else next.delete(s.name);
+                          setWizPicked(next);
+                        }}
+                      />
+                      <input
+                        className={`${input} w-48`}
+                        value={wizNames[s.name] ?? s.name}
+                        onChange={(e) => setWizNames({ ...wizNames, [s.name]: e.target.value })}
+                      />
+                      <span className="text-[10px]">
+                        {free} assignable
+                        {s.alreadyGrouped.length > 0 ? ` · ${s.alreadyGrouped.length} already grouped` : ""}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+
+        <details className="space-y-2 border-t border-border/60 pt-3">
+          <summary className="cursor-pointer text-xs font-medium text-foreground">
+            Table view — which level supplies each customization (hierarchy at a glance)
+          </summary>
+          <div className="flex items-center gap-2 pt-2">
+            <button type="button" className={btnGhost} disabled={tableBusy} onClick={loadTable}>
+              {tableBusy ? "Loading…" : tableData ? "Refresh" : "Load table"}
+            </button>
+            {tableData && (
+              <button type="button" className={btnGhost} onClick={downloadTableCsv}>
+                Download CSV
+              </button>
+            )}
+            <span className="text-[10px] text-muted-foreground/70">
+              <span style={{ color: SOURCE_COLOR.listing }}>●</span> listing ·{" "}
+              <span style={{ color: SOURCE_COLOR.subgroup }}>●</span> sub-group ·{" "}
+              <span style={{ color: SOURCE_COLOR.group }}>●</span> group ·{" "}
+              <span style={{ color: SOURCE_COLOR.account }}>●</span> account · ○ code default —
+              hover a dot for the level
+            </span>
+          </div>
+          {tableData && (
+            <div className="max-h-80 overflow-auto rounded-md border border-border/60">
+              <table className="w-full border-collapse text-[10px]">
+                <thead className="sticky top-0 bg-card">
+                  <tr>
+                    <th className="px-2 py-1 text-left font-medium">Listing</th>
+                    {tableData.sections.map((s) => (
+                      <th key={s.key} className="px-1 py-1 text-center font-medium" title={s.key}>
+                        {s.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {tableData.rows.map((r) => (
+                    <tr key={r.unitId} className="border-t border-border/40">
+                      <td className="whitespace-nowrap px-2 py-0.5">
+                        {r.name}
+                        {(r.group || r.subgroup) && (
+                          <span className="text-muted-foreground/70"> · {r.group ?? ""}{r.subgroup ? ` / ${r.subgroup}` : ""}</span>
+                        )}
+                      </td>
+                      {tableData.sections.map((s) => {
+                        const src = r.sources[s.key];
+                        const kind = sourceKind(src);
+                        return (
+                          <td key={s.key} className="px-1 py-0.5 text-center" title={src ?? "code default"}>
+                            {src ? (
+                              <span style={{ color: SOURCE_COLOR[kind] ?? "#64748b" }}>●</span>
+                            ) : (
+                              <span className="text-muted-foreground/40">○</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </details>
 
         <div className="space-y-2 border-t border-border/60 pt-3">
           <div className="flex flex-wrap items-end gap-x-4 gap-y-2">

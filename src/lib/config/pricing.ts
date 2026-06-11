@@ -163,7 +163,11 @@ export interface PricingRulesConfig {
   currentRateLeadDays: number;
   curveHorizonDays: number;
   seasonality: { enabled: boolean; sensitivity: SeasonalitySensitivity; monthlyIndex: number[] };
-  demandEvents: { enabled: boolean; cap: number };
+  /** Demand Factor Sensitivity reuses the same six presets: scales how hard
+   *  date-specific demand (events/holidays) moves prices, before the cap.
+   *  (PriceLabs Hotel Weights / Hotel Compsets are not applicable — we have no
+   *  Booking.com hotel feed.) */
+  demandEvents: { enabled: boolean; sensitivity: SeasonalitySensitivity; cap: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
   occupancy: { enabled: boolean; bands: OccupancyBand[] };
   /** Far Out Prices: gradual ramp, flat premium/discount beyond a threshold, or
@@ -276,6 +280,13 @@ export interface PricingRulesConfig {
     lastMinute: { enabled: boolean; withinDays: number; mode: MinPriceMode; value: number };
     orphan: { enabled: boolean; mode: MinPriceMode; value: number };
   };
+  /** Safety Minimum Price (SMP): a raises-only floor anchored on LAST YEAR'S
+   *  realized nightly rate for the same weekday (STLY ±1 week, weighted toward
+   *  STLY; event-hot dates take the range MAX), times an inflation factor.
+   *  Needs nightly revenue history (MiniHotel reservations) — silently inert
+   *  for dates/units without it, mirroring PriceLabs's PMS gating. Never
+   *  applies below the listing min. */
+  safetyMinPrice: { enabled: boolean; pctOfLastYear: number };
   /** Dynamic Minimum Stay restrictions (full PriceLabs hierarchy; resolution
    *  order lives in engine.resolveMinStay). MiniHotel's MinimumNights field is
    *  min-stay-THROUGH semantics. */
@@ -328,6 +339,7 @@ export const PRICING_RULES: PricingRulesConfig = {
   /** Date-specific demand (events, holidays, neighborhood heat). */
   demandEvents: {
     enabled: true,
+    sensitivity: "recommended",
     /** Max ± fraction a demand spike can move price. */
     cap: 0.15,
   },
@@ -435,6 +447,9 @@ export const PRICING_RULES: PricingRulesConfig = {
     lastMinute: { enabled: false, withinDays: 14, mode: "pctMin", value: 0 },
     orphan: { enabled: false, mode: "pctMin", value: 0 },
   },
+  /** PriceLabs ships SMP on by default; ~110% is their "safe choice". Inert
+   *  until reservation history exists. */
+  safetyMinPrice: { enabled: true, pctOfLastYear: 1.1 },
   minStayRules: {
     mode: "recommended",
     highestAllowed: 90,

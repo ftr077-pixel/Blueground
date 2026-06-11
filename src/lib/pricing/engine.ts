@@ -355,7 +355,7 @@ export function activeRuleSummary(
   return [
     { key: "base", label: "Base rate anchor", enabled: true, note: "per-unit base × factors" },
     { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: `monthly market curve (${sens.label})` },
-    { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap` },
+    { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap (${(SEASONALITY_SENSITIVITY[cfg.demandEvents.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended).label})` },
     { key: "pacing", label: "Booking pace", enabled: cfg.pacing.enabled, note: `±${(cfg.pacing.cap * 100).toFixed(0)}% cap` },
     { key: "occupancy", label: "Occupancy bands", enabled: cfg.occupancy.enabled, note: `${cfg.occupancy.bands.length} bands` },
     { key: "farOut", label: "Far-out premium", enabled: cfg.farOut.enabled, note: cfg.farOut.mode === "marketDriven" ? `market-driven (${cfg.farOut.marketFlavor}) ≥60d, ≤20%` : `${cfg.farOut.mode} >${cfg.farOut.thresholdDays}d` },
@@ -368,6 +368,7 @@ export function activeRuleSummary(
     { key: "extraPersonFee", label: "Extra person fee", enabled: cfg.extraPersonFee.enabled, note: `${cfg.extraPersonFee.mode === "percent" ? `${(cfg.extraPersonFee.value * 100).toFixed(0)}%` : `₪${cfg.extraPersonFee.value}`} / extra guest after ${cfg.extraPersonFee.afterGuests}` },
     { key: "checkinCheckout", label: "Check-in/out restriction", enabled: cfg.checkinCheckout.enabled, note: cfg.checkinCheckout.profile ? `profile "${cfg.checkinCheckout.profile}" (not pushed to MiniHotel)` : "no profile attached" },
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max + advanced min-price rules" },
+    { key: "safetyMinPrice", label: "Safety minimum price", enabled: cfg.safetyMinPrice.enabled, note: `LY same-weekday ADR ×${(cfg.safetyMinPrice.pctOfLastYear * 100).toFixed(0)}% — raises-only, needs reservation history` },
     { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
     { key: "minStay", label: "Min-stay hierarchy", enabled: true, note: `${cfg.minStayRules.mode} — lowest-allowed → orphan → DSO → adjacent → far-out → last-minute → default` },
     { key: "gate", label: "Human gate", enabled: true, note: `>±${gatePct}% → Action Center` },

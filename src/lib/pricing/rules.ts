@@ -54,10 +54,15 @@ export function seasonalityRule(date: Date, m: MarketProviders, cfg: Rules): Fac
 
 export function demandRule(unit: Unit, date: Date, m: MarketProviders, cfg: Rules): FactorResult | null {
   if (!cfg.demandEvents.enabled) return null;
+  const sens =
+    SEASONALITY_SENSITIVITY[cfg.demandEvents.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended;
+  if (sens.amplitude === 0) return null; // "No Demand Factor"
   const { bump, driver } = m.eventDemand(unit, date);
-  const factor = clampDev(1 + bump, cfg.demandEvents.cap);
+  const factor = clampDev(1 + bump * sens.amplitude, cfg.demandEvents.cap);
   if (factor === 1) return null;
-  return { key: "demand", label: "Demand/events", factor, detail: `${pct(factor)} — ${driver}` };
+  const sensTxt =
+    cfg.demandEvents.sensitivity === "recommended" ? "" : ` (${sens.label.toLowerCase()})`;
+  return { key: "demand", label: "Demand/events", factor, detail: `${pct(factor)} — ${driver}${sensTxt}` };
 }
 
 export function pacingRule(unit: Unit, m: MarketProviders, cfg: Rules): FactorResult | null {
@@ -336,6 +341,47 @@ export function resolveMinPrice(
     if (v > min) {
       min = v;
       source = source === "far-out" ? "far-out + weekend" : "weekend";
+    }
+  }
+  // Safety Minimum Price: last year's realized rate for the same weekday
+  // (STLY ±1 week, weighted toward STLY; event-hot dates take the range MAX),
+  // times the inflation factor. Raises-only — never applies below the listing
+  // min — and inert without reservation history (PriceLabs's PMS gating).
+  const smp = cfg.safetyMinPrice;
+  if (smp.enabled && smp.pctOfLastYear > 0) {
+    const stly = date.getTime() - 364 * DAY_MS; // nearest same weekday last year
+    const probe = (offDays: number) =>
+      m.lastYearNightly(unit, new Date(stly + offDays * DAY_MS).toISOString().slice(0, 10));
+    const center = probe(0);
+    const before = probe(-7);
+    const after = probe(7);
+    const present = [center, before, after].filter((x): x is number => x != null && x > 0);
+    if (present.length) {
+      const hot = m.eventDemand(unit, date).bump >= 0.1; // events/holidays: take the max
+      let anchor: number;
+      if (hot) {
+        anchor = Math.max(...present);
+      } else {
+        // Weighted average over the dates that HAVE data, STLY counting double.
+        let sum = 0;
+        let w = 0;
+        if (center != null && center > 0) {
+          sum += 2 * center;
+          w += 2;
+        }
+        for (const x of [before, after]) {
+          if (x != null && x > 0) {
+            sum += x;
+            w += 1;
+          }
+        }
+        anchor = sum / w;
+      }
+      const v = anchor * smp.pctOfLastYear;
+      if (v > min) {
+        min = v;
+        source = hot ? "safety min (LY event max)" : "safety min (LY ADR)";
+      }
     }
   }
   if (c.lastMinute.enabled && leadDays <= c.lastMinute.withinDays) {

@@ -227,6 +227,41 @@ export function markReservationsCancelled(
 }
 
 /**
+ * Realized NET nightly rate per stay date for one unit over [from, to] —
+ * revenue spread evenly across the stay's nights, cancellations/no-shows
+ * excluded. Feeds the Safety Minimum Price floor (last year's ADR for the
+ * same dates). Overlapping reservations: the later-updated row wins per date.
+ */
+export function realizedNightlyRates(unitId: string, from: string, to: string): Map<string, number> {
+  const rows = getDb()
+    .prepare(
+      `SELECT check_in, check_out, nights, revenue, status FROM reservation
+       WHERE unit_id = ? AND nights > 0 AND revenue > 0 AND check_out > ? AND check_in <= ?
+       ORDER BY updated_at`,
+    )
+    .all(unitId, from, to) as Array<{
+    check_in: string;
+    check_out: string;
+    nights: number;
+    revenue: number;
+    status: string | null;
+  }>;
+  const out = new Map<string, number>();
+  const DAY = 86_400_000;
+  for (const r of rows) {
+    if (r.status && CANCELLED_RE.test(r.status)) continue;
+    const nightly = Math.round(r.revenue / r.nights);
+    if (nightly <= 0) continue;
+    const end = Date.parse(r.check_out + "T00:00:00Z");
+    for (let d = Date.parse(r.check_in + "T00:00:00Z"); d < end; d += DAY) {
+      const iso = new Date(d).toISOString().slice(0, 10);
+      if (iso >= from && iso <= to) out.set(iso, nightly);
+    }
+  }
+  return out;
+}
+
+/**
  * Actual NET room revenue per calendar month (YYYY-MM), recognized per night across
  * each stay. Cancelled / no-show reservations and test apartments are excluded.
  */

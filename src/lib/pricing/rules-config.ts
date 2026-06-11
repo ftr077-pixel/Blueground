@@ -43,7 +43,7 @@ export function scopeStoreKey(scope: RuleScope): string {
 export interface RuleOverrides {
   currentRateLeadDays?: number;
   seasonality?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity };
-  demandEvents?: { enabled?: boolean; cap?: number };
+  demandEvents?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity; cap?: number };
   pacing?: { enabled?: boolean; sensitivity?: number; cap?: number };
   occupancy?: { enabled?: boolean };
   farOut?: {
@@ -109,6 +109,7 @@ export interface RuleOverrides {
     lastMinute?: { enabled?: boolean; withinDays?: number; mode?: MinPriceMode; value?: number };
     orphan?: { enabled?: boolean; mode?: MinPriceMode; value?: number };
   };
+  safetyMinPrice?: { enabled?: boolean; pctOfLastYear?: number };
   minStayRules?: {
     mode?: "recommended" | "custom";
     highestAllowed?: number;
@@ -145,9 +146,58 @@ const SECTION_KEYS = [
   "orphanDayPrices",
   "portfolioOccupancy",
   "minPrices",
+  "safetyMinPrice",
   "minStayRules",
   "minStayHierarchy",
 ] as const;
+
+export type RuleSectionKey = (typeof SECTION_KEYS)[number];
+
+/** Section keys + display labels for the customizations Table View. */
+export const RULE_SECTIONS: Array<{ key: RuleSectionKey; label: string }> = [
+  { key: "seasonality", label: "Seasonality" },
+  { key: "demandEvents", label: "Demand" },
+  { key: "pacing", label: "Pacing" },
+  { key: "occupancy", label: "Occupancy" },
+  { key: "farOut", label: "Far-out" },
+  { key: "lastMinute", label: "Last-minute" },
+  { key: "adjacent", label: "Adjacent" },
+  { key: "dayOfWeek", label: "Day-of-week" },
+  { key: "los", label: "LOS / discounts" },
+  { key: "extraPersonFee", label: "Extra person" },
+  { key: "checkinCheckout", label: "Check-in/out" },
+  { key: "pricingOffset", label: "Offset" },
+  { key: "weekend", label: "Weekend days" },
+  { key: "orphanDayPrices", label: "Orphan prices" },
+  { key: "portfolioOccupancy", label: "Portfolio occ" },
+  { key: "minPrices", label: "Min prices" },
+  { key: "safetyMinPrice", label: "Safety min" },
+  { key: "minStayRules", label: "Min stay" },
+  { key: "minStayHierarchy", label: "Min-stay far-out" },
+];
+
+/** Which level supplies each customization section for a unit (Table View):
+ *  "listing" | "subgroup:NAME" | "group:NAME" | "account" | null (code default).
+ *  Mirrors resolveChain — the most specific level that defines a section wins. */
+export function sectionSourcesForUnit(
+  unit: Pick<Unit, "id" | "group" | "subgroup">,
+): Record<RuleSectionKey, string | null> {
+  const levels: Array<{ label: string; o: RuleOverrides }> = [
+    { label: "account", o: getRuleOverrides("account") },
+  ];
+  if (unit.group) levels.push({ label: `group:${unit.group}`, o: getRuleOverrides(`group:${unit.group}`) });
+  if (unit.subgroup)
+    levels.push({ label: `subgroup:${unit.subgroup}`, o: getRuleOverrides(`group:${unit.subgroup}`) });
+  levels.push({ label: "listing", o: getRuleOverrides(`unit:${unit.id}`) });
+  const out = {} as Record<RuleSectionKey, string | null>;
+  for (const k of SECTION_KEYS) {
+    out[k] = null;
+    for (const level of levels) {
+      if (level.o[k] !== undefined) out[k] = level.label;
+    }
+  }
+  return out;
+}
 
 export function getRuleOverrides(scope: RuleScope = "account"): RuleOverrides {
   const raw = getSetting(scopeStoreKey(scope));
@@ -340,6 +390,14 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     allowedCheckout: cicoProf?.allowedCheckout ?? d.checkinCheckout.allowedCheckout,
   };
 
+  const demandSens =
+    o.demandEvents?.sensitivity && o.demandEvents.sensitivity in SEASONALITY_SENSITIVITY
+      ? o.demandEvents.sensitivity
+      : d.demandEvents.sensitivity;
+
+  const safetyMinPrice = { ...d.safetyMinPrice, ...o.safetyMinPrice };
+  safetyMinPrice.pctOfLastYear = clampNum(safetyMinPrice.pctOfLastYear, 0.5, 3, d.safetyMinPrice.pctOfLastYear);
+
   const ms = o.minStayRules;
   const minStayRules: PricingRulesConfig["minStayRules"] = {
     mode: ms?.mode === "custom" ? "custom" : "recommended",
@@ -383,7 +441,7 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     currentRateLeadDays: o.currentRateLeadDays ?? d.currentRateLeadDays,
     curveHorizonDays: d.curveHorizonDays,
     seasonality: { ...d.seasonality, ...o.seasonality, sensitivity: sens },
-    demandEvents: { ...d.demandEvents, ...o.demandEvents },
+    demandEvents: { ...d.demandEvents, ...o.demandEvents, sensitivity: demandSens },
     pacing: { ...d.pacing, ...o.pacing },
     occupancy: { ...d.occupancy, ...o.occupancy },
     farOut,
@@ -404,6 +462,7 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     orphanDayPrices,
     portfolioOccupancy,
     minPrices,
+    safetyMinPrice,
     minStayRules,
     minStayHierarchy: { ...d.minStayHierarchy, ...o.minStayHierarchy },
   };
