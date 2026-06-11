@@ -1,5 +1,9 @@
 import { listUnits, type Unit } from "@/lib/repos/units";
 import { getDb } from "@/lib/db";
+import { quoteNight } from "@/lib/pricing/engine";
+import { mockProviders, type MarketProviders } from "@/lib/pricing/providers";
+import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
+import type { PricingRulesConfig } from "@/lib/config/pricing";
 
 /**
  * Rates Calendar repo.
@@ -155,13 +159,52 @@ function weekdayUTC(iso: string): number {
   return new Date(iso + "T00:00:00Z").getUTCDay(); // 0 Sun .. 6 Sat
 }
 
-function basePrice(unit: Unit, iso: string, idx: number): number {
+// Legacy hardcoded curve — kept ONLY as the crash-safe fallback when the rules
+// engine throws on a config edge case, so the calendar can never blank out.
+function legacyCurve(unit: Unit, iso: string, idx: number): number {
   let p = unit.currentRate || unit.baseRate || 600;
   const dow = weekdayUTC(iso);
   if (dow === 4 || dow === 5) p *= 1.06; // Thu/Fri (operator's weekend definition)
   p *= 1 + 0.04 * Math.sin(idx / 30); // mild seasonality
   p *= 0.98 + 0.04 * mulberry32(hashStr(unit.id + iso))(); // small per-night jitter
   return Math.round(p / 5) * 5;
+}
+
+/**
+ * Derived nightly prices come from the SAME rules engine the Pricing
+ * Configuration page edits — seasonality, weekend/day-of-week, far-out,
+ * last-minute, occupancy rules, min-price rules, the unit's floor/ceiling,
+ * smoothing and rounding — so configuration changes actually shape the
+ * calendar (and what gets pushed to MiniHotel). Build one pricer per
+ * operation: providers/config are constructed once and every (unit, night)
+ * quote is memoized.
+ */
+type NightPrice = { rate: number; minStay: number };
+function makeNightPricer(): (unit: Unit, iso: string) => NightPrice {
+  let market: MarketProviders | null = null;
+  const asOf = new Date();
+  const cfgCache = new Map<string, PricingRulesConfig>();
+  const memo = new Map<string, NightPrice>();
+  return (unit, iso) => {
+    const k = unit.id + "|" + iso;
+    const hit = memo.get(k);
+    if (hit) return hit;
+    let out: NightPrice;
+    try {
+      if (!market) market = mockProviders();
+      let cfg = cfgCache.get(unit.id);
+      if (!cfg) {
+        cfg = effectiveRulesForUnit(unit);
+        cfgCache.set(unit.id, cfg);
+      }
+      const q = quoteNight(unit, new Date(iso + "T00:00:00Z"), market, asOf, cfg);
+      out = { rate: q.rate, minStay: q.minStay };
+    } catch {
+      out = { rate: legacyCurve(unit, iso, dayIndex(iso)), minStay: DEFAULT_MIN_NIGHTS };
+    }
+    memo.set(k, out);
+    return out;
+  };
 }
 
 // --------------------------------------------------------------------- reads
@@ -220,16 +263,18 @@ export function getCalendar(from: string, days: number): Calendar {
   const rankByUnit = new Map<string, RankSql>();
   for (const r of rankRows) rankByUnit.set(r.unit_id, r); // latest ts wins
 
+  const priceOf = makeNightPricer();
   const rows: RateRow[] = units.map((unit) => {
-    // Only fabricate a baseline for units that actually have a rate (legacy/demo
-    // units). MiniHotel-imported apartments come in with rate 0 — for those we
-    // show nothing (price/availability = null) until real data is synced in,
-    // rather than invent numbers.
+    // Only price units that actually have a rate anchor (Base). MiniHotel
+    // imports come in with rate 0 — those show nothing (price/availability =
+    // null) until real data is synced in, rather than invent numbers.
     const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
     const cells: RateCell[] = dates.map((date) => {
-      const idx = dayIndex(date);
-      let price: number | null = hasBaseline ? basePrice(unit, date, idx) : null;
-      let minNights = DEFAULT_MIN_NIGHTS;
+      const q = hasBaseline ? priceOf(unit, date) : null;
+      let price: number | null = q ? q.rate : null;
+      // Default min-stay = the engine's resolved value (min-stay rules applied);
+      // an override below still wins.
+      let minNights = q ? q.minStay : DEFAULT_MIN_NIGHTS;
       // Booked / closed / availability come ONLY from real data (overrides
       // written by the MiniHotel sync or the operator) — never invented. A night
       // with no data is open-looking with unknown availability.
@@ -563,17 +608,17 @@ export function rebaseFuturePrices(
   const clearPrice = db.prepare(
     "UPDATE rate_calendar SET price = NULL, updated_at = ? WHERE unit_id = ? AND date = ?",
   );
+  const priceOf = makeNightPricer();
   const tx = db.transaction(() => {
     for (let i = 0; i < horizonDays; i++) {
       const date = isoAddDays(from, i);
-      const idx = fromIdx + i;
       const o = byDate.get(date);
       // A manual fixed price is the operator's pin — never rebased.
       if (o && o.price != null && o.source === "manual") continue;
       // Sold/closed nights (real data only) keep their last price.
       if (o && (o.booked === 1 || o.closed === 1)) continue;
 
-      let price = basePrice(unit, date, idx); // unit already carries the new base
+      let price = priceOf(unit, date).rate; // unit already carries the new base
       if (o) {
         // A live dynamic % override keeps steering off the new baseline.
         const expired = o.expires_on != null && from > o.expires_on;
@@ -669,6 +714,7 @@ export function applyOverrideRange(o: RangeOverride): {
   let unresolved = 0;
   const written: AppliedCell[] = [];
   const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  const priceOf = makeNightPricer();
   const del = db.prepare("DELETE FROM rate_calendar WHERE unit_id = ? AND date = ?");
   const sel = db.prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date = ?");
 
@@ -691,7 +737,6 @@ export function applyOverrideRange(o: RangeOverride): {
           unresolved++;
           continue;
         }
-        const idx = dayIndex(date);
         const sold = existing.booked === 1;
         const cell: AppliedCell = { date };
         // Only re-send fields the deleted override had actually pinned.
@@ -702,9 +747,9 @@ export function applyOverrideRange(o: RangeOverride): {
             existing.min_price != null ||
             existing.max_price != null)
         ) {
-          cell.price = basePrice(unit, date, idx);
+          cell.price = priceOf(unit, date).rate;
         }
-        if (existing.min_nights != null) cell.minNights = DEFAULT_MIN_NIGHTS;
+        if (existing.min_nights != null) cell.minNights = priceOf(unit, date).minStay;
         if (existing.closed != null) cell.closed = false; // default state is open
         if (cell.price != null || cell.minNights != null || cell.closed != null) written.push(cell);
         continue;
@@ -723,7 +768,7 @@ export function applyOverrideRange(o: RangeOverride): {
           patch.price = null;
         } else {
           // "% of base (fixed)": materialized into a static price.
-          patch.price = Math.max(0, Math.round(basePrice(unit, date, dayIndex(date)) * (1 + o.pricePct / 100)));
+          patch.price = Math.max(0, Math.round(priceOf(unit, date).rate * (1 + o.pricePct / 100)));
           patch.pctAdjust = null;
         }
       }
@@ -740,19 +785,19 @@ export function applyOverrideRange(o: RangeOverride): {
       const cell: AppliedCell = { date };
       if (patch.pctAdjust != null && hasBaseline) {
         // Push the dynamic %'s CURRENT resolution (it keeps moving locally).
-        let p = Math.max(0, Math.round(basePrice(unit, date, dayIndex(date)) * (1 + patch.pctAdjust / 100)));
+        let p = Math.max(0, Math.round(priceOf(unit, date).rate * (1 + patch.pctAdjust / 100)));
         if (patch.minPrice != null && p < patch.minPrice) p = patch.minPrice;
         if (patch.maxPrice != null && p > patch.maxPrice) p = patch.maxPrice;
         cell.price = p;
       } else if (patch.price !== undefined) {
         if (patch.price !== null) cell.price = patch.price;
         else if (patch.pctAdjust == null) {
-          if (hasBaseline) cell.price = basePrice(unit, date, dayIndex(date));
+          if (hasBaseline) cell.price = priceOf(unit, date).rate;
           else unresolved++;
         }
       }
       if (patch.minNights !== undefined) {
-        cell.minNights = patch.minNights !== null ? patch.minNights : DEFAULT_MIN_NIGHTS;
+        cell.minNights = patch.minNights !== null ? patch.minNights : priceOf(unit, date).minStay;
       }
       if (patch.closed !== undefined) {
         cell.closed = patch.closed !== null ? patch.closed : false; // cleared closure = open
@@ -778,15 +823,15 @@ export function clearedReplacements(
   const unit = listUnits().find((u) => u.id === unitId);
   if (!unit) return { unresolved: true };
   const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
-  const idx = dayIndex(date);
+  const priceOf = makeNightPricer();
   const out: { price?: number; minNights?: number; closed?: boolean; unresolved: boolean } = {
     unresolved: false,
   };
   if (patch.price === null) {
-    if (hasBaseline) out.price = basePrice(unit, date, idx);
+    if (hasBaseline) out.price = priceOf(unit, date).rate;
     else out.unresolved = true;
   }
-  if (patch.minNights === null) out.minNights = DEFAULT_MIN_NIGHTS;
+  if (patch.minNights === null) out.minNights = priceOf(unit, date).minStay;
   if (patch.closed === null) out.closed = false; // cleared closure = open
   return out;
 }
