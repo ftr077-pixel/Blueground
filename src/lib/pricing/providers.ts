@@ -64,6 +64,10 @@ export interface MarketProviders {
    *  closed-only nights don't count. */
   isBooked(unit: Unit, date: Date): boolean;
 
+  /** True when the night is unavailable — booked OR blocked. Feeds the
+   *  adjacent-day min-stay rules ("after a booked or blocked date"). */
+  isUnavailable(unit: Unit, date: Date): boolean;
+
   /** Combined occupancy of the unit's customization group for a date (booked
    *  members ÷ members), or null when the unit has no group / the group has
    *  fewer than 2 members. Feeds Portfolio Occupancy-Based Adjustments. */
@@ -121,6 +125,14 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
   return {
     isBooked(unit: Unit, date: Date): boolean {
       return setFor(unit.id).has(iso(date));
+    },
+    isUnavailable(unit: Unit, date: Date): boolean {
+      let s = unavailCache.get(unit.id);
+      if (!s) {
+        s = unavailableDatesForUnit(unit.id, todayIso, 430);
+        unavailCache.set(unit.id, s);
+      }
+      return s.has(iso(date));
     },
     groupOccupancy(unit: Unit, date: Date): number | null {
       const g = unit.group;
