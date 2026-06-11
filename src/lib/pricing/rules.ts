@@ -8,6 +8,7 @@ import {
   PRICING_RULES,
   SEASONALITY_SENSITIVITY,
   PRICING_OFFSET_LIMITS,
+  MARKET_FLAVOR_MULT,
 } from "@/lib/config/pricing";
 import type { MarketProviders } from "@/lib/pricing/providers";
 
@@ -81,20 +82,113 @@ export function occupancyRule(unit: Unit, date: Date, m: MarketProviders, cfg: R
   };
 }
 
-export function farOutRule(leadDays: number, cfg: Rules): FactorResult | null {
-  if (!cfg.farOut.enabled || leadDays <= cfg.farOut.thresholdDays) return null;
-  const ramp = Math.min(1, (leadDays - cfg.farOut.thresholdDays) / cfg.farOut.rampDays);
-  const factor = 1 + ramp * cfg.farOut.cap;
+/** Far Out Prices: gradual ramp (default), flat beyond the threshold, or
+ *  market-driven — a flavored 20%-capped ramp starting no earlier than 60 days
+ *  out (PriceLabs's documented limits), modulated by the market's fill for the
+ *  date where known (hot far dates hold firmer). */
+export function farOutRule(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): FactorResult | null {
+  const c = cfg.farOut;
+  if (!c.enabled) return null;
+  if (c.mode === "marketDriven") {
+    const threshold = Math.max(60, c.thresholdDays);
+    if (leadDays <= threshold) return null;
+    const ramp = Math.min(1, (leadDays - threshold) / 210); // the PL-determined ~7-month ramp
+    const fill = m.occupancy(unit, date);
+    const heat = fill > 0 ? Math.max(0.75, Math.min(1.25, 0.75 + 0.5 * fill)) : 1;
+    const premium = Math.min(0.2, MARKET_FLAVOR_MULT[c.marketFlavor] * ramp * 0.2 * heat);
+    if (premium <= 0) return null;
+    return {
+      key: "farOut",
+      label: "Far-out premium",
+      factor: 1 + premium,
+      detail: `${leadDays}d out ${pct(1 + premium)} — market-driven (${c.marketFlavor})`,
+    };
+  }
+  if (leadDays <= c.thresholdDays) return null;
+  const factor =
+    c.mode === "flat"
+      ? 1 + c.cap
+      : 1 + Math.min(1, (leadDays - c.thresholdDays) / c.rampDays) * c.cap;
   if (factor === 1) return null;
-  return { key: "farOut", label: "Far-out premium", factor, detail: `${leadDays}d out ${pct(factor)}` };
+  return {
+    key: "farOut",
+    label: c.cap >= 0 ? "Far-out premium" : "Far-out discount",
+    factor,
+    detail: `${leadDays}d out ${pct(factor)}${c.mode === "flat" ? " (flat)" : ""}`,
+  };
 }
 
-export function lastMinuteRule(leadDays: number, cfg: Rules): FactorResult | null {
-  if (!cfg.lastMinute.enabled || leadDays > cfg.lastMinute.windowDays) return null;
-  const closeness = (cfg.lastMinute.windowDays - leadDays) / cfg.lastMinute.windowDays;
-  const factor = 1 - closeness * cfg.lastMinute.maxDiscount;
+/** Last Minute Prices: gradual (default), % flat, fixed nightly price (returned
+ *  as a pin — beats an orphan-day fixed price per the PriceLabs fixed-override
+ *  hierarchy), or market-driven (flavored; deeper when the market's fill for
+ *  the date is soft). Custom windows cap at 90 days. */
+export function lastMinuteRule(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): FactorResult | null {
+  const c = cfg.lastMinute;
+  const window = Math.min(90, c.windowDays);
+  if (!c.enabled || window <= 0 || leadDays > window) return null;
+  if (c.mode === "fixed") {
+    if (c.value <= 0) return null;
+    return {
+      key: "lastMinute",
+      label: "Last-minute",
+      factor: 1,
+      pin: c.value,
+      detail: `${leadDays}d out — fixed ₪${c.value}`,
+    };
+  }
+  if (c.mode === "flat") {
+    if (c.value === 0) return null;
+    return {
+      key: "lastMinute",
+      label: "Last-minute",
+      factor: 1 + c.value,
+      detail: `${leadDays}d out ${pct(1 + c.value)} (flat)`,
+    };
+  }
+  const closeness = (window - leadDays) / window;
+  if (c.mode === "marketDriven") {
+    const fill = m.occupancy(unit, date);
+    const softness = fill > 0 ? Math.max(0.6, Math.min(1.4, 0.6 + 0.8 * (1 - fill))) : 1;
+    const depth = Math.min(0.6, MARKET_FLAVOR_MULT[c.marketFlavor] * closeness * 0.3 * softness);
+    if (depth <= 0) return null;
+    return {
+      key: "lastMinute",
+      label: "Last-minute",
+      factor: 1 - depth,
+      detail: `${leadDays}d out ${pct(1 - depth)} — market-driven (${c.marketFlavor})`,
+    };
+  }
+  const factor = 1 + closeness * c.value; // gradual ramp toward the full value at day 0
   if (factor === 1) return null;
   return { key: "lastMinute", label: "Last-minute", factor, detail: `${leadDays}d out ${pct(factor)}` };
+}
+
+/** Extra Person Fee for a quoted night: per extra guest above the threshold.
+ *  Percent mode prices off the CHECK-IN day's rate only (PriceLabs sends no
+ *  per-night variation), so callers pass the check-in night's rate. */
+export function extraPersonFee(
+  rate: number,
+  guests: number,
+  cfg: Rules,
+): { extraGuests: number; perGuest: number; total: number } | null {
+  const c = cfg.extraPersonFee;
+  if (!c.enabled || c.value <= 0 || guests <= c.afterGuests) return null;
+  const perGuest = c.mode === "percent" ? Math.round(rate * c.value) : Math.round(c.value);
+  if (perGuest <= 0) return null;
+  const extraGuests = guests - c.afterGuests;
+  return { extraGuests, perGuest, total: perGuest * extraGuests };
 }
 
 export function dayOfWeekRule(date: Date, cfg: Rules): FactorResult | null {
@@ -343,11 +437,15 @@ export function pricingOffsetRule(
   };
 }
 
-/** Length-of-stay discount fraction (0..1) for a booking of `nights`, best tier wins. */
+/** Length-of-stay discount fraction (0..1) for a booking of `nights`, best tier
+ *  wins. Scope-level weekly/monthly values (cfg.los) override the per-unit
+ *  columns when set; PriceLabs range is 0–75%. */
 export function losDiscountForStay(unit: Unit, nights: number, cfg: Rules = PRICING_RULES): number {
   if (!cfg.los.enabled) return 0;
-  if (nights >= cfg.los.quarterlyMinNights) return Math.max(unit.monthlyDiscountPct, cfg.los.quarterlyDiscountPct);
-  if (nights >= 30) return unit.monthlyDiscountPct;
-  if (nights >= 7) return unit.weeklyDiscountPct;
+  const weekly = cfg.los.weeklyPct ?? unit.weeklyDiscountPct;
+  const monthly = cfg.los.monthlyPct ?? unit.monthlyDiscountPct;
+  if (nights >= cfg.los.quarterlyMinNights) return Math.max(monthly, cfg.los.quarterlyDiscountPct);
+  if (nights >= 30) return monthly;
+  if (nights >= 7) return weekly;
   return 0;
 }

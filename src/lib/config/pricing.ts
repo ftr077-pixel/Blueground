@@ -111,6 +111,16 @@ export const PRICING_OFFSET_LIMITS = {
  *  fixed ₪, % change on the base price, or % change on the listing min price. */
 export type MinPriceMode = "fixed" | "pctBase" | "pctMin";
 
+/** Market-driven flavor (HLP-style): how hard to lean into market-derived
+ *  last-minute discounts / far-out premiums. */
+export type MarketFlavor = "conservative" | "balanced" | "aggressive";
+
+export const MARKET_FLAVOR_MULT: Record<MarketFlavor, number> = {
+  conservative: 0.5,
+  balanced: 1,
+  aggressive: 1.5,
+};
+
 /** One booking-window column of a Portfolio Occupancy profile. */
 export interface PortfolioObaWindow {
   /** Window applies to lead times ≤ this many days (ascending; last is catch-all). */
@@ -156,8 +166,27 @@ export interface PricingRulesConfig {
   demandEvents: { enabled: boolean; cap: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
   occupancy: { enabled: boolean; bands: OccupancyBand[] };
-  farOut: { enabled: boolean; thresholdDays: number; cap: number; rampDays: number };
-  lastMinute: { enabled: boolean; windowDays: number; maxDiscount: number };
+  /** Far Out Prices: gradual ramp, flat premium/discount beyond a threshold, or
+   *  market-driven (flavored; capped at ±20% and never before 60 days out —
+   *  PriceLabs's documented limits for the market mode). `cap` is signed. */
+  farOut: {
+    enabled: boolean;
+    mode: "gradual" | "flat" | "marketDriven";
+    marketFlavor: MarketFlavor;
+    thresholdDays: number;
+    cap: number;
+    rampDays: number;
+  };
+  /** Last Minute Prices: gradual, % flat, fixed nightly price (a pin), or
+   *  market-driven (flavored). Custom windows max out at 90 days (PriceLabs).
+   *  `value` is a signed fraction for percent modes, ₪ for fixed. */
+  lastMinute: {
+    enabled: boolean;
+    mode: "gradual" | "flat" | "fixed" | "marketDriven";
+    marketFlavor: MarketFlavor;
+    windowDays: number;
+    value: number;
+  };
   adjacent: {
     enabled: boolean;
     mode: "percent" | "fixed";
@@ -171,7 +200,36 @@ export interface PricingRulesConfig {
     applyOnWeekends: boolean;
   };
   dayOfWeek: { enabled: boolean; multiplier: number[] };
-  los: { enabled: boolean; quarterlyMinNights: number; quarterlyDiscountPct: number };
+  /** LOS discounts. weeklyPct/monthlyPct (0..0.75, PriceLabs range) override the
+   *  per-unit columns when set at a scope; null = use the unit's own values.
+   *  Quote-side only: MiniHotel isn't in PriceLabs's weekly/monthly push list,
+   *  so these shape the effective stay rate, not the pushed nightly price. */
+  los: {
+    enabled: boolean;
+    weeklyPct: number | null;
+    monthlyPct: number | null;
+    quarterlyMinNights: number;
+    quarterlyDiscountPct: number;
+  };
+  /** Extra Person Fee: per extra guest per night above the threshold. Percent
+   *  mode is computed off the check-in day's rate only (PriceLabs sends no
+   *  per-night variation for this fee). */
+  extraPersonFee: {
+    enabled: boolean;
+    mode: "fixed" | "percent";
+    value: number;
+    afterGuests: number;
+  };
+  /** Check-in/Check-out restrictions via named profiles (see repos/profiles).
+   *  allowedCheckin/out are resolved from the attached profile at read time;
+   *  all days when no profile. Engine-side restriction — our MiniHotel Reverse
+   *  ARI contract (§4.2) has no verified CTA/CTD field, so this is not pushed. */
+  checkinCheckout: {
+    enabled: boolean;
+    profile: string | null;
+    allowedCheckin: number[];
+    allowedCheckout: number[];
+  };
   pricingOffset: {
     enabled: boolean;
     mode: "percent" | "fixed";
@@ -292,15 +350,20 @@ export const PRICING_RULES: PricingRulesConfig = {
   /** Far-out premium: distant dates earn a gradual uplift (protects future inventory). */
   farOut: {
     enabled: true,
+    mode: "gradual",
+    marketFlavor: "balanced",
     thresholdDays: 60,
     cap: 0.08,
     rampDays: 120,
   },
-  /** Last-minute discount — OFF for MTR (long stays aren't discounted for near arrival). */
+  /** Last-minute discount — OFF for MTR (long stays aren't discounted for near
+   *  arrival). Shape mirrors the PriceLabs default: gradual 30% over 15 days. */
   lastMinute: {
     enabled: false,
-    windowDays: 14,
-    maxDiscount: 0.15,
+    mode: "gradual",
+    marketFlavor: "balanced",
+    windowDays: 15,
+    value: -0.3,
   },
   /** Adjacent factor (PriceLabs): adjust the open days right before/after a
    *  booking — discount to fill gaps, premium to discourage back-to-back
@@ -320,12 +383,28 @@ export const PRICING_RULES: PricingRulesConfig = {
     enabled: false,
     multiplier: [1, 1, 1, 1, 1, 1, 1],
   },
-  /** Length-of-stay discounts. Weekly/monthly come from the unit; this adds a
-   *  longer-stay tier on top. */
+  /** Length-of-stay discounts. Weekly/monthly come from the unit (null here);
+   *  this adds a longer-stay tier on top. */
   los: {
     enabled: true,
+    weeklyPct: null,
+    monthlyPct: null,
     quarterlyMinNights: 90,
     quarterlyDiscountPct: 0.25,
+  },
+  /** Flat monthly leases regardless of headcount are the MTR norm — ships off. */
+  extraPersonFee: {
+    enabled: false,
+    mode: "fixed",
+    value: 0,
+    afterGuests: 2,
+  },
+  /** No restriction until a profile is attached (all days bookable). */
+  checkinCheckout: {
+    enabled: false,
+    profile: null,
+    allowedCheckin: [0, 1, 2, 3, 4, 5, 6],
+    allowedCheckout: [0, 1, 2, 3, 4, 5, 6],
   },
   /** Pricing offset (PriceLabs): a final fixed/percent nudge applied AFTER all
    *  other customizations — including the floor/ceiling clamp and fixed-price
