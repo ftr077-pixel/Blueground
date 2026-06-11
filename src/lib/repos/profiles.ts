@@ -157,3 +157,50 @@ export const upsertObaProfile = (name: string, payload: ObaProfilePayload) =>
   upsertNamed(OBA_KEY, name, payload);
 export const setObaProfileArchived = (name: string, archived: boolean) =>
   archiveNamed<ObaProfilePayload>(OBA_KEY, name, archived);
+
+const PRICING_PROFILE_KEY = "pricing_profiles";
+const SEASONAL_PROFILE_KEY = "seasonal_profiles";
+
+/** Pricing Profile payload: a bundle of the ~11 pricing customizations
+ *  (RuleOverrides subset), attachable to seasons in a seasonal profile.
+ *  Fixed last-minute / orphan prices are stripped at resolution time —
+ *  PriceLabs disallows them in profiles since one profile prices many
+ *  listings. */
+export type PricingProfilePayload = Record<string, unknown>;
+
+export const listPricingProfiles = (includeArchived = false) =>
+  listNamed<PricingProfilePayload>(PRICING_PROFILE_KEY, includeArchived);
+export const findPricingProfile = (name: string | null | undefined) =>
+  name ? (listPricingProfiles(true).find((p) => p.name === name) ?? null) : null;
+export const upsertPricingProfile = (name: string, payload: PricingProfilePayload) =>
+  upsertNamed(PRICING_PROFILE_KEY, name, payload);
+export const setPricingProfileArchived = (name: string, archived: boolean) =>
+  archiveNamed<PricingProfilePayload>(PRICING_PROFILE_KEY, name, archived);
+
+/** Custom Seasonal Profile payload: named seasons with their own min/base/max
+ *  (fixed ₪ or % change on the listing values), optional per-season Min Stay
+ *  Profile and Pricing Profile. Repeating seasons use MM-DD (annual);
+ *  non-repeating use YYYY-MM-DD and take preference. */
+export interface SeasonalProfilePayload {
+  mode: "fixed" | "percent";
+  seasons: Array<{
+    name: string;
+    from: string;
+    to: string;
+    repeating: boolean;
+    min: number | null;
+    base: number | null;
+    max: number | null;
+    minStayProfile: string | null;
+    pricingProfile: string | null;
+  }>;
+}
+
+export const listSeasonalProfiles = (includeArchived = false) =>
+  listNamed<SeasonalProfilePayload>(SEASONAL_PROFILE_KEY, includeArchived);
+export const findSeasonalProfile = (name: string | null | undefined) =>
+  name ? (listSeasonalProfiles(true).find((p) => p.name === name) ?? null) : null;
+export const upsertSeasonalProfile = (name: string, payload: SeasonalProfilePayload) =>
+  upsertNamed(SEASONAL_PROFILE_KEY, name, payload);
+export const setSeasonalProfileArchived = (name: string, archived: boolean) =>
+  archiveNamed<SeasonalProfilePayload>(SEASONAL_PROFILE_KEY, name, archived);

@@ -10,7 +10,7 @@
 import { listUnits, type Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { bookedDatesForUnit, unavailableDatesForUnit } from "@/lib/repos/rates";
-import { realizedNightlyRates } from "@/lib/repos/reservations";
+import { realizedNightlyRates, bookingRecency } from "@/lib/repos/reservations";
 import { effectiveNeighborhood } from "@/lib/pricing/rules-config";
 import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
 
@@ -84,6 +84,10 @@ export interface MarketProviders {
    *  blocked-dates exception list) ÷ window nights. Feeds per-listing OBA. */
   windowOccupancy(unit: Unit, fromDay: number, toDay: number): number;
 
+  /** Days since the unit's last live booking + the reservation feed's age, or
+   *  null without feed data. Feeds the Booking Recency Factor. */
+  bookingRecency(unit: Unit): { lastBookedDaysAgo: number; feedAgeDays: number } | null;
+
   /** Operator/calendar override for a unit+date, or null.
    *  PRODUCTION SEAM: a unit_date_overrides table edited by the operator. */
   dateOverride(unit: Unit, date: Date): DateOverride | null;
@@ -112,6 +116,7 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
   const groupOccCache = new Map<string, number | null>();
   const lyCache = new Map<string, Map<string, number>>();
   const unavailCache = new Map<string, Set<string>>();
+  const recencyCache = new Map<string, { lastBookedDaysAgo: number; feedAgeDays: number } | null>();
 
   return {
     isBooked(unit: Unit, date: Date): boolean {
@@ -171,6 +176,14 @@ function calendarSignals(marketOcc90: (unit: Unit) => number | null) {
       }
       const span = hi - lo + 1;
       return span > 0 ? unavailable / span : 0;
+    },
+    bookingRecency(unit: Unit): { lastBookedDaysAgo: number; feedAgeDays: number } | null {
+      let r = recencyCache.get(unit.id);
+      if (r === undefined) {
+        r = bookingRecency(unit.id);
+        recencyCache.set(unit.id, r);
+      }
+      return r;
     },
   };
 }

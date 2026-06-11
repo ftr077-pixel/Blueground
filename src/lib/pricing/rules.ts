@@ -125,6 +125,35 @@ export function occupancyRule(
   };
 }
 
+/** Booking Recency Factor: an automatic temporary discount for listings going
+ *  cold — no live booking in 15+ days, fresh reservation data (<3 days), and
+ *  next-30d occupancy under 10% (or under 80% of market and below 70%).
+ *  Linear 5% → 15% over 15 → 45 days since the last booking, applied to the
+ *  next 30 days only; a plain pre-clamp factor, so the minimum price holds.
+ *  Blocks count as bookings in the occupancy check (windowOccupancy). */
+export function bookingRecencyRule(
+  unit: Unit,
+  date: Date,
+  leadDays: number,
+  m: MarketProviders,
+  cfg: Rules,
+): FactorResult | null {
+  if (!cfg.bookingRecency.enabled || leadDays > 30) return null;
+  const sig = m.bookingRecency(unit);
+  if (!sig || sig.feedAgeDays >= 3 || sig.lastBookedDaysAgo < 15) return null;
+  const lo = m.windowOccupancy(unit, 0, 29);
+  const market = m.occupancy90(unit)?.market ?? null;
+  const cold = lo < 0.1 || (market != null && lo < 0.8 * market && lo < 0.7);
+  if (!cold) return null;
+  const depth = Math.min(0.15, 0.05 + (Math.max(0, sig.lastBookedDaysAgo - 15) / 30) * 0.1);
+  return {
+    key: "bookingRecency",
+    label: "Booking recency",
+    factor: 1 - depth,
+    detail: `${pct(1 - depth)} — no booking in ${Math.round(Math.min(sig.lastBookedDaysAgo, 999))}d, next-30d occ ${(lo * 100).toFixed(0)}%`,
+  };
+}
+
 /** Rounding preference: snap `value`'s trailing `digits` digits to the nearest
  *  allowed ending (e.g. digits=1 endings=[4,9]: 2823 → 2824; digits=2
  *  endings=[0,50]: 178 → 200/150 whichever is nearer). */

@@ -9,8 +9,16 @@ import {
   listObaProfiles,
   upsertObaProfile,
   setObaProfileArchived,
+  listPricingProfiles,
+  upsertPricingProfile,
+  setPricingProfileArchived,
+  listSeasonalProfiles,
+  upsertSeasonalProfile,
+  setSeasonalProfileArchived,
   type MinStayProfilePayload,
   type ObaProfilePayload,
+  type PricingProfilePayload,
+  type SeasonalProfilePayload,
 } from "@/lib/repos/profiles";
 import { logActivity } from "@/lib/repos/activity";
 
@@ -27,6 +35,8 @@ export async function GET(req: Request) {
     cico: listCicoProfiles(includeArchived),
     minStay: listMinStayProfiles(includeArchived),
     oba: listObaProfiles(includeArchived),
+    pricing: listPricingProfiles(includeArchived),
+    seasonal: listSeasonalProfiles(includeArchived),
   });
 }
 
@@ -41,6 +51,12 @@ export async function POST(req: Request) {
     saveOba?: { name: string; windows: ObaProfilePayload["windows"] };
     archiveOba?: string;
     unarchiveOba?: string;
+    savePricing?: { name: string; rules: PricingProfilePayload };
+    archivePricing?: string;
+    unarchivePricing?: string;
+    saveSeasonal?: { name: string; payload: SeasonalProfilePayload };
+    archiveSeasonal?: string;
+    unarchiveSeasonal?: string;
   };
   try {
     body = await req.json();
@@ -70,6 +86,22 @@ export async function POST(req: Request) {
       log(`OBA profile "${body.saveOba.name}" saved — propagates to every scope it's attached to.`);
     } else if (body.archiveOba !== undefined || body.unarchiveOba !== undefined) {
       setObaProfileArchived(String(body.archiveOba ?? body.unarchiveOba), body.archiveOba !== undefined);
+    } else if (body.savePricing) {
+      upsertPricingProfile(body.savePricing.name, body.savePricing.rules ?? {});
+      log(`Pricing Profile "${body.savePricing.name}" saved — attach it to seasons in a seasonal profile.`);
+    } else if (body.archivePricing !== undefined || body.unarchivePricing !== undefined) {
+      setPricingProfileArchived(
+        String(body.archivePricing ?? body.unarchivePricing),
+        body.archivePricing !== undefined,
+      );
+    } else if (body.saveSeasonal) {
+      upsertSeasonalProfile(body.saveSeasonal.name, body.saveSeasonal.payload ?? { mode: "fixed", seasons: [] });
+      log(`Custom Seasonal Profile "${body.saveSeasonal.name}" saved — propagates to every scope it's attached to.`);
+    } else if (body.archiveSeasonal !== undefined || body.unarchiveSeasonal !== undefined) {
+      setSeasonalProfileArchived(
+        String(body.archiveSeasonal ?? body.unarchiveSeasonal),
+        body.archiveSeasonal !== undefined,
+      );
     } else {
       return NextResponse.json({ error: "nothing to do" }, { status: 400 });
     }
@@ -84,5 +116,7 @@ export async function POST(req: Request) {
     cico: listCicoProfiles(false),
     minStay: listMinStayProfiles(false),
     oba: listObaProfiles(false),
+    pricing: listPricingProfiles(false),
+    seasonal: listSeasonalProfiles(false),
   });
 }

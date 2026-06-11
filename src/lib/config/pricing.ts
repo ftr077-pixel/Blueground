@@ -330,6 +330,36 @@ export interface PricingRulesConfig {
    *  recommendations — null = the listing's own neighborhood. Scoped, so a
    *  group can price off a different comp market. */
   neighborhoodProfile: { source: string | null };
+  /** Booking Recency Factor: an automatic temporary discount for listings that
+   *  haven't booked in 15+ days AND are running cold (own next-30d occupancy
+   *  <10%, or <80% of market and <70%). Linear 5%→15% over 15→45 days since the
+   *  last booking, next 30 days only, respects the minimum price. Needs fresh
+   *  reservation data (<3 days) — inert without it. On by default (PriceLabs). */
+  bookingRecency: { enabled: boolean };
+  /** Custom Seasonal Profile attachment: named seasons replacing the listing's
+   *  min/base/max (fixed ₪ or % change), each optionally carrying a Min Stay
+   *  Profile and a Pricing Profile. Resolved at read time into `seasons`
+   *  (non-repeating seasons take preference over repeating ones); per-season
+   *  `cfg` is the pre-resolved engine config when profiles are attached. */
+  seasonalProfile: {
+    enabled: boolean;
+    profile: string | null;
+    mode: "fixed" | "percent";
+    seasons: Array<{
+      name: string;
+      from: string;
+      to: string;
+      repeating: boolean;
+      min: number | null;
+      base: number | null;
+      max: number | null;
+      minStayProfile: string | null;
+      pricingProfile: string | null;
+      /** Pre-resolved per-season config (season's profiles applied; its own
+       *  seasonalProfile disabled to prevent recursion), or null = use this cfg. */
+      cfg?: PricingRulesConfig | null;
+    }>;
+  };
   pricingOffset: {
     enabled: boolean;
     mode: "percent" | "fixed";
@@ -529,6 +559,9 @@ export const PRICING_RULES: PricingRulesConfig = {
   /** ON: cancel-and-rebook-cheaper protection matters for long stays. */
   freezeUnavailable: { enabled: true },
   neighborhoodProfile: { source: null },
+  /** PriceLabs ships this on; inert without reservation data. */
+  bookingRecency: { enabled: true },
+  seasonalProfile: { enabled: false, profile: null, mode: "fixed", seasons: [] },
   /** Pricing offset (PriceLabs): a final fixed/percent nudge applied AFTER all
    *  other customizations — including the floor/ceiling clamp and fixed-price
    *  overrides — so it can take the pushed rate outside the unit's min/max.

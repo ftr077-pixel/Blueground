@@ -22,7 +22,13 @@ import {
   type PortfolioObaWindow,
 } from "@/lib/config/pricing";
 import type { Unit } from "@/lib/repos/units";
-import { findCicoProfile, findMinStayProfile, findObaProfile } from "@/lib/repos/profiles";
+import {
+  findCicoProfile,
+  findMinStayProfile,
+  findObaProfile,
+  findPricingProfile,
+  findSeasonalProfile,
+} from "@/lib/repos/profiles";
 import { OBA_PRESETS } from "@/lib/config/pricing";
 import { getSetting, setSetting } from "@/lib/repos/visibility";
 
@@ -109,6 +115,8 @@ export interface RuleOverrides {
   smoothing?: { enabled?: boolean; mode?: "week" | "split"; weekStart?: number };
   freezeUnavailable?: { enabled?: boolean };
   neighborhoodProfile?: { source?: string | null };
+  bookingRecency?: { enabled?: boolean };
+  seasonalProfile?: { enabled?: boolean; profile?: string | null };
   pricingOffset?: { enabled?: boolean; mode?: "percent" | "fixed"; value?: number };
   weekend?: { days?: number[] };
   orphanDayPrices?: {
@@ -170,6 +178,8 @@ const SECTION_KEYS = [
   "smoothing",
   "freezeUnavailable",
   "neighborhoodProfile",
+  "bookingRecency",
+  "seasonalProfile",
   "pricingOffset",
   "weekend",
   "orphanDayPrices",
@@ -199,6 +209,8 @@ export const RULE_SECTIONS: Array<{ key: RuleSectionKey; label: string }> = [
   { key: "smoothing", label: "Smoothing" },
   { key: "freezeUnavailable", label: "Freeze unavail" },
   { key: "neighborhoodProfile", label: "Data source" },
+  { key: "bookingRecency", label: "Booking recency" },
+  { key: "seasonalProfile", label: "Seasonal profile" },
   { key: "pricingOffset", label: "Offset" },
   { key: "weekend", label: "Weekend days" },
   { key: "orphanDayPrices", label: "Orphan prices" },
@@ -563,6 +575,74 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     },
   };
 
+  // Custom Seasonal Profile: resolve the attached profile's seasons, and for
+  // seasons carrying a Pricing Profile / Min Stay Profile, pre-resolve a full
+  // per-season engine config (seasonal customizations supersede the scope's;
+  // the nested config has its own seasonalProfile disabled — no recursion).
+  // PriceLabs disallows fixed last-minute / orphan prices inside Pricing
+  // Profiles (one profile prices many listings) — those modes are stripped.
+  const spo = o.seasonalProfile;
+  const spStored = findSeasonalProfile(spo?.profile ?? d.seasonalProfile.profile);
+  const MMDD = /^\d{2}-\d{2}$/;
+  const YMD = /^\d{4}-\d{2}-\d{2}$/;
+  const seasonalProfile: PricingRulesConfig["seasonalProfile"] = {
+    enabled: spo?.enabled ?? d.seasonalProfile.enabled,
+    profile: spStored?.name ?? null,
+    mode: spStored?.payload.mode === "percent" ? "percent" : "fixed",
+    seasons: [],
+  };
+  if (spStored && seasonalProfile.enabled) {
+    seasonalProfile.seasons = spStored.payload.seasons
+      .filter((s) => {
+        if (!s || typeof s.name !== "string" || !s.name.trim()) return false;
+        const re = s.repeating ? MMDD : YMD;
+        return re.test(String(s.from)) && re.test(String(s.to)) && String(s.from) <= String(s.to);
+      })
+      .slice(0, 24)
+      .map((s) => {
+        const num = (v: unknown): number | null =>
+          v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+        const pp = findPricingProfile(s.pricingProfile);
+        const msp = findMinStayProfile(s.minStayProfile);
+        let cfg: PricingRulesConfig | null = null;
+        if (pp || msp) {
+          const ppOverrides = { ...(pp?.payload as RuleOverrides | undefined) };
+          // Strip fixed price modes (not allowed in Pricing Profiles).
+          if (ppOverrides.lastMinute?.mode === "fixed") {
+            ppOverrides.lastMinute = { ...ppOverrides.lastMinute, mode: "gradual" };
+          }
+          if (ppOverrides.orphanDayPrices?.ranges) {
+            ppOverrides.orphanDayPrices = {
+              ...ppOverrides.orphanDayPrices,
+              ranges: ppOverrides.orphanDayPrices.ranges.filter((r) => r.mode !== "fixed"),
+            };
+          }
+          delete (ppOverrides as Record<string, unknown>).seasonalProfile;
+          let seasonOverrides = mergeRuleOverrides(o, ppOverrides);
+          if (msp) {
+            const { profile: _mp, ...msRules } = (msp.payload ?? {}) as Record<string, unknown>;
+            seasonOverrides = { ...seasonOverrides, minStayRules: msRules as RuleOverrides["minStayRules"] };
+          }
+          cfg = rulesWithOverrides({
+            ...seasonOverrides,
+            seasonalProfile: { enabled: false, profile: null },
+          });
+        }
+        return {
+          name: s.name.trim().slice(0, 60),
+          from: String(s.from),
+          to: String(s.to),
+          repeating: !!s.repeating,
+          min: num(s.min),
+          base: num(s.base),
+          max: num(s.max),
+          minStayProfile: msp?.name ?? null,
+          pricingProfile: pp?.name ?? null,
+          cfg,
+        };
+      });
+  }
+
   return {
     currentRateLeadDays: o.currentRateLeadDays ?? d.currentRateLeadDays,
     curveHorizonDays: d.curveHorizonDays,
@@ -589,6 +669,8 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     neighborhoodProfile: {
       source: (o.neighborhoodProfile?.source ?? d.neighborhoodProfile.source)?.trim() || null,
     },
+    bookingRecency: { enabled: o.bookingRecency?.enabled ?? d.bookingRecency.enabled },
+    seasonalProfile,
     pricingOffset,
     weekend,
     orphanDayPrices,
