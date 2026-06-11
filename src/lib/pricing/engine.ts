@@ -560,6 +560,8 @@ export function activeRuleSummary(
     { key: "floorCeil", label: "Floor / ceiling clamp", enabled: true, note: "per-unit min/max + advanced min-price rules" },
     { key: "safetyMinPrice", label: "Safety minimum price", enabled: cfg.safetyMinPrice.enabled, note: `LY same-weekday ADR ×${(cfg.safetyMinPrice.pctOfLastYear * 100).toFixed(0)}% — raises-only, needs reservation history` },
     { key: "bookingRecency", label: "Booking recency", enabled: cfg.bookingRecency.enabled, note: "auto 5–15% on cold unbooked listings, next 30d, respects min" },
+    { key: "freezeUnavailable", label: "Freeze unavailable nights", enabled: cfg.freezeUnavailable.enabled, note: "booked/blocked nights keep their last synced price" },
+    { key: "neighborhoodProfile", label: "Market data source", enabled: cfg.neighborhoodProfile.source != null, note: cfg.neighborhoodProfile.source ? `profile "${cfg.neighborhoodProfile.source}"` : "listing's own neighborhood" },
     { key: "seasonalProfile", label: "Custom seasonal profile", enabled: cfg.seasonalProfile.enabled, note: cfg.seasonalProfile.profile ? `"${cfg.seasonalProfile.profile}" — ${cfg.seasonalProfile.seasons.length} season(s), ${cfg.seasonalProfile.mode}` : "no profile attached" },
     { key: "pricingOffset", label: "Pricing offset", enabled: cfg.pricingOffset.enabled, note: `${offNote} post-clamp — may exceed min/max` },
     { key: "rounding", label: "Rounding", enabled: cfg.rounding.enabled, note: `last ${cfg.rounding.digits} digit(s) → ${cfg.rounding.endings.join("/")}` },
