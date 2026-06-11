@@ -51,7 +51,7 @@ function payload(scope: RuleScope) {
   };
 }
 
-// Settings → Pricing engine rules. Browser-facing (behind the dashboard login).
+// Pricing Configuration → engine rules. Browser-facing (behind the dashboard login).
 export async function GET(req: Request) {
   const scope = validScope(new URL(req.url).searchParams.get("scope"));
   if (typeof scope !== "string") return NextResponse.json(scope, { status: 400 });

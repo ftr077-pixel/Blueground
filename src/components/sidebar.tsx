@@ -18,6 +18,7 @@ import {
   Radar,
   Settings,
   ShieldAlert,
+  SlidersHorizontal,
   TrendingUp,
   Wallet,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const REVENUE_HUB = {
   base: "/visibility",
   children: [
     { href: "/departments/revenue", label: "Pricing Engine", icon: Gauge },
+    { href: "/pricing-configuration", label: "Pricing Configuration", icon: SlidersHorizontal },
     { href: "/market", label: "Market Analytics", icon: LineChart },
     { href: "/visibility/calendar", label: "Rates Calendar", icon: CalendarRange },
     { href: "/visibility/overview", label: "Overview", icon: LayoutDashboard },
