@@ -23,7 +23,7 @@ import {
   gapInfo,
   isWeekendDay,
   dayOfWeekRule,
-  losDiscountForStay,
+  stayNightlyRate,
   type FactorResult,
 } from "@/lib/pricing/rules";
 import { SEASONALITY_SENSITIVITY } from "@/lib/config/pricing";
@@ -31,6 +31,19 @@ import { SEASONALITY_SENSITIVITY } from "@/lib/config/pricing";
 export type { FactorResult } from "@/lib/pricing/rules";
 
 const DAY_MS = 86_400_000;
+
+/** Recommended-mode demand tiers per flavor (Min Stay Recommendation Engine). */
+const FLAVOR_TIERS: Record<
+  "str" | "mtr" | "multiUnit",
+  ReadonlyArray<{ threshold: number; bump: number; label: string }>
+> = {
+  mtr: PRICING_AGENT.minStayDemandTiers,
+  str: [
+    { threshold: 0.2, bump: 2, label: "hot demand (STR)" },
+    { threshold: 0.12, bump: 1, label: "firm demand (STR)" },
+  ],
+  multiUnit: [{ threshold: 0.2, bump: 1, label: "hot demand (multi-unit)" }],
+};
 
 export interface DateQuote {
   date: string; // ISO date (YYYY-MM-DD)
@@ -93,8 +106,11 @@ function resolveMinStay(
       source = `default ${wk ? "weekend" : "weekday"}`;
     }
   } else {
-    // Recommended (dynamic): demand-flex tiers benchmarked vs the comp median.
-    const tiers = PRICING_AGENT.minStayDemandTiers;
+    // Recommended (Min Stay Recommendation Engine): demand-flex tiers scaled by
+    // flavor — mtr keeps the +15/+30-night bumps and benchmarks against the
+    // comp median; str/multiUnit use short ±1/±2 bumps ("prefer short-term"
+    // drops 15+ night demand, so the MTR comp median doesn't apply there).
+    const tiers = FLAVOR_TIERS[r.recommendedFlavor] ?? FLAVOR_TIERS.mtr;
     rec = floor;
     source = `floor ${floor}n`;
     const demand = market.eventDemand(unit, date).bump;
@@ -105,10 +121,12 @@ function resolveMinStay(
         break;
       }
     }
-    const median = market.compMedianMinNights();
-    if (median && median > rec) {
-      rec = Math.min(median, floor + tiers[0].bump);
-      source = `market median ${median}n`;
+    if (r.recommendedFlavor === "mtr") {
+      const median = market.compMedianMinNights();
+      if (median && median > rec) {
+        rec = Math.min(median, floor + tiers[0].bump);
+        source = `market median ${median}n`;
+      }
     }
   }
 
@@ -291,7 +309,7 @@ function quoteNightBase(
   }
 
   const { minStay, source } = resolveMinStay(unit, date, leadDays, market, cfg, rate);
-  const effectiveMonthlyRate = Math.round(rate * 30 * (1 - losDiscountForStay(unit, 30, cfg)));
+  const effectiveMonthlyRate = stayNightlyRate(rate, unit, 30, cfg) * 30;
   const { checkinAllowed, checkoutAllowed } = resolveCico(unit, date, leadDays, market, cfg);
 
   return {
@@ -437,7 +455,7 @@ export function quoteNight(
     ...q,
     rate,
     factors,
-    effectiveMonthlyRate: Math.round(rate * 30 * (1 - losDiscountForStay(unit, 30, cfg))),
+    effectiveMonthlyRate: stayNightlyRate(rate, unit, 30, cfg) * 30,
   };
 }
 

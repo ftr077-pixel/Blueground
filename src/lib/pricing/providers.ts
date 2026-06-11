@@ -11,7 +11,22 @@ import { listUnits, type Unit } from "@/lib/repos/units";
 import { marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { bookedDatesForUnit, unavailableDatesForUnit } from "@/lib/repos/rates";
 import { realizedNightlyRates } from "@/lib/repos/reservations";
+import { effectiveNeighborhood } from "@/lib/pricing/rules-config";
 import { listMarketSnapshots, type MarketSnapshot, type PacingPoint } from "@/lib/repos/market";
+
+/** Per-provider-instance cache of each unit's effective market profile (the
+ *  Neighborhood Profile Data Source customization, scoped). */
+function hoodResolver(): (unit: Unit) => string {
+  const cache = new Map<string, string>();
+  return (unit) => {
+    let h = cache.get(unit.id);
+    if (!h) {
+      h = effectiveNeighborhood(unit);
+      cache.set(unit.id, h);
+    }
+    return h;
+  };
+}
 
 export interface DateOverride {
   /** Absolute nightly rate to pin for this date (skips dynamic rules), or undefined. */
@@ -184,14 +199,15 @@ const HOOD_DEMAND: Record<string, { base: number; driver: string }> = {
 export function mockProviders(): MarketProviders {
   const compMedian = marketMinNightsBenchmark().median;
   const signals = calendarSignals(() => 0.85); // market norm
+  const hoodOf = hoodResolver();
   return {
     ...signals,
     seasonalityIndex() {
       return null; // use the configured monthly curve
     },
     eventDemand(unit, date) {
-      const hood = HOOD_DEMAND[unit.neighborhood] ?? { base: 0.0, driver: "Baseline demand." };
-      const jitter = (noise(dayKey(date) + unit.neighborhood.length) - 0.5) * 0.1;
+      const hood = HOOD_DEMAND[hoodOf(unit)] ?? { base: 0.0, driver: "Baseline demand." };
+      const jitter = (noise(dayKey(date) + hoodOf(unit).length) - 0.5) * 0.1;
       return { bump: hood.base + jitter, driver: hood.driver };
     },
     pacing(unit) {
@@ -256,8 +272,9 @@ export function airRoiProviders(): MarketProviders {
   const globalOcc = summaries.length ? mean(summaries.map((s) => s.occupancy)) : 0.85;
   const globalMinNights = summaries.length ? Math.round(mean(summaries.map((s) => s.min_nights))) : null;
   const scraperMedian = marketMinNightsBenchmark().median;
+  const hoodOf = hoodResolver();
   const signals = calendarSignals(
-    (unit) => prepped.get(unit.neighborhood)?.snap.summary?.occupancy ?? globalOcc,
+    (unit) => prepped.get(hoodOf(unit))?.snap.summary?.occupancy ?? globalOcc,
   );
 
   return {
@@ -273,23 +290,23 @@ export function airRoiProviders(): MarketProviders {
       return ratios.length ? clamp(mean(ratios), 0.85, 1.15) : null;
     },
     eventDemand(unit, date) {
-      const p = prepped.get(unit.neighborhood);
+      const p = prepped.get(hoodOf(unit));
       const pt = p?.pacingByDate.get(dkey(date));
       if (p && pt && p.meanFill > 0) {
         return {
           bump: clamp(pt.fill_rate - p.meanFill, -0.05, 0.05),
-          driver: `AirROI ${p.snap.marketName ?? unit.neighborhood}: fill ${(pt.fill_rate * 100).toFixed(0)}% vs ${(p.meanFill * 100).toFixed(0)}% avg`,
+          driver: `AirROI ${p.snap.marketName ?? hoodOf(unit)}: fill ${(pt.fill_rate * 100).toFixed(0)}% vs ${(p.meanFill * 100).toFixed(0)}% avg`,
         };
       }
       return { bump: 0, driver: "AirROI market data" };
     },
     pacing(unit) {
-      const p = prepped.get(unit.neighborhood);
+      const p = prepped.get(hoodOf(unit));
       if (p && p.meanFill > 0) return clamp((p.nearMeanFill - p.meanFill) / p.meanFill, -1, 1);
       return 0;
     },
     occupancy(unit, date) {
-      const p = prepped.get(unit.neighborhood);
+      const p = prepped.get(hoodOf(unit));
       const pt = p?.pacingByDate.get(dkey(date));
       if (pt && pt.fill_rate > 0) return pt.fill_rate;
       if (p?.snap.summary) return p.snap.summary.occupancy;

@@ -259,16 +259,27 @@ export interface PricingRulesConfig {
     applyOnWeekends: boolean;
   };
   dayOfWeek: { enabled: boolean; multiplier: number[] };
-  /** LOS discounts. weeklyPct/monthlyPct (0..0.75, PriceLabs range) override the
-   *  per-unit columns when set at a scope; null = use the unit's own values.
-   *  Quote-side only: MiniHotel isn't in PriceLabs's weekly/monthly push list,
-   *  so these shape the effective stay rate, not the pushed nightly price. */
+  /** LOS pricing adjustments. weeklyPct/monthlyPct (0..0.75, PriceLabs range)
+   *  override the per-unit columns when set at a scope; null = unit's own.
+   *  `tiers` are full LOS rows ("≥ nights → ±%", premiums for short stays,
+   *  discounts for long), applied after all other customizations, with optional
+   *  per-NIGHT min/max for that stay length. PriceLabs validation: longer stays
+   *  must not carry higher premiums (enforced in sanitization). Quote-side
+   *  only: MiniHotel isn't in PriceLabs's LOS/weekly/monthly push lists. */
   los: {
     enabled: boolean;
     weeklyPct: number | null;
     monthlyPct: number | null;
     quarterlyMinNights: number;
     quarterlyDiscountPct: number;
+    tiers: Array<{
+      minNights: number;
+      /** Signed fraction: negative = discount, positive = premium. */
+      pct: number;
+      /** Optional per-night floor/ceiling for stays of this length. */
+      minPrice: number | null;
+      maxPrice: number | null;
+    }>;
   };
   /** Extra Person Fee: per extra guest per night above the threshold. Percent
    *  mode is computed off the check-in day's rate only (PriceLabs sends no
@@ -310,6 +321,15 @@ export interface PricingRulesConfig {
    *  date — whole week or weekdays/weekends separately (per the Weekend Days
    *  customization) — for a uniform guest-facing rate. Pinned prices bypass it. */
   smoothing: { enabled: boolean; mode: "week" | "split"; weekStart: number };
+  /** No Price Updates For Unavailable Nights: freeze synced prices on booked/
+   *  blocked dates (prevents cancel-and-rebook-cheaper exploits). Calendar
+   *  pushes drop the price field for unavailable nights while ON; min-stay /
+   *  availability fields still flow. */
+  freezeUnavailable: { enabled: boolean };
+  /** Neighborhood Profile Data Source: which market profile feeds this scope's
+   *  recommendations — null = the listing's own neighborhood. Scoped, so a
+   *  group can price off a different comp market. */
+  neighborhoodProfile: { source: string | null };
   pricingOffset: {
     enabled: boolean;
     mode: "percent" | "fixed";
@@ -373,6 +393,10 @@ export interface PricingRulesConfig {
     profile: string | null;
     /** recommended = engine-driven (demand tiers + market median); custom = the rules below. */
     mode: "recommended" | "custom";
+    /** Recommended-mode flavor (Min Stay Recommendation Engine): mtr keeps the
+     *  +15/+30-night demand bumps; str/multiUnit use ±1/±2-night bumps (short-
+     *  term opportunity-cost scale; "prefer short-term" drops 15+ night demand). */
+    recommendedFlavor: "str" | "mtr" | "multiUnit";
     /** Highest Minimum Stay Allowed — recommendations never exceed this. */
     highestAllowed: number;
     /** Custom default rule: fixed weekday/weekend nights, or a min booking value
@@ -474,13 +498,14 @@ export const PRICING_RULES: PricingRulesConfig = {
     multiplier: [1, 1, 1, 1, 1, 1, 1],
   },
   /** Length-of-stay discounts. Weekly/monthly come from the unit (null here);
-   *  this adds a longer-stay tier on top. */
+   *  the quarterly tier ships as a LOS tier row; more rows are operator-added. */
   los: {
     enabled: true,
     weeklyPct: null,
     monthlyPct: null,
     quarterlyMinNights: 90,
     quarterlyDiscountPct: 0.25,
+    tiers: [],
   },
   /** Flat monthly leases regardless of headcount are the MTR norm — ships off. */
   extraPersonFee: {
@@ -501,6 +526,9 @@ export const PRICING_RULES: PricingRulesConfig = {
   /** Matches the engine's historical ₪5 step (digits=1, endings 0/5). */
   rounding: { enabled: true, digits: 1, endings: [0, 5] },
   smoothing: { enabled: false, mode: "week", weekStart: 5 },
+  /** ON: cancel-and-rebook-cheaper protection matters for long stays. */
+  freezeUnavailable: { enabled: true },
+  neighborhoodProfile: { source: null },
   /** Pricing offset (PriceLabs): a final fixed/percent nudge applied AFTER all
    *  other customizations — including the floor/ceiling clamp and fixed-price
    *  overrides — so it can take the pushed rate outside the unit's min/max.
@@ -536,6 +564,7 @@ export const PRICING_RULES: PricingRulesConfig = {
   minStayRules: {
     profile: null,
     mode: "recommended",
+    recommendedFlavor: "mtr",
     highestAllowed: 90,
     custom: { rule: "fixed", weekday: 30, weekend: 30, bookingValue: 0 },
     lastMinute: [],

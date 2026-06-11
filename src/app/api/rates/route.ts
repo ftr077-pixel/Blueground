@@ -5,11 +5,13 @@ import {
   applyOverrideRange,
   clearedReplacements,
   rebaseFuturePrices,
+  unavailableDatesForUnit,
   unitExists,
   type OverridePatch,
   type RangeOverride,
   type AppliedCell,
 } from "@/lib/repos/rates";
+import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
 import { logActivity } from "@/lib/repos/activity";
 import { setUnitBaseRate, listUnits as listAllUnits } from "@/lib/repos/units";
 import { pushRatesToMiniHotel, type PushResult } from "@/lib/integrations/minihotel";
@@ -21,6 +23,39 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // yesterday for the first 2-3 hours of each Israeli day.
 const todayLocal = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
+
+/** "No Price Updates For Unavailable Nights": for units with the freeze ON,
+ *  strip the price field from push items on booked/blocked dates so the last
+ *  synced rate stays put (min-stay / availability fields still flow). Returns
+ *  how many nights were frozen. */
+function freezeUnavailablePrices(
+  items: Array<{ unitId: string; date: string; price?: number | null; minNights?: number | null; closed?: boolean | null }>,
+): number {
+  const byUnit = new Map<string, Set<string>>();
+  let frozen = 0;
+  const units = new Map(listAllUnits().map((u) => [u.id, u]));
+  for (const it of items) {
+    if (it.price == null) continue;
+    // A push that simultaneously OPENS the night isn't frozen — the night is
+    // becoming available again, which is exactly when updates resume.
+    if (it.closed === false) continue;
+    let unavail = byUnit.get(it.unitId);
+    if (!unavail) {
+      const u = units.get(it.unitId);
+      if (!u || !effectiveRulesForUnit(u).freezeUnavailable.enabled) {
+        byUnit.set(it.unitId, new Set());
+        continue;
+      }
+      unavail = unavailableDatesForUnit(it.unitId, todayLocal(), 430);
+      byUnit.set(it.unitId, unavail);
+    }
+    if (unavail.has(it.date)) {
+      it.price = undefined;
+      frozen++;
+    }
+  }
+  return frozen;
+}
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -210,6 +245,7 @@ export async function PATCH(req: Request) {
     // lingers"; we re-push instead. Nights that only changed local-only
     // guardrails (min/max price) have nothing MiniHotel can store and are skipped.
     let push: PushResult | undefined;
+    const frozen = freezeUnavailablePrices(items);
     const pushable = items.filter((w) => w.price != null || w.minNights != null || w.closed != null);
     if (pushable.length) push = await pushRatesToMiniHotel(pushable);
 
@@ -233,6 +269,9 @@ export async function PATCH(req: Request) {
         : `NOT pushed — ${push.message || push.errors.join("; ") || "MiniHotel error"}`;
     if (applied.unresolved > 0) {
       pushTxt += `; ${applied.unresolved} night(s) have no default to send — last pushed values remain on MiniHotel`;
+    }
+    if (frozen > 0) {
+      pushTxt += `; ${frozen} unavailable night(s) kept their last synced price (freeze)`;
     }
     const who = groupLabel ? `group "${groupLabel}" (${targetIds.length} listings)` : unitId;
     logActivity({
@@ -275,7 +314,7 @@ export async function PATCH(req: Request) {
   // cleared (null) push their replacement default — removing a restriction
   // must overwrite it on the PMS, not leave the last pushed value live.
   const repl = clearedReplacements(unitId, date, patch);
-  const push = await pushRatesToMiniHotel([
+  const singleItems = [
     {
       unitId,
       date,
@@ -283,7 +322,9 @@ export async function PATCH(req: Request) {
       minNights: patch.minNights === null ? (repl.minNights ?? null) : patch.minNights,
       closed: patch.closed === null ? (repl.closed ?? null) : patch.closed,
     },
-  ]);
+  ];
+  freezeUnavailablePrices(singleItems);
+  const push = await pushRatesToMiniHotel(singleItems);
 
   const parts: string[] = [];
   if (patch.price !== undefined && patch.price !== null) parts.push(`rate ₪${patch.price}`);

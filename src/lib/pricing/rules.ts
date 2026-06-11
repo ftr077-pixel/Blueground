@@ -544,15 +544,42 @@ export function pricingOffsetRule(
   };
 }
 
-/** Length-of-stay discount fraction (0..1) for a booking of `nights`, best tier
- *  wins. Scope-level weekly/monthly values (cfg.los) override the per-unit
- *  columns when set; PriceLabs range is 0–75%. */
-export function losDiscountForStay(unit: Unit, nights: number, cfg: Rules = PRICING_RULES): number {
-  if (!cfg.los.enabled) return 0;
+/** LOS pricing adjustment for a stay of `nights`: signed fraction (negative =
+ *  discount, positive = premium for short stays) plus the optional per-NIGHT
+ *  floor/ceiling for that stay length. A matching LOS tier ("≥ nights", rows
+ *  ascending) REPLACES the weekly/monthly/quarterly discount bands; without a
+ *  matching tier the bands apply as before. */
+export function losAdjustForStay(
+  unit: Unit,
+  nights: number,
+  cfg: Rules = PRICING_RULES,
+): { pct: number; minPrice: number | null; maxPrice: number | null } {
+  if (!cfg.los.enabled) return { pct: 0, minPrice: null, maxPrice: null };
+  let hit: Rules["los"]["tiers"][number] | null = null;
+  for (const t of cfg.los.tiers) {
+    if (nights >= t.minNights) hit = t; // rows are ascending; the last match wins
+  }
+  if (hit) return { pct: hit.pct, minPrice: hit.minPrice, maxPrice: hit.maxPrice };
   const weekly = cfg.los.weeklyPct ?? unit.weeklyDiscountPct;
   const monthly = cfg.los.monthlyPct ?? unit.monthlyDiscountPct;
-  if (nights >= cfg.los.quarterlyMinNights) return Math.max(monthly, cfg.los.quarterlyDiscountPct);
-  if (nights >= 30) return monthly;
-  if (nights >= 7) return weekly;
-  return 0;
+  let disc = 0;
+  if (nights >= cfg.los.quarterlyMinNights) disc = Math.max(monthly, cfg.los.quarterlyDiscountPct);
+  else if (nights >= 30) disc = monthly;
+  else if (nights >= 7) disc = weekly;
+  return { pct: -disc, minPrice: null, maxPrice: null };
+}
+
+/** Effective per-night rate for a stay of `nights`: the LOS adjustment applied
+ *  to the nightly rate, clamped to the tier's per-night min/max where set. */
+export function stayNightlyRate(rate: number, unit: Unit, nights: number, cfg: Rules): number {
+  const a = losAdjustForStay(unit, nights, cfg);
+  let r = rate * (1 + a.pct);
+  if (a.minPrice != null && r < a.minPrice) r = a.minPrice;
+  if (a.maxPrice != null && r > a.maxPrice) r = a.maxPrice;
+  return Math.round(r);
+}
+
+/** Back-compat discount view (0..1) — premiums clamp to 0. */
+export function losDiscountForStay(unit: Unit, nights: number, cfg: Rules = PRICING_RULES): number {
+  return Math.max(0, -losAdjustForStay(unit, nights, cfg).pct);
 }

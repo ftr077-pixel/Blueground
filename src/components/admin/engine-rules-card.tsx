@@ -61,6 +61,12 @@ interface ObaRow {
   tight: string;
   full: string;
 }
+interface LosTierRow {
+  minNights: string;
+  pct: string;
+  minPrice: string;
+  maxPrice: string;
+}
 
 // Form state mirrors the API's effective config; percents shown as % (stored as
 // fractions server-side where noted). Signed values: negative = discount.
@@ -99,6 +105,10 @@ interface Form {
   losMonthly: string;
   losQuarterNights: string;
   losQuarterPct: string;
+  losTiers: LosTierRow[];
+  freezeOn: boolean;
+  hoodSource: string;
+  msFlavor: string;
   epfOn: boolean;
   epfMode: string;
   epfValue: string;
@@ -213,7 +223,10 @@ interface EffectiveConfig {
     monthlyPct: number | null;
     quarterlyMinNights: number;
     quarterlyDiscountPct: number;
+    tiers: Array<{ minNights: number; pct: number; minPrice: number | null; maxPrice: number | null }>;
   };
+  freezeUnavailable: { enabled: boolean };
+  neighborhoodProfile: { source: string | null };
   extraPersonFee: { enabled: boolean; mode: string; value: number; afterGuests: number };
   checkinCheckout: {
     enabled: boolean;
@@ -251,6 +264,7 @@ interface EffectiveConfig {
   minStayRules: {
     profile: string | null;
     mode: string;
+    recommendedFlavor: string;
     highestAllowed: number;
     custom: { rule: string; weekday: number; weekend: number; bookingValue: number };
     lastMinute: Array<{ withinDays: number; weekday: number; weekend: number }>;
@@ -397,6 +411,19 @@ function toForm(e: EffectiveConfig): Form {
     losMonthly: e.los.monthlyPct == null ? "" : pct(e.los.monthlyPct),
     losQuarterNights: String(e.los.quarterlyMinNights),
     losQuarterPct: pct(e.los.quarterlyDiscountPct),
+    losTiers: [0, 1, 2].map((i) => {
+      const t = e.los.tiers[i];
+      if (!t) return { minNights: "", pct: "", minPrice: "", maxPrice: "" };
+      return {
+        minNights: String(t.minNights),
+        pct: pct(t.pct),
+        minPrice: t.minPrice == null ? "" : String(t.minPrice),
+        maxPrice: t.maxPrice == null ? "" : String(t.maxPrice),
+      };
+    }),
+    freezeOn: e.freezeUnavailable.enabled,
+    hoodSource: e.neighborhoodProfile.source ?? "",
+    msFlavor: e.minStayRules.recommendedFlavor || "mtr",
     epfOn: e.extraPersonFee.enabled,
     epfMode: e.extraPersonFee.mode || "fixed",
     epfValue:
@@ -501,6 +528,14 @@ export function EngineRulesCard() {
   const [tableData, setTableData] = useState<TableResp | null>(null);
   const [tableBusy, setTableBusy] = useState(false);
 
+  // Min Stay Recommendation Engine review state
+  const [recData, setRecData] = useState<{
+    annualRecommendation: number;
+    flavor: string;
+    months: Array<{ month: string; minStay: number; source: string; exception: boolean }>;
+  } | null>(null);
+  const [recBusy, setRecBusy] = useState(false);
+
   // Check-in/Check-out + Min Stay + OBA profiles state
   const [cicoProfiles, setCicoProfiles] = useState<CicoProfile[]>([]);
   const [minStayProfiles, setMinStayProfiles] = useState<Array<{ name: string; archived: boolean }>>([]);
@@ -570,7 +605,7 @@ export function EngineRulesCard() {
     setF((c) => (c ? { ...c, [k]: v } : c));
     setPvStale(true);
   };
-  const setRow = <T,>(k: "orphanRanges" | "pobaWindows" | "obaWindows" | "msLm", i: number, field: keyof T, v: string) => {
+  const setRow = <T,>(k: "orphanRanges" | "pobaWindows" | "obaWindows" | "losTiers" | "msLm", i: number, field: keyof T, v: string) => {
     setF((c) => {
       if (!c) return c;
       const rows = [...(c[k] as unknown as T[])];
@@ -609,7 +644,7 @@ export function EngineRulesCard() {
       </select>
     </label>
   );
-  const cell = (k: "orphanRanges" | "pobaWindows" | "obaWindows" | "msLm", i: number, field: string, v: string, w = "w-16") => (
+  const cell = (k: "orphanRanges" | "pobaWindows" | "obaWindows" | "losTiers" | "msLm", i: number, field: string, v: string, w = "w-16") => (
     <input
       className={`${input} ${w}`}
       value={v}
@@ -677,7 +712,17 @@ export function EngineRulesCard() {
         monthlyPct: f.losMonthly.trim() === "" ? null : Math.abs(frac(f.losMonthly)),
         quarterlyMinNights: int(f.losQuarterNights, 90),
         quarterlyDiscountPct: frac(f.losQuarterPct),
+        tiers: f.losTiers
+          .filter((t) => t.minNights.trim() !== "")
+          .map((t) => ({
+            minNights: int(t.minNights, 1),
+            pct: frac(t.pct),
+            minPrice: t.minPrice.trim() === "" ? null : Math.max(0, Math.round(parseFloat(t.minPrice) || 0)),
+            maxPrice: t.maxPrice.trim() === "" ? null : Math.max(0, Math.round(parseFloat(t.maxPrice) || 0)),
+          })),
       },
+      freezeUnavailable: { enabled: f.freezeOn },
+      neighborhoodProfile: { source: f.hoodSource.trim() || null },
       extraPersonFee: {
         enabled: f.epfOn,
         mode: f.epfMode === "percent" ? "percent" : "fixed",
@@ -774,6 +819,7 @@ export function EngineRulesCard() {
       minStayRules: {
         profile: f.msProfile || null,
         mode: f.msMode === "custom" ? "custom" : "recommended",
+        recommendedFlavor: f.msFlavor,
         highestAllowed: int(f.msHighest, 90),
         custom: {
           rule: f.msRule === "bookingValue" ? "bookingValue" : "fixed",
@@ -950,6 +996,17 @@ export function EngineRulesCard() {
     URL.revokeObjectURL(a.href);
   }
 
+  async function loadRecommendations() {
+    if (!pvUnit) return;
+    setRecBusy(true);
+    try {
+      const res = await fetch(`/api/pricing/minstay-recommendations?unitId=${encodeURIComponent(pvUnit)}`, { cache: "no-store" });
+      if (res.ok) setRecData(await res.json());
+    } finally {
+      setRecBusy(false);
+    }
+  }
+
   async function reviewChanges() {
     if (!pvUnit) return;
     setPvBusy(true);
@@ -1029,6 +1086,7 @@ export function EngineRulesCard() {
           {toggle("Portfolio occupancy", "pobaOn")}
           {toggle("Day-of-week", "dayOfWeekOn")}
           {toggle("LOS / quarter discount", "losOn")}
+          {toggle("Freeze unavailable prices", "freezeOn")}
           {toggle("Pricing offset", "offsetOn")}
         </div>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
@@ -1048,8 +1106,48 @@ export function EngineRulesCard() {
           Weekly/monthly discounts: 0–75% (PriceLabs range), no sign needed; they apply on top of
           nightly rates, so the effective stay rate can dip below the minimum price. Quote-side
           only — MiniHotel isn&apos;t in PriceLabs&apos;s weekly/monthly push list, so set any
-          PMS-side discount there.
+          PMS-side discount there. &quot;Freeze unavailable prices&quot; keeps the last synced
+          rate on booked/blocked nights (no cancel-and-rebook-cheaper).
         </p>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            LOS pricing adjustments — &quot;≥ nights → ±%&quot; rows applied after everything else
+            (premiums for short stays, discounts for long; longer stays can&apos;t carry higher
+            premiums). A matching row replaces the weekly/monthly bands; optional per-NIGHT
+            min/max for that stay length.
+          </span>
+          {f.losTiers.map((t, i) => (
+            <div key={i} className="flex flex-wrap items-center gap-2">
+              ≥ {cell("losTiers", i, "minNights", t.minNights, "w-14")} nights →
+              {cell("losTiers", i, "pct", t.pct, "w-16")} % · min ₪
+              {cell("losTiers", i, "minPrice", t.minPrice, "w-20")} · max ₪
+              {cell("losTiers", i, "maxPrice", t.maxPrice, "w-20")}
+              <span className="text-[10px] text-muted-foreground/70">(blank nights = unused)</span>
+            </div>
+          ))}
+          <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+            <label className="flex flex-col gap-1">
+              Neighborhood profile data source
+              <select
+                className={`${input} w-56`}
+                value={f.hoodSource}
+                onChange={(e) => set("hoodSource", e.target.value)}
+              >
+                <option value="">— listing&apos;s own neighborhood —</option>
+                {[...new Set(units.map((u) => u.neighborhood))].sort().map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="pb-1 text-[10px] text-muted-foreground/70">
+              Which market profile feeds this scope&apos;s recommendations (demand, occupancy,
+              pacing, seasonality).
+            </span>
+          </div>
+        </div>
 
         <div className={sectionBox}>
           <span className={sectionHead}>
@@ -1388,6 +1486,12 @@ export function EngineRulesCard() {
               { value: "recommended", label: "PriceLabs-style Recommended (dynamic)" },
               { value: "custom", label: "Custom rules" },
             ], "w-64")}
+            {f.msMode === "recommended" &&
+              select("Recommended flavor", "msFlavor", [
+                { value: "mtr", label: "Mid-Term Rental" },
+                { value: "str", label: "Short-Term Rental" },
+                { value: "multiUnit", label: "Multi-Unit Rental" },
+              ], "w-44")}
             {num("Highest allowed n", "msHighest")}
             {num("Far-out ≥ d", "minStayFarOutDays")}
             {num("Far-out nights", "minStayFarOutNights")}
@@ -1437,6 +1541,35 @@ export function EngineRulesCard() {
             {f.msOrphanStrategy === "fixed" && num("Fixed n", "msOrphanFixed", "w-14")}
             {num("Max gap n", "msOrphanMaxGap", "w-14")}
             {num("Lowest orphan n", "msOrphanLowest", "w-14")}
+          </div>
+          <div className="space-y-1.5 border-t border-border/40 pt-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" className={btnGhost} disabled={recBusy || !pvUnit} onClick={loadRecommendations}>
+                {recBusy ? "Computing…" : "Review recommended stay settings"}
+              </button>
+              <span className="text-[10px] text-muted-foreground/70">
+                Monthly recommendations for the Preview listing (opportunity-cost engine:
+                longer far out, shorter near-in; adaptive occupancy on top; auto-refreshes —
+                computed live). Exception months are seasonal-profile candidates.
+              </span>
+            </div>
+            {recData && (
+              <div className="flex flex-wrap gap-1.5">
+                <span className="rounded-md border border-border px-2 py-1 text-[10px]">
+                  annual: <span className="font-semibold text-foreground">{recData.annualRecommendation}n</span> ({recData.flavor})
+                </span>
+                {recData.months.map((m) => (
+                  <span
+                    key={m.month}
+                    title={m.source}
+                    className={`rounded-md border px-2 py-1 text-[10px] ${m.exception ? "border-amber-400 bg-amber-400/10 text-amber-700" : "border-border"}`}
+                  >
+                    {m.month}: <span className="font-semibold">{m.minStay}n</span>
+                    {m.exception ? " ⚠" : ""}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
