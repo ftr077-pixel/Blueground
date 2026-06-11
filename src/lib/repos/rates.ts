@@ -80,7 +80,7 @@ export interface RateRow {
   /** Latest Airbnb search position for the ~1-month stay, via the linked tracked listing. */
   airbnbRank: RankInfo | null;
   /** "Monthly estimate": from the first date a 30-night stay can start, the sum
-   *  of those 30 nightly rates minus 20%. null when the unit has no prices. */
+   *  of those 30 nightly rates minus 33%. null when the unit has no prices. */
   monthlyEstimate: { from: string; total: number; nightly: number } | null;
 }
 
@@ -324,7 +324,7 @@ export function getCalendar(from: string, days: number): Calendar {
       }
       sum += p;
     }
-    const total = Math.round(sum * 0.8); // the operator's flat 20% monthly cut
+    const total = Math.round(sum * 0.67); // the operator's flat 33% monthly cut
     return { from: start, total, nightly: Math.round(total / 30) };
   };
 

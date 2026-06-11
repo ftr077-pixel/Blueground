@@ -760,14 +760,14 @@ export function RateCalendar() {
                     <button
                       type="button"
                       className="inline-flex flex-col items-center hover:text-foreground"
-                      title="Monthly estimate: from the first date a 30-night stay can start, the sum of those 30 nightly rates minus 20%. Click to sort."
+                      title="Monthly estimate: from the first date a 30-night stay can start, the sum of those 30 nightly rates minus 33%. Click to sort."
                       onClick={() => toggleSort("monthly")}
                     >
                       <span className="inline-flex items-center gap-0.5">
                         Monthly
                         <SortMark active={sort.key === "monthly"} dir={sort.dir} />
                       </span>
-                      <span className="text-[9px] font-normal">est. −20%</span>
+                      <span className="text-[9px] font-normal">est. −33%</span>
                     </button>
                   </th>
                   <th className="sticky left-[22rem] z-20 w-14 min-w-[3.5rem] max-w-[3.5rem] bg-card px-1 py-2 text-center font-medium text-muted-foreground">
@@ -881,7 +881,7 @@ export function RateCalendar() {
                       {row.monthlyEstimate ? (
                         <span
                           className="text-[11px] font-medium tabular-nums text-foreground"
-                          title={`30 nights from ${row.monthlyEstimate.from} · ~₪${row.monthlyEstimate.nightly.toLocaleString("en-US")}/night · after −20%`}
+                          title={`30 nights from ${row.monthlyEstimate.from} · ~₪${row.monthlyEstimate.nightly.toLocaleString("en-US")}/night · after −33%`}
                         >
                           {fmtILS(row.monthlyEstimate.total)}
                         </span>
