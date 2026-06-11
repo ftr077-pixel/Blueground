@@ -503,7 +503,7 @@ export function RateCalendar() {
         <StatTile
           icon={TrendingUp}
           label={`On-the-books · ${s.windowDays}d`}
-          value={fmtILS(s.bookedRevenue)}
+          value={s.bookedRevenue > 0 ? fmtILS(s.bookedRevenue) : "—"}
           hint="Revenue from sold nights"
         />
         <StatTile

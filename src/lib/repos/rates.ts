@@ -1,5 +1,6 @@
 import { listUnits, type Unit } from "@/lib/repos/units";
 import { getDb } from "@/lib/db";
+import { windowReservationRevenue } from "@/lib/repos/reservations";
 import { quoteNight } from "@/lib/pricing/engine";
 import { mockProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
@@ -87,8 +88,8 @@ export interface CalendarSummary {
   units: number;
   windowDays: number;
   occupancy: number; // sold / (sold + open) over the window
-  adr: number; // avg booked nightly rate over the window
-  bookedRevenue: number; // sum of booked nightly rates over the window
+  adr: number; // realized net nightly rate over the window (reservation actuals; falls back to displayed-rate averages when none cover it)
+  bookedRevenue: number; // net-of-VAT reservation revenue recognized per night over the window (0 = no reservation data)
   sold: number;
   open: number;
   closed: number;
@@ -472,7 +473,6 @@ export function getCalendar(from: string, days: number): Calendar {
   let sold = 0;
   let open = 0;
   let closedN = 0;
-  let rev = 0;
   const bookedPrices: number[] = [];
   for (const row of rows) {
     for (let i = 0; i < w; i++) {
@@ -481,19 +481,28 @@ export function getCalendar(from: string, days: number): Calendar {
       if (c.closed) closedN++;
       else if (c.booked) {
         sold++;
-        if (c.price != null) {
-          rev += c.price;
-          bookedPrices.push(c.price);
-        }
+        if (c.price != null) bookedPrices.push(c.price);
       } else if (c.available != null && c.available > 0) open++; // known-open; null = unsynced, skip
     }
   }
+  // On-the-books is REAL money only: net-of-VAT reservation revenue recognized
+  // per night over the window (same accrual as the P&L) — never the calendar's
+  // displayed prices, which are advertised ARI rates / engine recommendations,
+  // not what the occupying guests pay. ADR follows suit: the realized nightly
+  // rate when reservations cover the window, else the old displayed-rate
+  // averages so the tile stays informative before the first reservation sync.
+  const otb = windowReservationRevenue(from, dates[w - 1] ?? from);
   const avg = (xs: number[]) =>
     xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0;
   const knownPrices = rows.flatMap((row) =>
     row.cells.slice(0, w).map((c) => c.price).filter((p): p is number => p != null),
   );
-  const adr = bookedPrices.length ? avg(bookedPrices) : avg(knownPrices);
+  const adr =
+    otb.nights > 0
+      ? Math.round(otb.revenue / otb.nights)
+      : bookedPrices.length
+        ? avg(bookedPrices)
+        : avg(knownPrices);
   const occupancy = sold + open > 0 ? sold / (sold + open) : 0;
 
   return {
@@ -508,7 +517,7 @@ export function getCalendar(from: string, days: number): Calendar {
       windowDays: w,
       occupancy,
       adr,
-      bookedRevenue: rev,
+      bookedRevenue: otb.revenue,
       sold,
       open,
       closed: closedN,
