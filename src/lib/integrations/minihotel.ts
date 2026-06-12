@@ -658,6 +658,44 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
       // Some responses come back as XML; salvage any <Error>/ERR text.
       errors = extractMiniHotelErrors(text);
     }
+
+    // MiniHotel repeats per-date problems once PER NIGHT (a 90-night push
+    // yields 90 near-identical warnings). Collapse duplicates — strip the
+    // "(Room 'X' at YYYY-MM-DD)" prefix to group, keep one example, count the
+    // rest — so the operator sees the real distinct problems.
+    const collapse = (list: string[]): string[] => {
+      const groups = new Map<string, { sample: string; n: number }>();
+      for (const t of list) {
+        const key = t.replace(/\(Room '[^']*' at \d{4}-\d{2}-\d{2}\)\s*/i, "").trim();
+        const g = groups.get(key);
+        if (g) g.n++;
+        else groups.set(key, { sample: t, n: 1 });
+      }
+      return [...groups.values()].map((g) => (g.n > 1 ? `${g.sample} (×${g.n} nights)` : g.sample));
+    };
+    warnings = collapse(warnings);
+    errors = collapse(errors);
+
+    // "Price list 'X' doesn't exist" arrives as a WARNING, but it means every
+    // price in the push was silently dropped — reporting that as a successful
+    // push would be a lie. Fail loudly with the fix.
+    const sentPrices = [...byType.values()].some((l) => l.some((it) => it.price != null));
+    const badList = [...warnings, ...errors].find((t) =>
+      /price\s*list\s*'[^']*'\s*doesn'?t\s*exists?/i.test(t),
+    );
+    if (sentPrices && badList) {
+      return {
+        ok: false,
+        ...empty,
+        roomTypes: byType.size,
+        unmappedUnits: unmapped.size,
+        warnings,
+        errors,
+        requestId,
+        message: `MiniHotel has no price list named '${conn.rateCode}' — the PRICES were NOT saved (availability/min-stay/closures were). Run Settings → "Find rate code", save the real price-list code, then push again.`,
+      };
+    }
+
     const attempted = [...byType.values()].reduce((s, l) => s + l.length, 0);
     return {
       ok: errors.length === 0,

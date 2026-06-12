@@ -10,22 +10,24 @@ const input =
 const btn =
   "inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50";
 
-type Status = "valid" | "valid-warning" | "not-defined" | "error";
+type Status = "valid" | "valid-warning" | "wildcard" | "not-defined" | "error";
 interface Probe {
   code: string;
   status: Status;
   detail: string;
 }
 
-const VARIANT: Record<Status, "success" | "warning" | "muted" | "danger"> = {
+const VARIANT: Record<Status, "success" | "warning" | "info" | "muted" | "danger"> = {
   valid: "success",
   "valid-warning": "warning",
+  wildcard: "info",
   "not-defined": "muted",
   error: "danger",
 };
 const LABEL: Record<Status, string> = {
   valid: "valid",
   "valid-warning": "defined",
+  wildcard: "wildcard · read-only",
   "not-defined": "not defined",
   error: "error",
 };
@@ -34,6 +36,7 @@ export function RateCodeFinderCard() {
   const [extra, setExtra] = useState("");
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<Probe[] | null>(null);
+  const [namesSeen, setNamesSeen] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [usedCode, setUsedCode] = useState<string | null>(null);
 
@@ -41,6 +44,7 @@ export function RateCodeFinderCard() {
     setBusy(true);
     setError(null);
     setResults(null);
+    setNamesSeen([]);
     setUsedCode(null);
     try {
       const r = await fetch("/api/integrations/minihotel/ratecodes", {
@@ -48,9 +52,16 @@ export function RateCodeFinderCard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ candidates: extra }),
       });
-      const d = (await r.json()) as { ok: boolean; message?: string; results?: Probe[] };
-      if (d.ok) setResults(d.results ?? []);
-      else setError(d.message || "Could not probe rate codes.");
+      const d = (await r.json()) as {
+        ok: boolean;
+        message?: string;
+        results?: Probe[];
+        namesSeen?: string[];
+      };
+      if (d.ok) {
+        setResults(d.results ?? []);
+        setNamesSeen(d.namesSeen ?? []);
+      } else setError(d.message || "Could not probe rate codes.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "request failed");
     } finally {
@@ -81,8 +92,10 @@ export function RateCodeFinderCard() {
         <p className="text-[11px] text-muted-foreground">
           MiniHotel has no &ldquo;list price lists&rdquo; API, so this probes candidate codes against
           ARI and reports which it accepts. Runs against your saved connection (needs a whitelisted IP).
-          It can only test codes it&apos;s told to try — for a custom code, check MiniHotel&apos;s
-          Rates &amp; Availability screen or what PriceLabs pushes to.
+          Note: <span className="font-medium">ALL is a wildcard</span> — it can READ prices but can&apos;t
+          store them, so price pushes need the real list name. If no code here shows
+          &ldquo;valid&rdquo;, read the exact list name off MiniHotel&apos;s Rates &amp; Availability screen
+          (or your PriceLabs channel mapping) and paste it below.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -103,6 +116,13 @@ export function RateCodeFinderCard() {
         </div>
 
         {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
+
+        {namesSeen.length > 0 && (
+          <p className="text-[11px] text-muted-foreground">
+            Price-list names mentioned by the feed (auto-probed below):{" "}
+            <span className="font-mono text-foreground">{namesSeen.join(", ")}</span>
+          </p>
+        )}
 
         {results && results.length > 0 && (
           <div className="overflow-x-auto">
