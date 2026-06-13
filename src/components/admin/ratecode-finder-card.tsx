@@ -139,10 +139,11 @@ export function RateCodeFinderCard() {
         <p className="text-[11px] text-muted-foreground">
           MiniHotel has no &ldquo;list price lists&rdquo; API, so this probes candidate codes against
           ARI and reports which it accepts. Runs against your saved connection (needs a whitelisted IP).
-          Note: <span className="font-medium">ALL is a wildcard</span> — it can READ prices but can&apos;t
-          store them, so price pushes need the real list name. If no code here shows
-          &ldquo;valid&rdquo;, read the exact list name off MiniHotel&apos;s Rates &amp; Availability screen
-          (or your PriceLabs channel mapping) and paste it below.
+          Reads and writes use different code spaces, so always confirm the push target with
+          <span className="font-medium"> Test write</span> — the bare <span className="font-mono">ALL</span>
+          fails, but <span className="font-mono">*ALL</span> (with the asterisk) writes on portals linked
+          that way. If nothing writes, read the exact list name off MiniHotel&apos;s Rates &amp;
+          Availability screen (or your PriceLabs channel mapping) and paste it below.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
