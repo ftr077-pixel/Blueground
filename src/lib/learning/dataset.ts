@@ -190,6 +190,13 @@ export interface PriceChange {
   newNightly: number | null;
   source: string; // 'operator' | 'agent' | 'observed'
   note: string | null;
+  // Prediction captured at apply time (learned suggestions only — NULL otherwise),
+  // so each applied suggestion can be scored against what actually happened.
+  nights: number | null;
+  targetPage: number | null;
+  predictedRank: number | null; // the rank we expect this listing to reach at newNightly
+  confidence: string | null; // model confidence at apply time
+  n: number | null; // market sample size behind it
 }
 
 export function recordPriceChange(input: {
@@ -198,6 +205,11 @@ export function recordPriceChange(input: {
   newNightly?: number | null;
   source: string;
   note?: string | null;
+  nights?: number | null;
+  targetPage?: number | null;
+  predictedRank?: number | null;
+  confidence?: string | null;
+  n?: number | null;
 }): PriceChange {
   const db = getDb();
   const row: PriceChange = {
@@ -208,10 +220,18 @@ export function recordPriceChange(input: {
     newNightly: input.newNightly ?? null,
     source: input.source,
     note: input.note ?? null,
+    nights: input.nights ?? null,
+    targetPage: input.targetPage ?? null,
+    predictedRank: input.predictedRank ?? null,
+    confidence: input.confidence ?? null,
+    n: input.n ?? null,
   };
   db.prepare(
-    `INSERT INTO listing_price_changes (id, listing_id, ts, old_nightly, new_nightly, source, note)
-     VALUES (@id, @listingId, @ts, @oldNightly, @newNightly, @source, @note)`,
+    `INSERT INTO listing_price_changes
+       (id, listing_id, ts, old_nightly, new_nightly, source, note,
+        nights, target_page, predicted_rank, confidence, n)
+     VALUES (@id, @listingId, @ts, @oldNightly, @newNightly, @source, @note,
+        @nights, @targetPage, @predictedRank, @confidence, @n)`,
   ).run(row);
   return row;
 }
@@ -222,7 +242,8 @@ export function listPriceChanges(listingId: string, limit = 50): PriceChange[] {
     db
       .prepare(
         `SELECT id, listing_id AS listingId, ts, old_nightly AS oldNightly,
-                new_nightly AS newNightly, source, note
+                new_nightly AS newNightly, source, note, nights,
+                target_page AS targetPage, predicted_rank AS predictedRank, confidence, n
            FROM listing_price_changes WHERE listing_id = ? ORDER BY ts DESC LIMIT ?`,
       )
       .all(listingId, limit) as PriceChange[]
