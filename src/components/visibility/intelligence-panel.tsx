@@ -133,6 +133,8 @@ interface SuggestionBatch {
   suggestions: SuggestionRow[];
 }
 
+type ApplyMode = "base" | "override";
+
 function SuggestionsQueue({
   targetPage,
   onInspect,
@@ -143,8 +145,10 @@ function SuggestionsQueue({
   const [batch, setBatch] = useState<SuggestionBatch | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [applying, setApplying] = useState<string | null>(null);
-  const [applied, setApplied] = useState<Record<string, number>>({});
+  const [applying, setApplying] = useState<string | null>(null); // `${listingId}:${mode}`
+  const [applied, setApplied] = useState<
+    Record<string, { nightly: number; mode: ApplyMode; rateUpdated: boolean }>
+  >({});
 
   useEffect(() => {
     setLoading(true);
@@ -155,18 +159,26 @@ function SuggestionsQueue({
       .finally(() => setLoading(false));
   }, [targetPage]);
 
-  async function apply(row: SuggestionRow) {
-    setApplying(row.listingId);
+  async function apply(row: SuggestionRow, mode: ApplyMode) {
+    setApplying(`${row.listingId}:${mode}`);
     setErr(null);
     try {
       const r = await fetch("/api/learning/apply", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ listingId: row.listingId, nights: row.nights, targetPage }),
+        body: JSON.stringify({ listingId: row.listingId, nights: row.nights, targetPage, mode }),
       });
-      const b = (await r.json()) as { ok?: boolean; newNightly?: number; error?: string };
+      const b = (await r.json()) as {
+        ok?: boolean;
+        newNightly?: number;
+        rateUpdated?: boolean;
+        error?: string;
+      };
       if (!r.ok || !b.ok) throw new Error(b.error || `apply failed: ${r.status}`);
-      setApplied((m) => ({ ...m, [row.listingId]: b.newNightly ?? row.suggestedNightly }));
+      setApplied((m) => ({
+        ...m,
+        [row.listingId]: { nightly: b.newNightly ?? row.suggestedNightly, mode, rateUpdated: !!b.rateUpdated },
+      }));
     } catch (e) {
       setErr(e instanceof Error ? e.message : "apply failed");
     } finally {
@@ -190,8 +202,10 @@ function SuggestionsQueue({
         </div>
         <p className="text-[11px] text-muted-foreground">
           Only listings the model says are mispriced for page {targetPage} — everything else is
-          already about right. Apply logs the change for outcome tracking and updates the mapped
-          unit&apos;s rate.
+          already about right. <span className="text-foreground">Base rate</span> sets the unit&apos;s
+          anchor (Rates Calendar, engine &amp; P&amp;L all rebuild from it);{" "}
+          <span className="text-foreground">Override</span> pins the price for just this check-in&apos;s
+          nights. Both log the change for outcome tracking; an unmapped listing is logged only.
         </p>
       </CardHeader>
       <CardContent>
@@ -233,7 +247,7 @@ function SuggestionsQueue({
               </thead>
               <tbody>
                 {batch.suggestions.map((s) => {
-                  const done = applied[s.listingId] != null;
+                  const ap = applied[s.listingId];
                   return (
                     <tr key={s.listingId} className="border-t border-border/60">
                       <td className="px-3 py-2">
@@ -250,7 +264,7 @@ function SuggestionsQueue({
                       <td className="px-3 py-2 font-mono text-muted-foreground">{s.checkIn ?? "soonest"}</td>
                       <td className="px-3 py-2 text-right font-mono">₪{s.currentNightly}</td>
                       <td className="px-3 py-2 text-right font-mono font-semibold">
-                        ₪{done ? applied[s.listingId] : s.suggestedNightly}
+                        ₪{ap ? ap.nightly : s.suggestedNightly}
                         {s.floored && (
                           <span
                             className="ml-1 align-middle text-[9px] font-normal uppercase tracking-wide text-muted-foreground"
@@ -287,17 +301,31 @@ function SuggestionsQueue({
                         )}
                       </td>
                       <td className="px-3 py-2 text-right">
-                        {done ? (
-                          <Badge variant="success">applied ✓</Badge>
+                        {ap ? (
+                          <Badge variant={ap.rateUpdated ? "success" : "muted"}>
+                            {ap.rateUpdated ? `${ap.mode === "base" ? "base" : "override"} ✓` : "logged"}
+                          </Badge>
                         ) : (
-                          <button
-                            type="button"
-                            onClick={() => apply(s)}
-                            disabled={applying != null}
-                            className="rounded-md border border-primary/30 bg-primary/15 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
-                          >
-                            {applying === s.listingId ? "Applying…" : "Apply"}
-                          </button>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => apply(s, "base")}
+                              disabled={applying != null}
+                              title="Set the unit's base (anchor) rate — the Rates Calendar, pricing engine, and P&L all rebuild from it (affects all dates)"
+                              className="rounded-md border border-primary/30 bg-primary/15 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+                            >
+                              {applying === `${s.listingId}:base` ? "…" : "Base rate"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => apply(s, "override")}
+                              disabled={applying != null}
+                              title="Pin this price for this check-in's nights as a Rates Calendar override (base rate untouched)"
+                              className="rounded-md border border-border bg-muted/40 px-2 py-1 text-[11px] font-medium hover:bg-muted disabled:opacity-50"
+                            >
+                              {applying === `${s.listingId}:override` ? "…" : "Override"}
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
