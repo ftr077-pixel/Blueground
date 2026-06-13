@@ -2,7 +2,7 @@ import { listUnits, type Unit } from "@/lib/repos/units";
 import { getDb } from "@/lib/db";
 import { windowReservationRevenue } from "@/lib/repos/reservations";
 import { quoteNight } from "@/lib/pricing/engine";
-import { mockProviders, type MarketProviders } from "@/lib/pricing/providers";
+import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
 import type { PricingRulesConfig } from "@/lib/config/pricing";
 
@@ -202,7 +202,12 @@ function makeNightPricer(): (unit: Unit, iso: string) => NightPrice {
     if (hit) return hit;
     let out: NightPrice;
     try {
-      if (!market) market = mockProviders();
+      // Use the SAME market source as the pricing agent / preview graph: the
+      // live AirROI providers when market data has been synced, else the mock.
+      // This is what makes the market-driven modes (last-minute, far-out,
+      // occupancy) actually track the market on the calendar — "Hyper Local
+      // Pulse" — instead of demo signals. Falls back to mock with no data.
+      if (!market) market = marketProviders();
       let cfg = cfgCache.get(unit.id);
       if (!cfg) {
         cfg = effectiveRulesForUnit(unit);
