@@ -397,6 +397,19 @@ function init(db: Database.Database) {
   ensureColumn(db, "tracked_listings", "cleaning_fee", "REAL");
   ensureColumn(db, "tracked_listings", "address", "TEXT");
 
+  // Per-suggestion prediction, captured when a learned suggestion is APPLIED
+  // (/api/learning/apply). The model drifts, so the apply-time belief — target
+  // page, the rank it should reach at the new price, and the confidence/n behind
+  // it — is persisted here (immutable); the outcome (hit/miss vs target, and
+  // whether the mapped unit booked) is derived fresh from scans/bookings in
+  // src/lib/learning/scorecard.ts. NULL on manual/agent changes that carry no
+  // prediction, so the scorecard simply skips them.
+  ensureColumn(db, "listing_price_changes", "nights", "INTEGER");
+  ensureColumn(db, "listing_price_changes", "target_page", "INTEGER");
+  ensureColumn(db, "listing_price_changes", "predicted_rank", "INTEGER");
+  ensureColumn(db, "listing_price_changes", "confidence", "TEXT");
+  ensureColumn(db, "listing_price_changes", "n", "INTEGER");
+
   // One-time backfill: give every apartment the default utilities/cleaning the
   // operator asked for, so the costs are filled in and visible (not just applied
   // implicitly in the profit math). Runs once, guarded by a meta flag.

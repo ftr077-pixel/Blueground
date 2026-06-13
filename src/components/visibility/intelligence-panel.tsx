@@ -379,6 +379,7 @@ export function IntelligencePanel() {
   return (
     <div className="space-y-6">
       <SuggestionsQueue targetPage={targetPage} onInspect={(id) => setListingId(id)} />
+      <ScorecardCard />
 
       <div className="flex flex-wrap items-center gap-2">
         <select className={`${selectCls} max-w-[20rem]`} value={listingId} onChange={(e) => setListingId(e.target.value)}>
@@ -759,6 +760,135 @@ function StrategyCard() {
                   (ft.raises > 0 ? `; raises ${ft.raisesBooked}/${ft.raises}.` : ".")
                 : `No logged price moves yet — log them (POST /api/learning/price-changes) when you change a price, and conversions get attributed to the move.`}
               {r.unattributed > 0 && ` ${r.unattributed} booking(s) couldn't be attributed (no listing↔unit link).`}
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ----------------------------------------------------------- suggestion scorecard
+interface ScorecardRow {
+  changeId: string;
+  label: string;
+  ts: string;
+  deltaPct: number | null;
+  targetPage: number;
+  realizedPage: number | null;
+  scans: number;
+  rankOutcome: "hit" | "miss" | "pending";
+  windowOpen: boolean;
+  unitMapped: boolean;
+  booked: boolean;
+}
+interface ScorecardData {
+  windowDays: number;
+  rows: ScorecardRow[];
+  summary: {
+    total: number;
+    hits: number;
+    misses: number;
+    pending: number;
+    decided: number;
+    hitRate: number | null;
+    unitMapped: number;
+    bookedWithinWindow: number;
+  };
+}
+
+function OutcomeBadge({ row }: { row: ScorecardRow }) {
+  if (row.rankOutcome === "hit") return <Badge variant="success">page {row.targetPage} ✓</Badge>;
+  if (row.rankOutcome === "miss") return <Badge variant="danger">missed</Badge>;
+  return <Badge variant="muted">{row.scans === 0 ? "awaiting scan" : "pending"}</Badge>;
+}
+
+// Per-suggestion closed loop: each APPLIED learned suggestion, scored against the
+// scans + bookings that followed. The prediction (target page) was captured at
+// apply time; the verdict here is derived live from what actually happened.
+function ScorecardCard() {
+  const [d, setD] = useState<ScorecardData | null>(null);
+  useEffect(() => {
+    fetch("/api/learning/scorecard", { cache: "no-store" })
+      .then((r) => r.json())
+      .then(setD)
+      .catch(() => setD(null));
+  }, []);
+
+  if (!d) return null;
+  const s = d.summary;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Suggestion scorecard</CardTitle>
+          <Badge variant="muted">{s.total} applied</Badge>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Every applied suggestion scored against what happened next: did the listing reach the
+          target page within {d.windowDays}d, and did the mapped unit book?
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {s.total === 0 ? (
+          <p className="text-[11px] text-muted-foreground">
+            No applied suggestions yet — Apply one above and its prediction gets scored here as new
+            scans (and bookings) come in.
+          </p>
+        ) : (
+          <>
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-[11px]">
+                <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 text-left">Listing</th>
+                    <th className="px-2 py-1 text-left">Applied</th>
+                    <th className="px-2 py-1 text-right">Move</th>
+                    <th className="px-2 py-1 text-right">Target → reached</th>
+                    <th className="px-2 py-1 text-left">Result</th>
+                    <th className="px-2 py-1 text-left">Booked</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {d.rows.slice(0, 10).map((r) => (
+                    <tr key={r.changeId} className="border-t border-border/40">
+                      <td className="max-w-[14rem] truncate px-2 py-1 font-medium" title={r.label}>
+                        {r.label}
+                      </td>
+                      <td className="px-2 py-1 font-mono text-muted-foreground">{r.ts.slice(0, 10)}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {r.deltaPct != null ? `${r.deltaPct > 0 ? "+" : ""}${r.deltaPct}%` : "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        p{r.targetPage} → {r.realizedPage != null ? `p${r.realizedPage}` : "—"}
+                      </td>
+                      <td className="px-2 py-1">
+                        <OutcomeBadge row={r} />
+                      </td>
+                      <td className="px-2 py-1">
+                        {!r.unitMapped ? (
+                          <span className="text-muted-foreground">unmapped</span>
+                        ) : r.booked ? (
+                          <Badge variant="success">booked ✓</Badge>
+                        ) : (
+                          <span className="text-muted-foreground">{r.windowOpen ? "—" : "no"}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {s.decided > 0
+                ? `Reached the target page ${s.hits}/${s.decided} times${
+                    s.hitRate != null ? ` (${Math.round(s.hitRate * 100)}%)` : ""
+                  }`
+                : "No suggestion has a settled rank outcome yet"}
+              {s.pending > 0 && ` · ${s.pending} still pending`}
+              {s.unitMapped > 0 &&
+                ` · ${s.bookedWithinWindow}/${s.unitMapped} mapped unit(s) booked within ${d.windowDays}d`}
+              .
             </p>
           </>
         )}

@@ -43,6 +43,14 @@ export async function POST(req: Request) {
     newNightly,
     source: "operator",
     note: `Applied learned suggestion: ₪${oldNightly}→₪${newNightly}/n for ${nights}n stays (target page ${targetPage}, ${r.target.deltaPct ?? "?"}%, confidence ${r.confidence.level}, n=${r.confidence.n})`,
+    // Persist the model's belief so this exact suggestion can be scored later
+    // (scorecard.ts): the page we aimed for, the rank it should reach at the new
+    // price, and the confidence/sample behind it.
+    nights,
+    targetPage,
+    predictedRank: r.target.rank,
+    confidence: r.confidence.level,
+    n: r.confidence.n,
   });
 
   // Follow through on the mapped unit so the in-app rate reflects the decision.
