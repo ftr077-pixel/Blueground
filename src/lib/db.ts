@@ -446,6 +446,15 @@ function init(db: Database.Database) {
   ensureColumn(db, "rate_calendar", "min_price", "INTEGER");
   ensureColumn(db, "rate_calendar", "max_price", "INTEGER");
   ensureColumn(db, "rate_calendar", "note", "TEXT");
+  // Per-field provenance for min-stay: a synced (minihotel) min-night is a
+  // mirror of the PMS's current value and must NOT mask the engine's min-stay
+  // rules on the calendar — only an operator's manual pin does. Backfill from
+  // the row source for pre-existing rows (idempotent — only fills NULLs); new
+  // writes stamp it exactly in upsertOverride.
+  ensureColumn(db, "rate_calendar", "min_nights_source", "TEXT");
+  db.exec(
+    "UPDATE rate_calendar SET min_nights_source = source WHERE min_nights IS NOT NULL AND min_nights_source IS NULL;",
+  );
   // Floors/ceilings: NULL = auto (follow Base at the default band, resolved at
   // read time in units.ts); a stored value is an operator pin that survives
   // Base edits. One-time migration: historically every Base edit STAMPED

@@ -129,6 +129,10 @@ interface OverrideSql {
   price: number | null;
   available: number | null;
   min_nights: number | null;
+  /** Where min_nights came from ("manual" pin vs "minihotel" mirror). A synced
+   *  value is the PMS's current state, not an operator decision, so it must not
+   *  mask the engine's min-stay rules on the calendar. */
+  min_nights_source: string | null;
   closed: number | null;
   booked: number | null;
   source: string;
@@ -361,11 +365,14 @@ export function getCalendar(from: string, days: number): Calendar {
     // null) until real data is synced in, rather than invent numbers.
     const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
     const cells: RateCell[] = dates.map((date) => {
-      const q = hasBaseline ? priceOf(unit, date) : null;
-      let price: number | null = q ? q.rate : null;
-      // Default min-stay = the engine's resolved value (min-stay rules applied);
-      // an override below still wins.
-      let minNights = q ? q.minStay : DEFAULT_MIN_NIGHTS;
+      // The min-stay hierarchy (far-out ladder, orphan gap, adjacency, last-
+      // minute) doesn't depend on a Base, so resolve the engine quote for EVERY
+      // unit and surface its min-stay — only the PRICE is withheld until the
+      // unit has a rate anchor. This makes the configured restrictions visible
+      // on the calendar even for MiniHotel-imported units (rate 0).
+      const q = priceOf(unit, date);
+      let price: number | null = hasBaseline ? q.rate : null;
+      let minNights = q.minStay;
       // Booked / closed / availability come ONLY from real data (overrides
       // written by the MiniHotel sync or the operator) — never invented. A night
       // with no data is open-looking with unknown availability.
@@ -388,7 +395,10 @@ export function getCalendar(from: string, days: number): Calendar {
             if (o.min_price != null && price < o.min_price) price = o.min_price;
             if (o.max_price != null && price > o.max_price) price = o.max_price;
           }
-          if (o.min_nights != null) minNights = o.min_nights;
+          // A synced min-stay is just a mirror of the PMS's current value — it
+          // does NOT mask the engine's recommendation (same as a synced price,
+          // which the Base anchor supersedes). Only a manual pin wins.
+          if (o.min_nights != null && o.min_nights_source === "manual") minNights = o.min_nights;
         }
         if (o.closed != null) isClosed = o.closed === 1;
         if (o.booked != null) isBooked = o.booked === 1;
@@ -657,6 +667,14 @@ export function upsertOverride(
     price: patch.price !== undefined ? patch.price : (existing?.price ?? null),
     available: patch.available !== undefined ? patch.available : (existing?.available ?? null),
     min_nights: patch.minNights !== undefined ? patch.minNights : (existing?.min_nights ?? null),
+    // Stamp provenance whenever this write sets min_nights; clearing it (null)
+    // drops the provenance too. Untouched writes keep the prior source.
+    min_nights_source:
+      patch.minNights !== undefined
+        ? patch.minNights === null
+          ? null
+          : source
+        : (existing?.min_nights_source ?? null),
     closed: boolCol(patch.closed, existing?.closed ?? null),
     booked: boolCol(patch.booked, existing?.booked ?? null),
     min_price: patch.minPrice !== undefined ? patch.minPrice : (existing?.min_price ?? null),
@@ -670,10 +688,10 @@ export function upsertOverride(
   };
 
   db.prepare(
-    `INSERT INTO rate_calendar (unit_id, date, price, available, min_nights, closed, booked, min_price, max_price, pct_adjust, expires_on, note, source, created_at, updated_at)
-     VALUES (@unit_id, @date, @price, @available, @min_nights, @closed, @booked, @min_price, @max_price, @pct_adjust, @expires_on, @note, @source, @created_at, @updated_at)
+    `INSERT INTO rate_calendar (unit_id, date, price, available, min_nights, min_nights_source, closed, booked, min_price, max_price, pct_adjust, expires_on, note, source, created_at, updated_at)
+     VALUES (@unit_id, @date, @price, @available, @min_nights, @min_nights_source, @closed, @booked, @min_price, @max_price, @pct_adjust, @expires_on, @note, @source, @created_at, @updated_at)
      ON CONFLICT(unit_id, date) DO UPDATE SET
-       price = @price, available = @available, min_nights = @min_nights,
+       price = @price, available = @available, min_nights = @min_nights, min_nights_source = @min_nights_source,
        closed = @closed, booked = @booked, min_price = @min_price, max_price = @max_price,
        pct_adjust = @pct_adjust, expires_on = @expires_on,
        note = @note, source = @source, created_at = @created_at, updated_at = @updated_at`,
@@ -692,7 +710,7 @@ export function upsertOverride(
 export function rebaseFuturePrices(
   unitId: string,
   horizonDays = 90,
-): { date: string; price: number }[] {
+): { date: string; price: number; minStay: number }[] {
   const unit = listUnits().find((u) => u.id === unitId);
   if (!unit) throw new Error("unknown unit");
   // No anchor -> nothing to derive from. Without this, basePrice() would fall
@@ -707,7 +725,7 @@ export function rebaseFuturePrices(
     .all(unitId, from, isoAddDays(from, horizonDays - 1)) as OverrideSql[];
   const byDate = new Map(rows.map((r) => [r.date, r]));
 
-  const out: { date: string; price: number }[] = [];
+  const out: { date: string; price: number; minStay: number }[] = [];
   const clearPrice = db.prepare(
     "UPDATE rate_calendar SET price = NULL, updated_at = ? WHERE unit_id = ? AND date = ?",
   );
@@ -721,7 +739,12 @@ export function rebaseFuturePrices(
       // Sold/closed nights (real data only) keep their last price.
       if (o && (o.booked === 1 || o.closed === 1)) continue;
 
-      let price = priceOf(unit, date).rate; // unit already carries the new base
+      const quote = priceOf(unit, date); // unit already carries the new base
+      let price = quote.rate;
+      // Push the engine's min-stay (the configured rules) — unless the operator
+      // pinned a manual one for this night, which we honor and push as-is.
+      const minStay =
+        o && o.min_nights != null && o.min_nights_source === "manual" ? o.min_nights : quote.minStay;
       if (o) {
         // A live dynamic % override keeps steering off the new baseline.
         const expired = o.expires_on != null && from > o.expires_on;
@@ -733,7 +756,7 @@ export function rebaseFuturePrices(
         // Synced price is superseded by the new anchor; the derived price shows.
         if (o.price != null) clearPrice.run(new Date().toISOString(), unitId, date);
       }
-      out.push({ date, price });
+      out.push({ date, price, minStay });
     }
     // Rows left with no payload at all are noise (stale source dots) — drop them.
     db.prepare(

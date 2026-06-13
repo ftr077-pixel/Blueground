@@ -67,7 +67,7 @@ async function rebaseAndPush(
   let push: PushResult | undefined;
   if (repriced.length) {
     push = await pushRatesToMiniHotel(
-      repriced.map((r) => ({ unitId, date: r.date, price: r.price })),
+      repriced.map((r) => ({ unitId, date: r.date, price: r.price, minNights: r.minStay })),
     );
   }
   const pushTxt = !push
