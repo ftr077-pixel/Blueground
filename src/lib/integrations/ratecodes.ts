@@ -3,6 +3,7 @@ import {
   buildBulkAriRequest,
   extractMiniHotelErrors,
   fetchRoomStatusRange,
+  fetchReservations,
 } from "@/lib/integrations/minihotel";
 
 /**
@@ -98,23 +99,42 @@ export function extractListNames(text: string): string[] {
 /**
  * Harvest rate-code / price-list names from the operator's OWN reservations —
  * the ground truth. Each booking is sold under a real price list, so its
- * rateCode is exactly what we must write to. Reads the Room Status reservation
- * list (the call that already works for occupancy) over the next ~6 months and
- * pulls any rate-code-like attribute. Returns the names plus one raw reservation
- * tag, so even if no code is present we can see what fields the hotel exposes.
+ * rateCode is exactly what we must write to. Two sources:
+ *   1. Content/Data API bookings (GetReservationKey) — these carry rateCode
+ *      ("Standard", a custom list, …) on each <Booking>. The reliable source.
+ *   2. ARI Room Status reservations — usually NO rate code (board only), kept as
+ *      a fallback + to surface a raw tag so the real field can be eyeballed.
+ * Returns the names plus one raw tag (Booking preferred), and never throws.
  */
 async function harvestReservationRateCodes(
   conn: ReturnType<typeof getMiniHotelConnection>,
 ): Promise<{ codes: string[]; sampleTag?: string }> {
+  const codes = new Set<string>();
+  let sampleTag: string | undefined;
+
+  // 1) Content/Data API bookings — query a window around now (filters by arrival
+  //    date) likely to contain real stays.
+  try {
+    const xml = await fetchReservations(conn, plusDays(todayUTC(), -120), plusDays(todayUTC(), 245));
+    for (const c of extractListNames(xml)) codes.add(c);
+    const tag = decodeEntities(xml).match(/<Booking\b[^>]*>/i)?.[0];
+    if (tag) sampleTag = tag.slice(0, 400);
+  } catch {
+    /* Content API may be disabled (S009) or unreachable — fall through */
+  }
+
+  // 2) ARI Room Status reservations — fallback source + raw sample.
   try {
     const xml = await fetchRoomStatusRange(conn, todayUTC(), plusDays(todayUTC(), 180));
-    const codes = extractListNames(xml);
-    const sampleTag =
-      (decodeEntities(xml).match(/<Reservation\b[^>]*?\/?>/i)?.[0] ?? "").slice(0, 400) || undefined;
-    return { codes, sampleTag };
+    for (const c of extractListNames(xml)) codes.add(c);
+    if (!sampleTag) {
+      sampleTag = (decodeEntities(xml).match(/<Reservation\b[^>]*?\/?>/i)?.[0] ?? "").slice(0, 400) || undefined;
+    }
   } catch {
-    return { codes: [] };
+    /* ignore */
   }
+
+  return { codes: [...codes], sampleTag };
 }
 
 async function probeOne(
