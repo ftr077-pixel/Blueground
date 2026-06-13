@@ -50,12 +50,12 @@ export async function POST(req: Request) {
 
   for (let i = 0; i < units.length; i += CHUNK) {
     const chunk = units.slice(i, i + CHUNK);
-    const items: { unitId: string; date: string; price: number }[] = [];
+    const items: { unitId: string; date: string; price: number; minNights: number }[] = [];
     for (const u of chunk) {
       const nights = rebaseFuturePrices(u.id, days);
       if (nights.length) unitsPushed++;
       repriced += nights.length;
-      for (const n of nights) items.push({ unitId: u.id, date: n.date, price: n.price });
+      for (const n of nights) items.push({ unitId: u.id, date: n.date, price: n.price, minNights: n.minStay });
     }
     if (items.length === 0) continue;
     const res = await pushRatesToMiniHotel(items);
