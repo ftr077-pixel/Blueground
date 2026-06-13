@@ -117,7 +117,9 @@ interface SuggestionRow {
   deltaNightly: number;
   deltaPct: number;
   currentPage: number | null;
+  expectedPage: number | null;
   targetPage: number;
+  suggestedPage: number;
   confidence: "high" | "medium" | "low";
   n: number;
   profitDelta: number | null;
@@ -127,6 +129,7 @@ interface SuggestionBatch {
   scanned: number;
   hiddenLowConfidence: number;
   appliedPending: number;
+  hiddenFloorBound: number;
   suggestions: SuggestionRow[];
 }
 
@@ -181,6 +184,7 @@ function SuggestionsQueue({
               {batch.suggestions.length} of {batch.scanned} listings have a move ≥2%
               {batch.hiddenLowConfidence > 0 && ` · ${batch.hiddenLowConfidence} low-confidence hidden`}
               {batch.appliedPending > 0 && ` · ${batch.appliedPending} applied, awaiting scan`}
+              {batch.hiddenFloorBound > 0 && ` · ${batch.hiddenFloorBound} can’t profitably reach a better page`}
             </span>
           )}
         </div>
@@ -196,9 +200,12 @@ function SuggestionsQueue({
         ) : !batch || batch.suggestions.length === 0 ? (
           <p className="text-[11px] text-muted-foreground">
             No actionable suggestions right now — prices look aligned with the market
-            {batch && (batch.appliedPending > 0 || batch.hiddenLowConfidence > 0)
+            {batch && (batch.appliedPending > 0 || batch.hiddenLowConfidence > 0 || batch.hiddenFloorBound > 0)
               ? ` (${[
                   batch.appliedPending > 0 ? `${batch.appliedPending} applied, awaiting scan` : null,
+                  batch.hiddenFloorBound > 0
+                    ? `${batch.hiddenFloorBound} can’t reach a better page within your margin floor`
+                    : null,
                   batch.hiddenLowConfidence > 0 ? `${batch.hiddenLowConfidence} still learning` : null,
                 ]
                   .filter(Boolean)
@@ -265,7 +272,7 @@ function SuggestionsQueue({
                         {s.deltaPct.toFixed(1)}%
                       </td>
                       <td className="px-3 py-2 text-right font-mono text-muted-foreground">
-                        {s.currentPage ?? "—"}→{s.targetPage}
+                        {s.currentPage ?? s.expectedPage ?? "—"}→{s.suggestedPage}
                       </td>
                       <td className="px-3 py-2 text-right font-mono">
                         {s.profitDelta != null

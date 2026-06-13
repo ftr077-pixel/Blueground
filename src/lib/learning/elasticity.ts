@@ -215,9 +215,10 @@ export function elasticityForListing(
       nightly: targetNightly,
       deltaNightly: cur != null ? Math.round(targetNightly - cur) : null,
       deltaPct: cur != null && cur > 0 ? round1(((targetNightly - cur) / cur) * 100) : null,
-      // At the floored price we sit higher than the target rank — report it
-      // honestly rather than the (unreachable-within-margin) target.
-      expectedRank: floored ? Math.round(listingRankAt(targetNightly) ?? targetRank) : targetRank,
+      // Honest expected rank for THIS listing at the suggested price (curve +
+      // offset). When floored it sits higher (worse) than the target rank — so
+      // callers must not assume the suggested price reaches targetPage.
+      expectedRank: Math.round(listingRankAt(targetNightly) ?? targetRank),
       reachable: inv.clamped !== "low",
       floored,
     };
@@ -360,6 +361,9 @@ export interface SuggestionRow {
   currentPage: number | null;
   expectedPage: number | null;
   targetPage: number;
+  /** Honest expected page at the suggested price (curve + this listing's offset).
+   *  For a drop, the page the move actually buys — NOT assumed to be targetPage. */
+  suggestedPage: number;
   confidence: Confidence;
   n: number;
   /** Monthly profit delta when listing economics are known (₪/mo), else null. */
@@ -377,6 +381,10 @@ export interface SuggestionBatch {
   /** Would-be suggestions suppressed because the move was already applied and no
    *  scan has re-priced the listing yet (shown as "applied, awaiting scan"). */
   appliedPending: number;
+  /** Would-be moves dropped as non-visibility plays: a raise forced by the margin
+   *  floor, or a drop the floor stops short of any page gain (the target page
+   *  needs below-cost pricing here). A raise never improves search position. */
+  hiddenFloorBound: number;
   suggestions: SuggestionRow[];
 }
 
@@ -390,6 +398,7 @@ export function suggestionList(
   const suggestions: SuggestionRow[] = [];
   let hiddenLowConfidence = 0;
   let appliedPending = 0;
+  let hiddenFloorBound = 0;
 
   for (const l of listings) {
     const r = elasticityForListing(l.id, { nights, targetPage, bootstrap: false });
@@ -407,6 +416,23 @@ export function suggestionList(
     // don't re-nag the same move (it shows in the scorecard as "awaiting scan").
     if (pending.has(l.id)) {
       appliedPending++;
+      continue;
+    }
+    // Keep only genuine visibility (or hold-and-earn) moves. A raise can't improve
+    // search position: a raise forced by the margin floor (curve wanted a drop, the
+    // floor pushed it above the current price) would WORSEN the page, so it's a
+    // margin signal, not a move for this queue. A drop only belongs here if it
+    // actually buys a better page within the floor — otherwise the target page
+    // needs below-cost pricing and there's no real move.
+    const suggestedPage = r.target.expectedRank != null ? pageOf(r.target.expectedRank) : r.target.page;
+    const curPage = r.current.page ?? r.current.expectedPage;
+    if (deltaPct >= 0) {
+      if (r.target.floored) {
+        hiddenFloorBound++;
+        continue;
+      }
+    } else if (!(curPage != null && suggestedPage < curPage)) {
+      hiddenFloorBound++;
       continue;
     }
     const profitDelta =
@@ -428,6 +454,7 @@ export function suggestionList(
       currentPage: r.current.page,
       expectedPage: r.current.expectedPage,
       targetPage: r.target.page,
+      suggestedPage,
       confidence: r.confidence.level,
       n: r.confidence.n,
       profitDelta,
@@ -443,6 +470,7 @@ export function suggestionList(
     scanned: listings.length,
     hiddenLowConfidence,
     appliedPending,
+    hiddenFloorBound,
     suggestions,
   };
 }
