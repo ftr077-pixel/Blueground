@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { listUnits } from "@/lib/repos/units";
 import { rebaseFuturePrices } from "@/lib/repos/rates";
 import { getMiniHotelConnection } from "@/lib/repos/integrations";
-import { pushRatesToMiniHotel } from "@/lib/integrations/minihotel";
+import { pushRatesToMiniHotel, type PushResult } from "@/lib/integrations/minihotel";
 import { logActivity } from "@/lib/repos/activity";
 
 export const dynamic = "force-dynamic";
@@ -47,6 +47,7 @@ export async function POST(req: Request) {
   let unmappedUnits = 0;
   const warnings: string[] = [];
   const errors: string[] = [];
+  let verified: PushResult["verified"]; // first chunk we could actually read back
 
   for (let i = 0; i < units.length; i += CHUNK) {
     const chunk = units.slice(i, i + CHUNK);
@@ -63,6 +64,7 @@ export async function POST(req: Request) {
     unmappedUnits += res.unmappedUnits;
     warnings.push(...res.warnings);
     errors.push(...res.errors);
+    if (!verified && res.verified && res.verified.checked > 0) verified = res.verified;
     if (!res.ok && res.message && res.roomTypes === 0 && res.unmappedUnits === 0) {
       // Configuration-level failure — surface and stop.
       errors.push(res.message);
@@ -95,6 +97,7 @@ export async function POST(req: Request) {
     days,
     warnings: warnings.slice(0, 5),
     errors: errors.slice(0, 5),
+    verified,
     message,
   });
 }
