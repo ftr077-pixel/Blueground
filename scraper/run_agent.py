@@ -22,6 +22,7 @@ import datetime
 import json
 import os
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +45,30 @@ PAUSE = 3
 MIN_NIGHTS_FALLBACK = 30
 STALE_DAYS = 7  # refetch a listing's min-stay only if older than this
 STAY_LABELS = {7: "1 week", 14: "2 weeks", 30: "1 month", 60: "2 months", 90: "3 months"}
+
+
+# ------------------------------------------------------------------ proxy auth
+class ProxyAuthError(Exception):
+    """The proxy rejected our credentials (HTTP 407 at the CONNECT tunnel).
+
+    Unlike an Airbnb block or a network blip, this is deterministic: the gateway
+    checks PROXY_URL's user:pass before it ever reaches Airbnb, so every request
+    fails it identically. Retrying or skipping windows just floods the log with
+    407s and still posts nothing -- so callers raise this to abort the run with
+    one actionable message instead of grinding through every window.
+    """
+
+
+def is_proxy_auth_error(exc):
+    """True only for the proxy-auth signature (curl 'CONNECT ... response 407').
+
+    Kept narrow on purpose: a 407 must be paired with a proxy/tunnel/connect
+    word, so other curl/network errors keep the existing transient-retry path.
+    """
+    m = str(exc).lower()
+    return "proxy authentication" in m or (
+        "407" in m and ("tunnel" in m or "connect" in m or "proxy" in m)
+    )
 
 
 # -------------------------------------------------------------------- http
@@ -139,6 +164,11 @@ def fetch_calendar(airbnb_id):
         api_key = pyairbnb.get_api_key(PROXY_URL)
         months = pyairbnb.get_calendar(api_key=api_key, room_id=str(airbnb_id), proxy_url=PROXY_URL)
     except Exception as e:
+        # A dead/misconfigured proxy fails here first (calendars are fetched
+        # before any search) -- surface it instead of logging it as a per-listing
+        # warning and pressing on against a proxy that will reject everything.
+        if is_proxy_auth_error(e):
+            raise ProxyAuthError(str(e)) from e
         print(f"    [warn] calendar fetch failed for {airbnb_id} ({e})")
         return None
     out = {}
@@ -292,6 +322,9 @@ def search_with_retry(box, check_in, check_out, guests, currency, attempts=3):
         try:
             return run_search(box, check_in, check_out, guests, currency)
         except Exception as e:
+            # Proxy auth won't fix itself across retries -- bubble up to abort.
+            if is_proxy_auth_error(e):
+                raise ProxyAuthError(str(e)) from e
             last = e
             print(f"    retry {i + 1}/{attempts} after: {e}")
             time.sleep(2 * (i + 1))
@@ -421,6 +454,8 @@ def scan_profile(profile, availability_days=90):
         check_out = add_nights(d, n)
         try:
             results = search_with_retry(box, d, check_out, g, currency)
+        except ProxyAuthError:
+            raise  # global proxy failure -- abort the run, don't skip windows
         except Exception as e:
             # A search that failed after retries says nothing about the
             # listings in it -- emitting found:false rows here records an
@@ -496,6 +531,22 @@ def main():
         run_id = uuid.uuid4().hex
         try:
             snapshots, posted_min, search_results, stats = scan_profile(profile, availability_days)
+        except ProxyAuthError as e:
+            # One shared proxy across every profile -- if it rejects our creds,
+            # the whole run is doomed. Stop now with an actionable message and a
+            # non-zero exit (so the dashboard reports a failure, not "complete").
+            print(
+                f"\n[fatal] the proxy rejected our credentials -- HTTP 407 ({e}).\n"
+                "  PROXY_URL is set but the proxy returned 'Proxy Authentication\n"
+                "  Required' at the CONNECT step. This is NOT an Airbnb block and\n"
+                "  will not clear on its own. Check, in order:\n"
+                "    - the user:pass in PROXY_URL is current (and URL-encode any\n"
+                "      @ : / # % in them -- unencoded specials break proxy auth)\n"
+                "    - this box's IP is whitelisted, if the plan uses IP auth\n"
+                "    - the proxy plan still has bandwidth/quota left\n"
+                "  Nothing was posted; previous data is kept. Aborting the run."
+            )
+            sys.exit(2)
         except Exception as e:
             print(f"[error] profile {profile.get('id')}: {e}")
             continue

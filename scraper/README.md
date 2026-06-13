@@ -74,6 +74,15 @@ Daily cron at 08:00:
 0 8 * * * cd ~/app/scraper && . .venv/bin/activate && APP_URL=http://localhost:3000 SCRAPER_API_KEY=xxx PROXY_URL=http://user:pass@host:port python run_agent.py >> ~/scan.log 2>&1
 ```
 
+## Troubleshooting
+
+- **`CONNECT tunnel failed, response 407` / `Proxy Authentication Required`** —
+  your **proxy** rejected the credentials in `PROXY_URL` (this happens at the
+  proxy, before any request reaches Airbnb — it is *not* an Airbnb block). The
+  run aborts immediately with a non-zero exit instead of retrying. Check: the
+  `user:pass` is current and any `@ : / # %` in them are **URL-encoded**; the
+  box's IP is whitelisted if the plan uses IP auth; the plan still has quota.
+
 ## Notes / known limits
 
 - "Page" assumes Airbnb's web UI shows ~18 results/page; **global rank** is the
