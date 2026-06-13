@@ -171,7 +171,7 @@ async function probeOne(
         return {
           code,
           status: "wildcard",
-          detail: "reads prices, but it's a wildcard — MiniHotel REJECTS price writes under it",
+          detail: "reads prices; writes depend on your portal linkage — use Test write to confirm",
         };
       }
       return {
@@ -182,7 +182,7 @@ async function probeOne(
     }
     // No ERR 309 and no prices → recognized, but returned nothing usable.
     if (isWildcard(code)) {
-      return { code, status: "wildcard", detail: "wildcard — read-only, can't store prices" };
+      return { code, status: "wildcard", detail: "wildcard — reads; use Test write to check writes" };
     }
     return { code, status: "valid-warning", detail: errs[0] ?? "accepted, no prices returned" };
   } catch (e) {
