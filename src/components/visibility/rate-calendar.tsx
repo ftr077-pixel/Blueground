@@ -112,11 +112,31 @@ const btnGhost =
 const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
 
 // Result of a Reverse-ARI push, as returned by /api/rates.
-type PushInfo = { ok: boolean; pushed?: number; warnings?: string[]; errors?: string[]; message?: string };
+type PushInfo = {
+  ok: boolean;
+  pushed?: number;
+  warnings?: string[];
+  errors?: string[];
+  message?: string;
+  verified?: { date: string; checked: number; matched: number; sample?: string; note?: string };
+};
 function pushStatusMsg(p: PushInfo): { ok: boolean; text: string } {
   if (p.ok) {
     const w = p.warnings && p.warnings.length ? ` (warnings: ${p.warnings.slice(0, 2).join("; ")})` : "";
-    return { ok: true, text: `Pushed ${p.pushed ?? 0} night(s) to MiniHotel${w}.` };
+    const base = `Pushed ${p.pushed ?? 0} night(s) to MiniHotel${w}.`;
+    const v = p.verified;
+    if (v && v.checked > 0 && v.matched === v.checked) {
+      // Proven landed: a read-back from MiniHotel matches what we wrote.
+      return { ok: true, text: `${base} ✓ Verified in MiniHotel — ${v.sample}.` };
+    }
+    if (v && v.checked > 0 && v.matched < v.checked) {
+      // Accepted but read-back disagrees — almost always a rate-plan/cache issue.
+      return {
+        ok: false,
+        text: `${base} ⚠ But the read-back didn't match: ${v.sample}. ${v.note ?? ""}`.trim(),
+      };
+    }
+    return { ok: true, text: base };
   }
   const reason = p.message || (p.errors && p.errors.length ? p.errors.slice(0, 2).join(" | ") : "unknown error");
   return { ok: false, text: `Saved locally, but NOT pushed to MiniHotel: ${reason}` };
@@ -391,16 +411,27 @@ export function RateCalendar() {
         units?: number;
         unmappedUnits?: number;
         days?: number;
+        warnings?: string[];
         errors?: string[];
         message?: string;
+        verified?: { date: string; checked: number; matched: number; sample?: string; note?: string };
       };
       if (d.ok) {
-        setSyncMsg({
-          ok: true,
-          text: `Pushed ${d.pushed ?? 0} night(s) across ${d.units ?? 0} apartment(s) to MiniHotel (${d.days ?? days}-day horizon).${
-            d.unmappedUnits ? ` ${d.unmappedUnits} apartment(s) skipped — not mapped to a room type (Settings).` : ""
-          }`,
-        });
+        const skipped = d.unmappedUnits
+          ? ` ${d.unmappedUnits} apartment(s) skipped — not mapped to a room type (Settings).`
+          : "";
+        const base = `Pushed ${d.pushed ?? 0} night(s) across ${d.units ?? 0} apartment(s) to MiniHotel (${d.days ?? days}-day horizon).${skipped}`;
+        const v = d.verified;
+        if (v && v.checked > 0 && v.matched === v.checked) {
+          setSyncMsg({ ok: true, text: `${base} ✓ Verified in MiniHotel — ${v.sample}.` });
+        } else if (v && v.checked > 0 && v.matched < v.checked) {
+          setSyncMsg({
+            ok: false,
+            text: `${base} ⚠ Read-back didn't match: ${v.sample}. ${v.note ?? ""}`.trim(),
+          });
+        } else {
+          setSyncMsg({ ok: true, text: base });
+        }
       } else {
         const reason =
           d.message || (d.errors && d.errors.length ? d.errors.slice(0, 2).join(" | ") : "push failed");

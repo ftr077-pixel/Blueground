@@ -556,6 +556,15 @@ export interface PushResult {
   errors: string[];
   requestId?: string; // X-Request-ID — MiniHotel support needs it to trace issues
   message?: string; // set when we didn't even attempt (not configured / unmapped / no rate code)
+  /** Write-then-readback proof: after pushing, we re-read one date from MiniHotel
+   *  under the SAME price list and compare. checked=0 means we couldn't verify. */
+  verified?: {
+    date: string;
+    checked: number; // room types compared on that date
+    matched: number; // how many MiniHotel reported == what we wrote
+    sample?: string; // human-readable example, e.g. "TLV1: wrote ₪800, MiniHotel reports ₪800"
+    note?: string;
+  };
 }
 
 /**
@@ -697,6 +706,17 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
     }
 
     const attempted = [...byType.values()].reduce((s, l) => s + l.length, 0);
+
+    // Write-then-readback proof: MiniHotel accepted the request — but did the
+    // price actually land? Re-read ONE pushed date back from MiniHotel under the
+    // SAME price list and compare to what we sent. This is what tells the
+    // operator whether "doesn't appear in MiniHotel" is a failed write or just a
+    // different rate plan being shown in their UI.
+    let verified: PushResult["verified"];
+    if (sentPrices && errors.length === 0) {
+      verified = await verifyPushedPrices(conn, byType);
+    }
+
     return {
       ok: errors.length === 0,
       pushed: errors.length ? Math.max(0, attempted - errors.length) : attempted,
@@ -705,6 +725,7 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
       warnings,
       errors,
       requestId,
+      verified,
     };
   } catch (e) {
     const msg =
@@ -712,6 +733,65 @@ export async function pushRatesToMiniHotel(items: RatePushItem[]): Promise<PushR
     return { ok: false, ...empty, roomTypes: byType.size, unmappedUnits: unmapped.size, errors: [msg] };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Read back ONE pushed date from MiniHotel under the same price list we wrote to,
+ * and compare the returned prices to what we sent. Best-effort: any failure
+ * returns checked:0 (verification unavailable), never throws. Reads the exact
+ * `conn.rateCode` list — so a match proves the write landed in THAT list, even
+ * if the operator's MiniHotel screen is showing a different rate plan.
+ */
+async function verifyPushedPrices(
+  conn: MiniHotelConnection,
+  byType: Map<string, RatePushItem[]>,
+): Promise<PushResult["verified"]> {
+  // Expected price per room type on the earliest pushed date that has a price.
+  let date: string | null = null;
+  for (const list of byType.values()) {
+    for (const it of list) {
+      if (it.price != null && (date == null || it.date < date)) date = it.date;
+    }
+  }
+  if (!date) return { date: "", checked: 0, matched: 0, note: "no priced night to verify" };
+  const expected = new Map<string, number>(); // ROOMTYPE(upper) -> price
+  for (const [code, list] of byType) {
+    const hit = list.find((it) => it.date === date && it.price != null);
+    if (hit) expected.set(code.trim().toUpperCase(), Math.round(hit.price as number));
+  }
+
+  try {
+    const xml = await fetchBulkAri(conn, date, date); // uses conn.rateCode = the list we wrote
+    const cells = parseBulkAri(xml);
+    const got = new Map<string, number>();
+    for (const c of cells) {
+      if (c.date === date && c.price != null) got.set(c.roomType.trim().toUpperCase(), c.price);
+    }
+    let matched = 0;
+    let sample: string | undefined;
+    let mismatch: string | undefined;
+    for (const [code, want] of expected) {
+      const have = got.get(code);
+      if (have != null && Math.round(have) === want) {
+        matched++;
+        sample ??= `${code}: wrote ₪${want}, MiniHotel reports ₪${have}`;
+      } else {
+        mismatch ??= `${code}: wrote ₪${want}, MiniHotel reports ${have != null ? `₪${have}` : "no price"}`;
+      }
+    }
+    return {
+      date,
+      checked: expected.size,
+      matched,
+      sample: matched === expected.size ? sample : (mismatch ?? sample),
+      note:
+        matched < expected.size
+          ? "MiniHotel may be showing a different rate plan than the list we wrote, or its feed is cached — re-check that price list in a minute."
+          : undefined,
+    };
+  } catch {
+    return { date, checked: 0, matched: 0, note: "couldn't read back (verification unavailable)" };
   }
 }
 
