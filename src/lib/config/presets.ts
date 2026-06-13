@@ -55,12 +55,46 @@ const STR_PATCH: RuleOverrides = {
 const MTR_PATCH: RuleOverrides = {
   lastMinute: { enabled: false },
   dayOfWeek: { enabled: false },
-  adjacent: { enabled: false },
-  orphanDayPrices: { enabled: false },
+  // The operator's live PriceLabs mid-term setup (the configuration screenshot):
+  // 40% off 3–7-night orphan gaps, a 30% adjacent discount 2 days either side of
+  // a booking, and the full custom min-stay hierarchy — fixed 3/3 default, the
+  // far-out 4→28-night ladder, gap−1 orphan fills on 4–28-night gaps, and a
+  // 7-night adjacent-after rule. Mirrors PRICING_RULES so "apply preset" and
+  // "reset to defaults" land on the same place.
+  orphanDayPrices: {
+    enabled: true,
+    ranges: [
+      { fromGapNights: 3, upToGapNights: 7, mode: "percent", weekday: -0.4, weekend: -0.4, withinDays: null },
+    ],
+  },
+  adjacent: { enabled: true, mode: "percent", value: -0.3, daysBefore: 2, daysAfter: 2, applyOnWeekends: true },
   farOut: { enabled: true, mode: "gradual" },
   seasonality: { enabled: true, sensitivity: "conservative" },
   demandEvents: { enabled: true, sensitivity: "conservative" },
-  minStayRules: { mode: "recommended", recommendedFlavor: "mtr", adaptiveOccupancy: { enabled: true } },
+  minStayRules: {
+    mode: "custom",
+    recommendedFlavor: "mtr",
+    highestAllowed: 90,
+    custom: { rule: "fixed", weekday: 3, weekend: 3, bookingValue: 0 },
+    lastMinute: [],
+    farOut: [
+      { beyondDays: 2, weekday: 4, weekend: 4 },
+      { beyondDays: 4, weekday: 7, weekend: 7 },
+      { beyondDays: 7, weekday: 14, weekend: 14 },
+      { beyondDays: 14, weekday: 21, weekend: 21 },
+      { beyondDays: 20, weekday: 28, weekend: 28 },
+    ],
+    adjacent: {
+      enabled: true,
+      afterNights: 7,
+      afterWithinDays: 2,
+      afterLeadFromDays: 7,
+      afterLeadToDays: 30,
+      beforeFlushFit: false,
+    },
+    orphanGap: { enabled: true, strategy: "gapMinus1", fixedNights: 1, minGapNights: 4, maxGapNights: 28, lowestAllowed: 1 },
+    adaptiveOccupancy: { enabled: true },
+  },
   safetyMinPrice: { enabled: true, pctOfLastYear: 1.1 },
   freezeUnavailable: { enabled: true },
   bookingRecency: { enabled: true },
@@ -93,10 +127,10 @@ export const SMART_PRESETS: Record<PropertyType, SmartPreset> = {
     blurb: "30+ night economics: protect monthly rates, ignore nightly turnover machinery.",
     patch: MTR_PATCH,
     items: [
-      { label: "Last-minute / day-of-week / orphan OFF", why: "You don't discount a 30+ night stay because arrival is near." },
-      { label: "Conservative seasonality & demand", why: "Long-stay demand is smoother than nightly STR swings." },
-      { label: "Far-out premium + Safety Minimum Price", why: "Hold distant inventory and floor it at last year's realized rates." },
-      { label: "Freeze unavailable + booking recency", why: "No cancel-rebook-cheaper; auto-revive listings going cold." },
+      { label: "Custom min-stay: 3-night default, far-out 4→28 ladder, gap−1 orphan fills", why: "Your live PriceLabs minimum-stay setup — distant dates require longer commitments, short gaps stay bookable." },
+      { label: "Orphan-day 40% off 3–7-night gaps + 30% adjacent discount", why: "Fill the short scraps between mid-term stays instead of leaving them empty." },
+      { label: "Last-minute & day-of-week OFF; conservative seasonality & demand", why: "You don't discount a 30+ night stay for near arrival, and long-stay demand is smoother." },
+      { label: "Far-out premium, Safety Minimum Price, freeze + booking recency", why: "Hold distant inventory, floor it at last year's realized rates, and auto-revive cold listings." },
     ],
   },
   hotel_independent: {
