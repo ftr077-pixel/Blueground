@@ -53,7 +53,9 @@ const STR_PATCH: RuleOverrides = {
 };
 
 const MTR_PATCH: RuleOverrides = {
-  lastMinute: { enabled: false },
+  // Market Driven (Balanced): track the market's near-arrival discounting on
+  // open dates over the 30 days to arrival (uses live market data where synced).
+  lastMinute: { enabled: true, mode: "marketDriven", marketFlavor: "balanced", windowDays: 30 },
   dayOfWeek: { enabled: false },
   // The operator's live PriceLabs mid-term setup (the configuration screenshot):
   // 40% off 3–7-night orphan gaps, a 30% adjacent discount 2 days either side of
@@ -132,7 +134,7 @@ export const SMART_PRESETS: Record<PropertyType, SmartPreset> = {
     items: [
       { label: "Custom min-stay: 3-night default, far-out 4→28 ladder, gap−1 orphan fills", why: "Your live PriceLabs minimum-stay setup — distant dates require longer commitments, short gaps stay bookable." },
       { label: "Orphan-day 40% off 3–7-night gaps + 30% adjacent discount", why: "Fill the short scraps between mid-term stays instead of leaving them empty." },
-      { label: "Last-minute & day-of-week OFF; conservative seasonality & demand", why: "You don't discount a 30+ night stay for near arrival, and long-stay demand is smoother." },
+      { label: "Last-minute: Market Driven (Balanced); day-of-week off; conservative seasonality & demand", why: "Match the market's near-arrival discounting on open nights to fill short gaps; long-stay demand stays smooth." },
       { label: "Far-out premium, Safety Minimum Price, freeze + booking recency", why: "Hold distant inventory, floor it at last year's realized rates, and auto-revive cold listings." },
     ],
   },

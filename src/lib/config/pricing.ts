@@ -520,13 +520,15 @@ export const PRICING_RULES: PricingRulesConfig = {
     cap: 0.08,
     rampDays: 120,
   },
-  /** Last-minute discount — OFF for MTR (long stays aren't discounted for near
-   *  arrival). Shape mirrors the PriceLabs default: gradual 30% over 15 days. */
+  /** Last-minute prices — Market Driven (Balanced): tracks the market's
+   *  near-arrival discounting over the 30 days to arrival ("Hyper Local Pulse"),
+   *  using live market data where synced. `value` is the gradual fallback shape
+   *  used only when no market data is available. */
   lastMinute: {
-    enabled: false,
-    mode: "gradual",
+    enabled: true,
+    mode: "marketDriven",
     marketFlavor: "balanced",
-    windowDays: 15,
+    windowDays: 30,
     value: -0.3,
   },
   /** Adjacent factor (PriceLabs): adjust the open days right before/after a
