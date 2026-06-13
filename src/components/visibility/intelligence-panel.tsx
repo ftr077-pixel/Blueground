@@ -109,6 +109,7 @@ interface SuggestionRow {
   unitId: string | null;
   label: string;
   area: string;
+  checkIn: string | null;
   nights: number;
   direction: "increase" | "decrease";
   currentNightly: number;
@@ -120,10 +121,12 @@ interface SuggestionRow {
   confidence: "high" | "medium" | "low";
   n: number;
   profitDelta: number | null;
+  floored: boolean;
 }
 interface SuggestionBatch {
   scanned: number;
   hiddenLowConfidence: number;
+  appliedPending: number;
   suggestions: SuggestionRow[];
 }
 
@@ -177,6 +180,7 @@ function SuggestionsQueue({
             <span className="text-[11px] text-muted-foreground">
               {batch.suggestions.length} of {batch.scanned} listings have a move ≥2%
               {batch.hiddenLowConfidence > 0 && ` · ${batch.hiddenLowConfidence} low-confidence hidden`}
+              {batch.appliedPending > 0 && ` · ${batch.appliedPending} applied, awaiting scan`}
             </span>
           )}
         </div>
@@ -192,8 +196,13 @@ function SuggestionsQueue({
         ) : !batch || batch.suggestions.length === 0 ? (
           <p className="text-[11px] text-muted-foreground">
             No actionable suggestions right now — prices look aligned with the market
-            {batch && batch.hiddenLowConfidence > 0
-              ? ` (${batch.hiddenLowConfidence} segment(s) still learning).`
+            {batch && (batch.appliedPending > 0 || batch.hiddenLowConfidence > 0)
+              ? ` (${[
+                  batch.appliedPending > 0 ? `${batch.appliedPending} applied, awaiting scan` : null,
+                  batch.hiddenLowConfidence > 0 ? `${batch.hiddenLowConfidence} still learning` : null,
+                ]
+                  .filter(Boolean)
+                  .join("; ")}).`
               : "."}
           </p>
         ) : (
@@ -203,6 +212,9 @@ function SuggestionsQueue({
                 <tr>
                   <th className="px-3 py-2 text-left">Listing</th>
                   <th className="px-3 py-2 text-left">Area</th>
+                  <th className="px-3 py-2 text-left" title="Check-in (stay start) date this suggestion is computed for — the soonest scanned window">
+                    Check-in
+                  </th>
                   <th className="px-3 py-2 text-right">Now ₪/n</th>
                   <th className="px-3 py-2 text-right">Suggested</th>
                   <th className="px-3 py-2 text-right">Δ</th>
@@ -228,9 +240,18 @@ function SuggestionsQueue({
                         </button>
                       </td>
                       <td className="px-3 py-2 text-muted-foreground">{s.area}</td>
+                      <td className="px-3 py-2 font-mono text-muted-foreground">{s.checkIn ?? "soonest"}</td>
                       <td className="px-3 py-2 text-right font-mono">₪{s.currentNightly}</td>
                       <td className="px-3 py-2 text-right font-mono font-semibold">
                         ₪{done ? applied[s.listingId] : s.suggestedNightly}
+                        {s.floored && (
+                          <span
+                            className="ml-1 align-middle text-[9px] font-normal uppercase tracking-wide text-muted-foreground"
+                            title="Capped at your margin floor — the curve pointed lower, but a deeper cut would price below cost"
+                          >
+                            floor
+                          </span>
+                        )}
                       </td>
                       <td
                         className={cn(

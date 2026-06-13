@@ -708,9 +708,17 @@ export function getDashboard() {
       urgentDays: num("pr_urgent_days", 14),
       relaxedDays: num("pr_relaxed_days", 45),
       stepPct: num("pr_step_pct", 5),
-      floorMargin: num("pr_floor_margin", 10),
+      floorMargin: floorMarginPct(),
     },
   };
+}
+
+/** Configured margin-floor % ("Pricing rules → Floor margin"; default 10).
+ *  Exported so the price→position learner clamps its suggestions at the SAME
+ *  floor recommend() uses — neither surface should ever recommend below cost. */
+export function floorMarginPct(): number {
+  const v = getSetting("pr_floor_margin");
+  return v != null && v !== "" ? Number(v) : 10;
 }
 
 // What the scraper box pulls: active profiles, each with its active listings.

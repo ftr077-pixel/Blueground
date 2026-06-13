@@ -56,6 +56,9 @@ export interface ElasticityResult {
     deltaPct: number | null;
     expectedRank: number | null;
     reachable: boolean;
+    /** True when the curve pointed below the margin floor and we held at it —
+     *  the suggested price (and any drop) is the floor, not the raw curve target. */
+    floored: boolean;
   } | null;
   marginal: {
     positionsPer100Nightly: number | null;
