@@ -1510,6 +1510,16 @@ export function EngineRulesCard() {
               ? select("Flavor", "lastMinFlavor", FLAVORS, "w-36")
               : num(f.lastMinMode === "fixed" ? "Price ₪" : "Value % (− disc / + prem)", "lastMinValue", "w-28")}
           </div>
+          <p className="text-[10px] text-muted-foreground/70">
+            <b>% Gradual</b> ramps to the full value at day 0 (35% over 7 days ≈ 5%/day). <b>%
+            Flat</b> applies the whole % across the window (25% within 5 days). <b>Fixed ₪</b> pins
+            a price across the window (₪70 within 10 days). <b>Market driven</b> tracks the
+            market&apos;s near-arrival discounting — <b>Balanced</b> matches it, <b>Conservative</b>
+            is gentler, <b>Aggressive</b> deeper — and uses live market data where synced (else it
+            falls back to the gradual shape). Turn the toggle off for no last-minute adjustment.
+            Window caps at 90 days. Off by default for mid-term (you don&apos;t discount a 30+ night
+            stay for near arrival).
+          </p>
         </div>
 
         <div className={sectionBox}>
