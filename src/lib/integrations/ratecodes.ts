@@ -392,11 +392,12 @@ export async function testWriteCodes(
     };
   }
 
-  // Candidates: saved code, operator-pasted, then STD + *ALL (the codes the
-  // portal-linkage screen exposes). Deduped, capped.
+  // Candidates: saved code, operator-pasted, then STD + ILS + *ALL (the codes
+  // the portal-linkage screen exposes — STD description, ILS currency, *ALL
+  // wildcard). Deduped, capped.
   const seen = new Set<string>();
   const list: string[] = [];
-  for (const raw of [conn.rateCode, ...candidates, "STD", "*ALL"]) {
+  for (const raw of [conn.rateCode, ...candidates, "STD", "ILS", "*ALL"]) {
     const v = (raw ?? "").trim();
     if (!v) continue;
     const k = v.toUpperCase();
