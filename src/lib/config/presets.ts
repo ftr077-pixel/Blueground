@@ -93,7 +93,10 @@ const MTR_PATCH: RuleOverrides = {
       beforeFlushFit: false,
     },
     orphanGap: { enabled: true, strategy: "gapMinus1", fixedNights: 1, minGapNights: 4, maxGapNights: 28, lowestAllowed: 1 },
-    adaptiveOccupancy: { enabled: true },
+    // Off (not in the operator's setup): it shortens the min-stay below the
+    // 3-night default when a listing runs below market occupancy, which is what
+    // produced the unexpected 1-night minimums.
+    adaptiveOccupancy: { enabled: false },
   },
   safetyMinPrice: { enabled: true, pctOfLastYear: 1.1 },
   freezeUnavailable: { enabled: true },
