@@ -641,7 +641,10 @@ export const PRICING_RULES: PricingRulesConfig = {
       beforeFlushFit: false,
     },
     orphanGap: { enabled: true, strategy: "gapMinus1", fixedNights: 1, minGapNights: 4, maxGapNights: 28, lowestAllowed: 1 },
-    adaptiveOccupancy: { enabled: true },
+    // Off: not part of the operator's documented setup. When on, it shortened
+    // the min-stay below the 3-night default for listings running below market
+    // occupancy (the source of the unexpected 1-night minimums).
+    adaptiveOccupancy: { enabled: false },
   },
   /** Minimum-stay hierarchy extras (the demand-flex tiers live in PRICING_AGENT). */
   minStayHierarchy: {
