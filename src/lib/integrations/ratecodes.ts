@@ -1,5 +1,9 @@
 import { getMiniHotelConnection, miniHotelEndpoints } from "@/lib/repos/integrations";
-import { buildBulkAriRequest, extractMiniHotelErrors } from "@/lib/integrations/minihotel";
+import {
+  buildBulkAriRequest,
+  extractMiniHotelErrors,
+  fetchRoomStatusRange,
+} from "@/lib/integrations/minihotel";
 
 /**
  * Discover which rate-code / price-list values MiniHotel actually accepts.
@@ -81,7 +85,7 @@ export function extractListNames(text: string): string[] {
   const x = decodeEntities(text);
   const out = new Set<string>();
   const re =
-    /\b(?:rateCode|RateCode|PriceList|priceList|pricelist|PriceListName|ListName|listName|RateName)\s*=\s*"([^"]{1,40})"/g;
+    /\b(?:rateCode|RateCode|PriceList|priceList|pricelist|PriceListName|ListName|listName|RateName|RatePlan|ratePlan)\s*=\s*"([^"]{1,40})"/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(x))) {
     const v = m[1].trim();
@@ -89,6 +93,28 @@ export function extractListNames(text: string): string[] {
     out.add(v);
   }
   return [...out];
+}
+
+/**
+ * Harvest rate-code / price-list names from the operator's OWN reservations —
+ * the ground truth. Each booking is sold under a real price list, so its
+ * rateCode is exactly what we must write to. Reads the Room Status reservation
+ * list (the call that already works for occupancy) over the next ~6 months and
+ * pulls any rate-code-like attribute. Returns the names plus one raw reservation
+ * tag, so even if no code is present we can see what fields the hotel exposes.
+ */
+async function harvestReservationRateCodes(
+  conn: ReturnType<typeof getMiniHotelConnection>,
+): Promise<{ codes: string[]; sampleTag?: string }> {
+  try {
+    const xml = await fetchRoomStatusRange(conn, todayUTC(), plusDays(todayUTC(), 180));
+    const codes = extractListNames(xml);
+    const sampleTag =
+      (decodeEntities(xml).match(/<Reservation\b[^>]*?\/?>/i)?.[0] ?? "").slice(0, 400) || undefined;
+    return { codes, sampleTag };
+  } catch {
+    return { codes: [] };
+  }
 }
 
 async function probeOne(
@@ -139,9 +165,19 @@ async function probeOne(
   }
 }
 
-export async function discoverRateCodes(
-  extra: string[] = [],
-): Promise<{ ok: boolean; message?: string; results: RateCodeProbe[]; namesSeen: string[] }> {
+export interface DiscoverResult {
+  ok: boolean;
+  message?: string;
+  results: RateCodeProbe[];
+  /** Price-list names the ARI feed mentioned (auto-probed). */
+  namesSeen: string[];
+  /** Rate codes harvested from the operator's real reservations (auto-probed). */
+  fromReservations: string[];
+  /** A raw reservation tag — shown when no code was found, to reveal the fields. */
+  reservationSample?: string;
+}
+
+export async function discoverRateCodes(extra: string[] = []): Promise<DiscoverResult> {
   const conn = getMiniHotelConnection();
   if (!conn.username || !conn.password || !conn.hotelId) {
     return {
@@ -149,22 +185,31 @@ export async function discoverRateCodes(
       message: "Set the MiniHotel connection (username, password, hotel id) first.",
       results: [],
       namesSeen: [],
+      fromReservations: [],
     };
   }
 
-  // One raw wildcard read first: if the feed itself names price lists, those
-  // names join the probe list — a custom list name is usually only
-  // discoverable this way.
+  // Two ground-truth sources before guessing conventions:
+  //   (a) one raw wildcard ARI read — if the feed names price lists, use them;
+  //   (b) the operator's OWN reservations — each carries the rate code it was
+  //       booked under, which is exactly the price list to write to.
   let namesSeen: string[] = [];
   const raw = await fetchRawAri(conn, "ALL");
   if (raw) namesSeen = extractListNames(raw);
+  const harvest = await harvestReservationRateCodes(conn);
 
-  // Candidates: the saved code first, then operator-pasted, then names the
-  // feed mentioned, then the common conventions — deduped (case-insensitive),
-  // capped. "ALL" is probed too so it shows up clearly as a wildcard.
+  // Candidates: saved code → operator-pasted → reservation codes → feed names →
+  // common conventions → "ALL" (shown as wildcard). Deduped, capped.
   const seen = new Set<string>();
   const candidates: string[] = [];
-  for (const raw2 of [conn.rateCode, ...extra, ...namesSeen, ...DEFAULT_CANDIDATES, "ALL"]) {
+  for (const raw2 of [
+    conn.rateCode,
+    ...extra,
+    ...harvest.codes,
+    ...namesSeen,
+    ...DEFAULT_CANDIDATES,
+    "ALL",
+  ]) {
     const v = (raw2 ?? "").trim();
     if (!v) continue;
     const k = v.toUpperCase();
@@ -187,5 +232,12 @@ export async function discoverRateCodes(
     error: 4,
   };
   results.sort((a, b) => order[a.status] - order[b.status]);
-  return { ok: true, results, namesSeen };
+  return {
+    ok: true,
+    results,
+    namesSeen,
+    fromReservations: harvest.codes,
+    // Only worth showing the raw tag when nothing usable turned up.
+    reservationSample: harvest.codes.length === 0 ? harvest.sampleTag : undefined,
+  };
 }
