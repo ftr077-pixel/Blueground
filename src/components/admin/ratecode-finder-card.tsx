@@ -16,6 +16,11 @@ interface Probe {
   status: Status;
   detail: string;
 }
+interface WriteProbe {
+  code: string;
+  writeValid: boolean;
+  detail: string;
+}
 
 const VARIANT: Record<Status, "success" | "warning" | "info" | "muted" | "danger"> = {
   valid: "success",
@@ -41,6 +46,8 @@ export function RateCodeFinderCard() {
   const [reservationSample, setReservationSample] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usedCode, setUsedCode] = useState<string | null>(null);
+  const [writeResults, setWriteResults] = useState<WriteProbe[] | null>(null);
+  const [writeCell, setWriteCell] = useState<string | null>(null);
 
   async function discover() {
     setBusy(true);
@@ -50,6 +57,7 @@ export function RateCodeFinderCard() {
     setFromReservations([]);
     setReservationSample(null);
     setUsedCode(null);
+    setWriteResults(null);
     try {
       const r = await fetch("/api/integrations/minihotel/ratecodes", {
         method: "POST",
@@ -70,6 +78,37 @@ export function RateCodeFinderCard() {
         setFromReservations(d.fromReservations ?? []);
         setReservationSample(d.reservationSample ?? null);
       } else setError(d.message || "Could not probe rate codes.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "request failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Real write test: does an actual Reverse-ARI no-op write (current price
+  // written back) to find which price list ACCEPTS writes. The truthful test.
+  async function testWrite() {
+    setBusy(true);
+    setError(null);
+    setWriteResults(null);
+    setWriteCell(null);
+    setUsedCode(null);
+    try {
+      const r = await fetch("/api/integrations/minihotel/ratecodes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "write", candidates: extra }),
+      });
+      const d = (await r.json()) as {
+        ok: boolean;
+        message?: string;
+        testCell?: string;
+        results?: WriteProbe[];
+      };
+      if (d.ok) {
+        setWriteResults(d.results ?? []);
+        setWriteCell(d.testCell ?? null);
+      } else setError(d.message || "Could not write-test rate codes.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "request failed");
     } finally {
@@ -119,9 +158,19 @@ export function RateCodeFinderCard() {
           </label>
           <button type="button" disabled={busy} onClick={discover} className={btn}>
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-            Discover
+            Discover (read)
+          </button>
+          <button type="button" disabled={busy} onClick={testWrite} className={btn} title="Does a real no-op write to find which price list accepts writes">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+            Test write
           </button>
         </div>
+        <p className="text-[10px] text-muted-foreground">
+          <span className="font-medium">Test write</span> is the truthful test for pushing: it writes one
+          night&apos;s current price back to MiniHotel under each candidate (a no-op) and reports which the
+          PMS accepts. Reads and writes use different code spaces — a code can read-fail yet write-fine
+          (e.g. <span className="font-mono">STD</span>).
+        </p>
 
         {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
 
@@ -195,6 +244,60 @@ export function RateCodeFinderCard() {
         {results && results.length === 0 && (
           <p className="text-[11px] text-muted-foreground">No candidates were testable.</p>
         )}
+
+        {writeResults && (
+          <div className="space-y-1.5 rounded-lg border border-border bg-muted/20 p-2.5">
+            <p className="text-[11px] font-medium text-foreground">
+              Write test {writeCell ? <span className="font-normal text-muted-foreground">· tested on {writeCell}</span> : null}
+            </p>
+            {writeResults.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No codes were write-testable.</p>
+            ) : (
+              <table className="w-full min-w-[420px] border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-border text-left text-muted-foreground">
+                    <th className="py-2 pr-3 font-medium">Code</th>
+                    <th className="py-2 pr-3 font-medium">Write</th>
+                    <th className="py-2 pr-3 font-medium">Detail</th>
+                    <th className="py-2 font-medium text-right">Use</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {writeResults.map((p) => (
+                    <tr key={p.code} className="border-b border-border/40">
+                      <td className="py-1.5 pr-3 font-medium tabular-nums">{p.code}</td>
+                      <td className="py-1.5 pr-3">
+                        <Badge variant={p.writeValid ? "success" : "muted"}>
+                          {p.writeValid ? "writes ✓" : "rejected"}
+                        </Badge>
+                      </td>
+                      <td className="py-1.5 pr-3 text-muted-foreground">{p.detail}</td>
+                      <td className="py-1.5 text-right">
+                        {p.writeValid ? (
+                          usedCode === p.code ? (
+                            <span className="inline-flex items-center gap-1 text-[hsl(var(--success))]">
+                              <Check className="h-3.5 w-3.5" /> set
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => useCode(p.code)}
+                              className="rounded-md border border-border bg-card px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50"
+                            >
+                              Use
+                            </button>
+                          )
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
         {usedCode && (
           <p className="text-[11px] text-muted-foreground">
             Saved <span className="font-medium">{usedCode}</span> as the rate code. Go to Rates Calendar

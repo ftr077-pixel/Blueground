@@ -1,6 +1,13 @@
-import { getMiniHotelConnection, miniHotelEndpoints } from "@/lib/repos/integrations";
+import {
+  getMiniHotelConnection,
+  miniHotelEndpoints,
+  getMiniHotelMapping,
+  getExcludedRoomCodes,
+} from "@/lib/repos/integrations";
 import {
   buildBulkAriRequest,
+  parseBulkAri,
+  fetchBulkAri,
   extractMiniHotelErrors,
   fetchRoomStatusRange,
   fetchReservations,
@@ -260,4 +267,150 @@ export async function discoverRateCodes(extra: string[] = []): Promise<DiscoverR
     // Only worth showing the raw tag when nothing usable turned up.
     reservationSample: harvest.codes.length === 0 ? harvest.sampleTag : undefined,
   };
+}
+
+// ----------------------------------------------------- write-validity test
+//
+// The read-probe above (Bulk ARI) tests the PORTAL read code space, which only
+// answers to the *ALL wildcard — so it falsely reports real WRITE price lists
+// (e.g. "STD") as "not defined". The only true test of a write code is an actual
+// Reverse-ARI write. This does a near-no-op: it reads one mapped room's CURRENT
+// price for a near date and writes that SAME number back under each candidate
+// price list, then checks whether MiniHotel rejected it with "price list
+// doesn't exist". A valid code → the price is unchanged; an invalid code → the
+// write is rejected and nothing changes.
+
+export interface WriteProbe {
+  code: string;
+  writeValid: boolean;
+  detail: string;
+}
+
+async function probeWriteOne(
+  conn: ReturnType<typeof getMiniHotelConnection>,
+  url: string,
+  code: string,
+  roomType: string,
+  date: string,
+  price: number,
+): Promise<WriteProbe> {
+  const body = [{ RoomTypeCode: roomType, Dates: [{ Date: date, Rates: [{ PriceList: code, Price: price }] }] }];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        User: conn.username,
+        Password: conn.password,
+        hotel_id: conn.hotelId,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) return { code, writeValid: false, detail: `HTTP ${res.status}` };
+    // Single-code write → any "price list … doesn't exist" is about THIS code.
+    if (/price\s*list\s*'[^']*'\s*doesn'?t\s*exists?/i.test(text)) {
+      return { code, writeValid: false, detail: "write rejected — price list doesn't exist" };
+    }
+    let errs = 0;
+    try {
+      const j = JSON.parse(text);
+      if (Array.isArray(j?.Errors)) errs = j.Errors.length;
+    } catch {
+      /* non-JSON */
+    }
+    return {
+      code,
+      writeValid: true,
+      detail: errs ? `accepted ✓ — price written (${errs} other error(s))` : "accepted ✓ — price written",
+    };
+  } catch (e) {
+    return { code, writeValid: false, detail: e instanceof Error ? e.message : "error" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function testWriteCodes(
+  candidates: string[] = [],
+): Promise<{ ok: boolean; message?: string; testCell?: string; results: WriteProbe[] }> {
+  const conn = getMiniHotelConnection();
+  if (!conn.username || !conn.password || !conn.hotelId) {
+    return { ok: false, message: "Set the MiniHotel connection (username, password, hotel id) first.", results: [] };
+  }
+
+  // Mapped, non-excluded room types — we can only safely test on a real room.
+  const excluded = getExcludedRoomCodes();
+  const mapped = [
+    ...new Set(
+      getMiniHotelMapping()
+        .filter((m) => m.roomType)
+        .map((m) => (m.roomType as string).trim())
+        .filter(Boolean),
+    ),
+  ].filter((c) => !excluded.has(c.toUpperCase()));
+  if (mapped.length === 0) {
+    return {
+      ok: false,
+      message: "Map at least one apartment to a MiniHotel room type first (Settings → apartment mapping).",
+      results: [],
+    };
+  }
+  const mappedSet = new Set(mapped.map((c) => c.toUpperCase()));
+
+  // A real (room, date, price) to write back unchanged — a near-no-op probe.
+  let testRoom: string | null = null;
+  let testDate = "";
+  let testPrice = 0;
+  for (const off of [45, 14, 90, 3]) {
+    const date = plusDays(todayUTC(), off);
+    let xml: string;
+    try {
+      xml = await fetchBulkAri(conn, date, date);
+    } catch {
+      continue;
+    }
+    const hit = parseBulkAri(xml).find(
+      (c) => c.price != null && mappedSet.has(c.roomType.trim().toUpperCase()),
+    );
+    if (hit && hit.price != null) {
+      testRoom = hit.roomType;
+      testDate = hit.date;
+      testPrice = hit.price;
+      break;
+    }
+  }
+  if (!testRoom) {
+    return {
+      ok: false,
+      message:
+        "Couldn't find a synced price to test against — Pull from MiniHotel first, or set the code in the connection and push one night.",
+      results: [],
+    };
+  }
+
+  // Candidates: saved code, operator-pasted, then STD + *ALL (the codes the
+  // portal-linkage screen exposes). Deduped, capped.
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const raw of [conn.rateCode, ...candidates, "STD", "*ALL"]) {
+    const v = (raw ?? "").trim();
+    if (!v) continue;
+    const k = v.toUpperCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    list.push(v);
+    if (list.length >= 12) break;
+  }
+
+  const url = miniHotelEndpoints(conn.env).reverse;
+  const results: WriteProbe[] = [];
+  for (const code of list) {
+    results.push(await probeWriteOne(conn, url, code, testRoom, testDate, testPrice)); // sequential
+  }
+  results.sort((a, b) => (a.writeValid === b.writeValid ? 0 : a.writeValid ? -1 : 1));
+  return { ok: true, testCell: `${testRoom} @ ${testDate} (₪${testPrice})`, results };
 }
