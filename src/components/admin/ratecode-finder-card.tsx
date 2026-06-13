@@ -37,6 +37,8 @@ export function RateCodeFinderCard() {
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<Probe[] | null>(null);
   const [namesSeen, setNamesSeen] = useState<string[]>([]);
+  const [fromReservations, setFromReservations] = useState<string[]>([]);
+  const [reservationSample, setReservationSample] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usedCode, setUsedCode] = useState<string | null>(null);
 
@@ -45,6 +47,8 @@ export function RateCodeFinderCard() {
     setError(null);
     setResults(null);
     setNamesSeen([]);
+    setFromReservations([]);
+    setReservationSample(null);
     setUsedCode(null);
     try {
       const r = await fetch("/api/integrations/minihotel/ratecodes", {
@@ -57,10 +61,14 @@ export function RateCodeFinderCard() {
         message?: string;
         results?: Probe[];
         namesSeen?: string[];
+        fromReservations?: string[];
+        reservationSample?: string;
       };
       if (d.ok) {
         setResults(d.results ?? []);
         setNamesSeen(d.namesSeen ?? []);
+        setFromReservations(d.fromReservations ?? []);
+        setReservationSample(d.reservationSample ?? null);
       } else setError(d.message || "Could not probe rate codes.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "request failed");
@@ -117,11 +125,27 @@ export function RateCodeFinderCard() {
 
         {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
 
+        {fromReservations.length > 0 && (
+          <p className="text-[11px] text-[hsl(var(--success))]">
+            Found in your reservations (the real price list your bookings use):{" "}
+            <span className="font-mono">{fromReservations.join(", ")}</span> — probed below.
+          </p>
+        )}
         {namesSeen.length > 0 && (
           <p className="text-[11px] text-muted-foreground">
             Price-list names mentioned by the feed (auto-probed below):{" "}
             <span className="font-mono text-foreground">{namesSeen.join(", ")}</span>
           </p>
+        )}
+        {reservationSample && (
+          <details className="text-[11px] text-muted-foreground">
+            <summary className="cursor-pointer">
+              No rate code found in your reservations — show a raw booking (to spot the field)
+            </summary>
+            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded-md border border-border bg-muted/30 p-2 text-[10px]">
+              {reservationSample}
+            </pre>
+          </details>
         )}
 
         {results && results.length > 0 && (
