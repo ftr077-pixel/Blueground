@@ -6,7 +6,12 @@ import {
   type LeadBucket,
 } from "./config";
 import { evalCurve, invertCurve, isotonicNonDecreasing, type IsoCurve, type IsoInput } from "./isotonic";
-import { listingPriceHistory, listingState, marketObservations } from "./dataset";
+import {
+  listingPriceHistory,
+  listingState,
+  marketObservations,
+  pendingAppliedListingIds,
+} from "./dataset";
 import { demandSignal } from "./demand";
 import { listingOffset, ownElasticity } from "./longitudinal";
 import type {
@@ -18,11 +23,43 @@ import type {
   SegmentCurve,
   SegmentKey,
 } from "./types";
-import { costDefaults, getProfile, listListings } from "@/lib/repos/visibility";
+import {
+  costDefaults,
+  floorMarginPct,
+  getProfile,
+  listListings,
+  type TrackedListing,
+} from "@/lib/repos/visibility";
 
 const pageOf = (rank: number) => Math.max(1, Math.ceil(rank / WEB_PAGE_SIZE));
 const round = (n: number, step = 1) => Math.round(n / step) * step;
 const round1 = (n: number) => Math.round(n * 10) / 10;
+
+type CostDefaults = ReturnType<typeof costDefaults>;
+
+// Lowest ASKING nightly that still clears the configured margin floor for this
+// listing — the same floor recommend() enforces, expressed in nightly terms:
+//   minMonthlyRev = fixed / (1 − feePct − floorMargin)         [recommend()]
+//   askingNightly = minMonthlyRev / (30 · (1 − monthlyDiscount))
+// Null when economics are unknown (no rent) or the floor is infeasible. The
+// learner never recommends below this — buying a search slot at a loss isn't a
+// real move.
+function floorNightly(
+  listing: TrackedListing,
+  costs: CostDefaults,
+  floorPct: number,
+): number | null {
+  if (listing.monthlyRent == null) return null;
+  const feePct = (costs.bgFeePct + costs.airbnbFeePct) / 100;
+  const fixed =
+    (listing.utilities ?? costs.defaultUtilities) +
+    (listing.cleaningFee ?? costs.defaultCleaning) +
+    listing.monthlyRent;
+  const denom = 1 - feePct - floorPct / 100;
+  const disc = 1 - costs.monthlyDiscountPct / 100;
+  if (denom <= 0 || disc <= 0) return null;
+  return fixed / denom / (30 * disc);
+}
 
 function fitCurve(obs: Observation[]): IsoCurve {
   return isotonicNonDecreasing(
@@ -130,6 +167,8 @@ export function elasticityForListing(
   const curve = fitCurve(obs);
   const T = medianTotal || state.total || 0;
   const cur = state.currentNightly;
+  const costs = costDefaults();
+  const floorPct = floorMarginPct();
 
   // The market curve's rank for our current price, and a single-point calibration
   // to this listing: how many positions it sits above/below what its price implies
@@ -162,7 +201,13 @@ export function elasticityForListing(
     // the target rank.
     const qAdj = Math.min(0.999, Math.max(0.001, (targetRank - offsetRank) / T));
     const inv = invertCurve(curve, qAdj);
-    const targetNightly = round(inv.x, 5);
+    let targetNightly = round(inv.x, 5);
+    // Margin floor (parity with recommend()): never recommend below the price
+    // that still clears the configured floorMargin. The curve may point lower;
+    // we hold at the floor rather than chase a position into a loss.
+    const floorN = floorNightly(state.listing, costs, floorPct);
+    const floored = floorN != null && targetNightly < floorN;
+    if (floored) targetNightly = round(floorN, 5);
     ci = opts.bootstrap === false ? null : bootstrapTarget(obs, qAdj);
     target = {
       page: targetPage,
@@ -170,8 +215,11 @@ export function elasticityForListing(
       nightly: targetNightly,
       deltaNightly: cur != null ? Math.round(targetNightly - cur) : null,
       deltaPct: cur != null && cur > 0 ? round1(((targetNightly - cur) / cur) * 100) : null,
-      expectedRank: targetRank,
+      // At the floored price we sit higher than the target rank — report it
+      // honestly rather than the (unreachable-within-margin) target.
+      expectedRank: floored ? Math.round(listingRankAt(targetNightly) ?? targetRank) : targetRank,
       reachable: inv.clamped !== "low",
+      floored,
     };
   }
 
@@ -189,9 +237,8 @@ export function elasticityForListing(
   const before = cur != null ? Math.round(cur * nights) : null;
   const after = target?.nightly != null ? Math.round(target.nightly * nights) : null;
 
-  // Monthly profit impact (costs are monthly), using the shared cost defaults so
-  // the numbers match the Search & Profit / Profitability views.
-  const costs = costDefaults();
+  // Monthly profit impact (costs are monthly), using the shared cost defaults
+  // (computed above) so the numbers match the Search & Profit / Profitability views.
   const profitAt = (nightly: number | null): { profit: number | null; margin: number | null } => {
     const rent = state.listing.monthlyRent;
     if (nightly == null || rent == null) return { profit: null, margin: null };
@@ -222,6 +269,8 @@ export function elasticityForListing(
   let note: string | null = null;
   if (n === 0) note = "No market ladder captured for this segment yet — run scans to build it.";
   else if (n < LEARNING.nMin) note = `Learning — only ${n} market points in this segment; treat as indicative.`;
+  else if (target?.floored)
+    note = `Held at your ${floorPct}% margin floor — the curve points lower, but pricing there would fall below cost.`;
   else if (target && cur != null && target.deltaNightly != null && target.deltaNightly >= 0)
     note = `Already priced for page ${targetPage} or better — no cut needed.`;
   else if (target && !target.reachable)
@@ -299,6 +348,9 @@ export interface SuggestionRow {
   unitId: string | null;
   label: string;
   area: string;
+  /** The check-in (stay start) date this suggestion is computed for — the
+   *  soonest scanned window for the listing × stay length. Null = none scanned. */
+  checkIn: string | null;
   nights: number;
   direction: "increase" | "decrease";
   currentNightly: number;
@@ -312,6 +364,8 @@ export interface SuggestionRow {
   n: number;
   /** Monthly profit delta when listing economics are known (₪/mo), else null. */
   profitDelta: number | null;
+  /** Suggested price was clamped up to the margin floor (curve pointed lower). */
+  floored: boolean;
 }
 
 export interface SuggestionBatch {
@@ -320,6 +374,9 @@ export interface SuggestionBatch {
   minAbsPct: number;
   scanned: number;
   hiddenLowConfidence: number;
+  /** Would-be suggestions suppressed because the move was already applied and no
+   *  scan has re-priced the listing yet (shown as "applied, awaiting scan"). */
+  appliedPending: number;
   suggestions: SuggestionRow[];
 }
 
@@ -329,8 +386,10 @@ export function suggestionList(
   minAbsPct = 2,
 ): SuggestionBatch {
   const listings = listListings().filter((l) => l.active);
+  const pending = pendingAppliedListingIds(nights);
   const suggestions: SuggestionRow[] = [];
   let hiddenLowConfidence = 0;
+  let appliedPending = 0;
 
   for (const l of listings) {
     const r = elasticityForListing(l.id, { nights, targetPage, bootstrap: false });
@@ -344,6 +403,12 @@ export function suggestionList(
       hiddenLowConfidence++;
       continue;
     }
+    // Already acted on, awaiting the next scan to reflect the new live price —
+    // don't re-nag the same move (it shows in the scorecard as "awaiting scan").
+    if (pending.has(l.id)) {
+      appliedPending++;
+      continue;
+    }
     const profitDelta =
       r.economics && r.economics.profitBefore != null && r.economics.profitAfter != null
         ? r.economics.profitAfter - r.economics.profitBefore
@@ -353,6 +418,7 @@ export function suggestionList(
       unitId: l.unitId ?? null,
       label: r.label,
       area: r.segment.area,
+      checkIn: r.checkIn,
       nights,
       direction: deltaPct >= 0 ? "increase" : "decrease",
       currentNightly: r.current.nightly,
@@ -365,6 +431,7 @@ export function suggestionList(
       confidence: r.confidence.level,
       n: r.confidence.n,
       profitDelta,
+      floored: r.target.floored,
     });
   }
 
@@ -375,6 +442,7 @@ export function suggestionList(
     minAbsPct,
     scanned: listings.length,
     hiddenLowConfidence,
+    appliedPending,
     suggestions,
   };
 }

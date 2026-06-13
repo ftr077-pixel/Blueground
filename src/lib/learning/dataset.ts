@@ -249,3 +249,28 @@ export function listPriceChanges(listingId: string, limit = 50): PriceChange[] {
       .all(listingId, limit) as PriceChange[]
   );
 }
+
+// Listings whose most recent deliberate price change (for this stay length) is
+// newer than their most recent scan of it — i.e. we already applied a move and
+// the next scan hasn't re-priced the listing yet. Their live (scanned) price is
+// stale, so re-suggesting off it just re-nags a move the operator already made.
+// These are surfaced as "applied, awaiting scan" instead of as fresh suggestions.
+export function pendingAppliedListingIds(nights: number): Set<string> {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT lc.listing_id AS listingId
+         FROM (SELECT listing_id, MAX(ts) AS maxChange
+                 FROM listing_price_changes
+                WHERE nights = @nights
+                GROUP BY listing_id) lc
+         LEFT JOIN (SELECT listing_id, MAX(ts) AS maxScan
+                      FROM listing_snapshots
+                     WHERE nights = @nights
+                     GROUP BY listing_id) ls
+           ON ls.listing_id = lc.listing_id
+        WHERE ls.maxScan IS NULL OR lc.maxChange > ls.maxScan`,
+    )
+    .all({ nights }) as Array<{ listingId: string }>;
+  return new Set(rows.map((r) => r.listingId));
+}
