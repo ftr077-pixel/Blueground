@@ -122,7 +122,8 @@ interface SuggestionRow {
   suggestedPage: number;
   confidence: "high" | "medium" | "low";
   n: number;
-  profitDelta: number | null;
+  profitAfter: number | null;
+  marginAfter: number | null;
   floored: boolean;
 }
 interface SuggestionBatch {
@@ -240,7 +241,12 @@ function SuggestionsQueue({
                   <th className="px-3 py-2 text-right">Suggested</th>
                   <th className="px-3 py-2 text-right">Δ</th>
                   <th className="px-3 py-2 text-right">Page</th>
-                  <th className="px-3 py-2 text-right">Profit Δ/mo</th>
+                  <th
+                    className="px-3 py-2 text-right"
+                    title="Monthly profit if you apply this move — the same cost model as the Profit column in Search & Profit. Green = profitable, red = a loss."
+                  >
+                    Profit/mo
+                  </th>
                   <th className="px-3 py-2 text-left">Conf.</th>
                   <th className="px-3 py-2 text-right">Action</th>
                 </tr>
@@ -289,9 +295,24 @@ function SuggestionsQueue({
                         {s.currentPage ?? s.expectedPage ?? "—"}→{s.suggestedPage}
                       </td>
                       <td className="px-3 py-2 text-right font-mono">
-                        {s.profitDelta != null
-                          ? `${s.profitDelta >= 0 ? "+" : ""}₪${s.profitDelta.toLocaleString()}`
-                          : "—"}
+                        {s.profitAfter != null ? (
+                          <span
+                            className={
+                              s.profitAfter >= 0
+                                ? "text-[hsl(var(--success))]"
+                                : "text-[hsl(var(--danger))]"
+                            }
+                            title={`₪${s.profitAfter.toLocaleString()}/mo if you apply this move${
+                              s.marginAfter != null ? ` · ${s.marginAfter}% margin` : ""
+                            }`}
+                          >
+                            ₪{s.profitAfter.toLocaleString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground" title="Set this listing's rent to compute profit">
+                            —
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2">
                         {s.confidence === "high" ? (
