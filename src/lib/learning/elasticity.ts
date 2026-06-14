@@ -366,8 +366,12 @@ export interface SuggestionRow {
   suggestedPage: number;
   confidence: Confidence;
   n: number;
-  /** Monthly profit delta when listing economics are known (₪/mo), else null. */
-  profitDelta: number | null;
+  /** Resulting monthly profit AFTER the move (₪/mo, same cost model as Search &
+   *  Profit's Profit column). < 0 ⇒ the move prices into a loss. Null when rent
+   *  isn't set (profit can't be computed). This is a LEVEL, not a delta. */
+  profitAfter: number | null;
+  /** Resulting profit margin after the move (%), for the cell tooltip. */
+  marginAfter: number | null;
   /** Suggested price was clamped up to the margin floor (curve pointed lower). */
   floored: boolean;
 }
@@ -440,10 +444,6 @@ export function suggestionList(
       hiddenFloorBound++;
       continue;
     }
-    const profitDelta =
-      r.economics && r.economics.profitBefore != null && r.economics.profitAfter != null
-        ? r.economics.profitAfter - r.economics.profitBefore
-        : null;
     suggestions.push({
       listingId: l.id,
       unitId: l.unitId ?? null,
@@ -462,7 +462,8 @@ export function suggestionList(
       suggestedPage,
       confidence: r.confidence.level,
       n: r.confidence.n,
-      profitDelta,
+      profitAfter: r.economics?.profitAfter ?? null,
+      marginAfter: r.economics?.marginAfter ?? null,
       floored: r.target.floored,
     });
   }
