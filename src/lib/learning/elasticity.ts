@@ -424,8 +424,19 @@ export function suggestionList(
     // margin signal, not a move for this queue. A drop only belongs here if it
     // actually buys a better page within the floor — otherwise the target page
     // needs below-cost pricing and there's no real move.
-    const suggestedPage = r.target.expectedRank != null ? pageOf(r.target.expectedRank) : r.target.page;
     const curPage = r.current.page ?? r.current.expectedPage;
+    let suggestedPage = r.target.expectedRank != null ? pageOf(r.target.expectedRank) : r.target.page;
+    // A higher price can only hold or worsen search position — never improve it.
+    // suggestedPage is modeled (curve + offset); curPage prefers the latest scan.
+    // When the two disagree, the model's page at the higher price can come out
+    // *better* than the scanned current page (scan says page 2, but the curve says
+    // we're really a page-1 listing that's underpriced) — which would render a raise
+    // as a "2→1" visibility win it cannot deliver. Clamp so a raise shows the page
+    // holding, not gaining. This is the non-floored sibling of the floor-flipped
+    // raise already handled below (dc0460f covered only the floored case).
+    if (deltaPct >= 0 && curPage != null && suggestedPage < curPage) {
+      suggestedPage = curPage;
+    }
     if (deltaPct >= 0) {
       if (r.target.floored) {
         hiddenFloorBound++;
