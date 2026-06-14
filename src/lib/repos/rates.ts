@@ -1,7 +1,7 @@
 import { listUnits, type Unit } from "@/lib/repos/units";
 import { getDb } from "@/lib/db";
 import { windowReservationRevenue } from "@/lib/repos/reservations";
-import { quoteNight } from "@/lib/pricing/engine";
+import { quoteNight, type DateQuote } from "@/lib/pricing/engine";
 import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
 import type { PricingRulesConfig } from "@/lib/config/pricing";
@@ -106,6 +106,38 @@ export interface Calendar {
   defaultMinNights: number;
   rows: RateRow[];
   summary: CalendarSummary;
+}
+
+/** One line in the per-night price breakdown (the hover card on the calendar).
+ *  Ordered as the engine applies them: base → market factors → clamp → finishers
+ *  → calendar overrides, each carrying the running ₪ subtotal after it. */
+export type BreakdownKind = "base" | "market" | "customization" | "threshold" | "override";
+export interface BreakdownStep {
+  key: string;
+  label: string;
+  detail: string;
+  /** Signed % this step moved the running price; null for base / threshold / pin rows. */
+  pct: number | null;
+  /** Running ₪ price AFTER this step. */
+  subtotal: number;
+  kind: BreakdownKind;
+}
+export interface PriceBreakdown {
+  unitId: string;
+  date: string;
+  leadDays: number;
+  base: number;
+  steps: BreakdownStep[];
+  minPrice: number;
+  maxPrice: number;
+  /** Engine-derived price before any per-date calendar override (PriceLabs "recommended"). */
+  recommended: number;
+  /** The price actually shown on the calendar (after manual / % / per-date min-max overrides). */
+  final: number;
+  minStay: number;
+  minStaySource: string;
+  source: "derived" | "manual" | "minihotel";
+  note: string | null;
 }
 
 export interface OverridePatch {
@@ -232,6 +264,141 @@ export function unitExists(id: string): boolean {
 // today regardless of the window the operator is viewing (PriceLabs semantics).
 const hotelToday = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date());
+
+// Market factors (vs. customizations) for the hover card's grouping — mirrors
+// how PriceLabs splits "Market Factors" from "Price Customizations".
+const BREAKDOWN_MARKET_KEYS = new Set(["seasonality", "demand", "pacing", "bookingRecency"]);
+// Cosmetic finishers the engine applies AFTER the min/max clamp.
+const BREAKDOWN_FINISHER_KEYS = new Set(["override", "offset", "smoothing", "rounding"]);
+const pctRound1 = (n: number) => Math.round(n * 10) / 10;
+
+/**
+ * The full, ordered price walk for ONE (unit, night) — what the calendar hover
+ * card shows: Base → market factors → min/max clamp → finishers (offset /
+ * smoothing / rounding) → per-date calendar overrides (manual price, % of
+ * recommended, per-date min/max). Mirrors getCalendar()'s price resolution so
+ * `final` equals the number on the grid. Returns null when the unit has no Base
+ * anchor (nothing to explain) or the engine throws.
+ */
+export function priceBreakdown(unitId: string, date: string): PriceBreakdown | null {
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit) return null;
+  const hasBaseline = (unit.currentRate || 0) > 0 || (unit.baseRate || 0) > 0;
+  if (!hasBaseline) return null;
+
+  let q: DateQuote;
+  try {
+    q = quoteNight(unit, new Date(date + "T00:00:00Z"), marketProviders(), new Date(), effectiveRulesForUnit(unit));
+  } catch {
+    return null;
+  }
+
+  const steps: BreakdownStep[] = [];
+  let running = q.base;
+  steps.push({ key: "base", label: "Base price", detail: "listing anchor", pct: null, subtotal: Math.round(running), kind: "base" });
+
+  let clampDone = false;
+  const applyClamp = () => {
+    clampDone = true;
+    if (q.bound === "floor" && running < q.minPrice) {
+      running = q.minPrice;
+      steps.push({ key: "floor", label: "Min price", detail: `floor ₪${Math.round(q.minPrice)} (${q.minPriceSource}) — clamped up`, pct: null, subtotal: Math.round(running), kind: "threshold" });
+    } else if (q.bound === "ceiling" && running > unit.maxRate) {
+      running = unit.maxRate;
+      steps.push({ key: "ceiling", label: "Max price", detail: `ceiling ₪${Math.round(unit.maxRate)} — clamped down`, pct: null, subtotal: Math.round(running), kind: "threshold" });
+    }
+  };
+
+  for (const f of q.factors) {
+    // The clamp slots in after the multiplicative factors but before the cosmetic
+    // finishers — exactly the engine's order — so the walk lands on q.rate.
+    if (!clampDone && BREAKDOWN_FINISHER_KEYS.has(f.key)) applyClamp();
+    if (f.pin != null) running = f.pin;
+    else running = running * f.factor + (f.add ?? 0);
+    running = Math.round(running);
+    const pct = f.pin != null || f.add ? null : pctRound1((f.factor - 1) * 100);
+    steps.push({
+      key: f.key,
+      label: f.label,
+      detail: f.detail,
+      pct,
+      subtotal: running,
+      kind: BREAKDOWN_MARKET_KEYS.has(f.key) ? "market" : "customization",
+    });
+  }
+  if (!clampDone) applyClamp();
+
+  // Trust the engine's authoritative output for the recommended price (covers any
+  // rounding drift in the step-by-step walk above).
+  const recommended = q.rate;
+  running = recommended;
+
+  let source: PriceBreakdown["source"] = "derived";
+  let minStay = q.minStay;
+  let minStaySource = q.minStaySource;
+  let note: string | null = null;
+
+  // Per-date calendar override layer — identical rules to getCalendar(): a
+  // manual/synced fixed price wins outright; otherwise a dynamic % of the
+  // recommended price, then the per-date min/max clamp.
+  const o = getDb()
+    .prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date = ? LIMIT 1")
+    .get(unitId, date) as OverrideSql | undefined;
+  const expired = o?.expires_on != null && hotelToday() > o.expires_on;
+  if (o && !expired) {
+    if (o.price != null) {
+      running = o.price;
+      source = (o.source as PriceBreakdown["source"]) || "manual";
+      steps.push({
+        key: "manualPrice",
+        label: source === "minihotel" ? "Synced price · MiniHotel" : "Manual price",
+        detail: source === "minihotel" ? "mirrors the PMS for this date" : "operator-pinned for this date",
+        pct: null,
+        subtotal: Math.round(running),
+        kind: "override",
+      });
+      note =
+        source === "minihotel"
+          ? "This night mirrors MiniHotel's price; the steps above are the auto-recommendation it would otherwise use."
+          : "This night is a manual override; the steps above are the auto-recommendation it replaced.";
+    } else {
+      if (o.pct_adjust != null) {
+        const np = Math.max(0, Math.round(running * (1 + o.pct_adjust / 100)));
+        steps.push({ key: "pctAdjust", label: "% of recommended", detail: `${o.pct_adjust > 0 ? "+" : ""}${o.pct_adjust}% applied to the recommended price`, pct: o.pct_adjust, subtotal: np, kind: "override" });
+        running = np;
+        source = (o.source as PriceBreakdown["source"]) || "manual";
+      }
+      if (o.min_price != null && running < o.min_price) {
+        running = o.min_price;
+        steps.push({ key: "dateMin", label: "Date min price", detail: "per-date floor override", pct: null, subtotal: Math.round(running), kind: "threshold" });
+      }
+      if (o.max_price != null && running > o.max_price) {
+        running = o.max_price;
+        steps.push({ key: "dateMax", label: "Date max price", detail: "per-date ceiling override", pct: null, subtotal: Math.round(running), kind: "threshold" });
+      }
+    }
+    if (o.min_nights != null && o.min_nights_source === "manual") {
+      minStay = o.min_nights;
+      minStaySource = "manual override";
+    }
+  }
+
+  return {
+    unitId,
+    date,
+    leadDays: q.leadDays,
+    base: Math.round(q.base),
+    steps,
+    minPrice: Math.round(q.minPrice),
+    maxPrice: Math.round(unit.maxRate),
+    recommended: Math.round(recommended),
+    final: Math.round(running),
+    minStay,
+    minStaySource,
+    source,
+    note,
+  };
+}
 
 export function getCalendar(from: string, days: number): Calendar {
   const units = listUnits();

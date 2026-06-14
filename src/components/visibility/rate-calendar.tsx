@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   apartmentDisplayParts,
   apartmentIdFromUnit,
@@ -94,6 +94,33 @@ interface Calendar {
     open: number;
     closed: number;
   };
+}
+
+// Per-night price breakdown shown in the hover card (mirrors PriceBreakdown in
+// src/lib/repos/rates.ts). Fetched on demand from /api/rates/breakdown.
+type BreakdownKind = "base" | "market" | "customization" | "threshold" | "override";
+interface BreakdownStep {
+  key: string;
+  label: string;
+  detail: string;
+  pct: number | null;
+  subtotal: number;
+  kind: BreakdownKind;
+}
+interface PriceBreakdown {
+  unitId: string;
+  date: string;
+  leadDays: number;
+  base: number;
+  steps: BreakdownStep[];
+  minPrice: number;
+  maxPrice: number;
+  recommended: number;
+  final: number;
+  minStay: number;
+  minStaySource: string;
+  source: "derived" | "manual" | "minihotel";
+  note: string | null;
 }
 
 const HORIZONS = [30, 60, 90];
@@ -348,6 +375,50 @@ export function RateCalendar() {
     const cell = row?.cells.find((c) => c.date === sel.date);
     return row && cell ? { unit: row.unit, cell, cells: row.cells } : null;
   }, [sel, data]);
+
+  // ---- price-breakdown hover card -------------------------------------------
+  // The breakdown is fetched per (unit, night) on hover (kept out of the calendar
+  // payload), cached so re-hovering is instant, and guarded so a slow response for
+  // an earlier cell can't overwrite a later hover.
+  const [hover, setHover] = useState<{
+    unitId: string;
+    date: string;
+    unitLabel: string;
+    rect: { left: number; right: number; top: number; bottom: number };
+  } | null>(null);
+  const [bd, setBd] = useState<{ key: string; loading: boolean; data: PriceBreakdown | null } | null>(null);
+  const bdCache = useRef<Map<string, PriceBreakdown | null>>(new Map());
+  const hoverKeyRef = useRef<string | null>(null);
+
+  const onCellSelect = useCallback((unitId: string, date: string) => setSel({ unitId, date }), []);
+  const onCellLeave = useCallback(() => {
+    hoverKeyRef.current = null;
+    setHover(null);
+  }, []);
+  const onCellHover = useCallback(
+    (unitId: string, date: string, unitLabel: string, el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      setHover({ unitId, date, unitLabel, rect: { left: r.left, right: r.right, top: r.top, bottom: r.bottom } });
+      const key = `${unitId}|${date}`;
+      hoverKeyRef.current = key;
+      const cached = bdCache.current.get(key);
+      if (cached !== undefined) {
+        setBd({ key, loading: false, data: cached });
+        return;
+      }
+      setBd({ key, loading: true, data: null });
+      fetch(`/api/rates/breakdown?unitId=${encodeURIComponent(unitId)}&date=${date}`, { cache: "no-store" })
+        .then((res) => (res.ok ? (res.json() as Promise<PriceBreakdown>) : Promise.resolve(null)))
+        .then((data) => {
+          bdCache.current.set(key, data);
+          if (hoverKeyRef.current === key) setBd({ key, loading: false, data });
+        })
+        .catch(() => {
+          if (hoverKeyRef.current === key) setBd({ key, loading: false, data: null });
+        });
+    },
+    [],
+  );
 
   // Apply a Date Specific Override (range shape). Throws on failure so the
   // panel can show the error inline; the caller closes the panel on success.
@@ -991,43 +1062,20 @@ export function RateCalendar() {
                     <td className="sticky left-[42.5rem] z-10 w-16 min-w-[4rem] max-w-[4rem] border-r border-border bg-card px-1 py-1.5 text-center align-middle">
                       <RankCell rk={row.airbnbRank} />
                     </td>
-                    {row.cells.map((c) => {
-                      const selected = sel?.unitId === row.unit.id && sel?.date === c.date;
-                      const monthStart = partsUTC(c.date).day === 1;
-                      const tone =
-                        !c.closed && !c.booked && c.price != null && typical
-                          ? priceTone(c.price, typical)
-                          : null;
-                      return (
-                        <td key={c.date} className={`p-0 ${monthStart ? "border-l border-border" : ""}`}>
-                          <button
-                            type="button"
-                            onClick={() => setSel({ unitId: row.unit.id, date: c.date })}
-                            className={`relative h-11 w-14 px-1 leading-tight transition-colors ${tone ? "text-foreground" : cellTone(c)} ${
-                              selected ? "ring-2 ring-primary ring-inset" : "hover:brightness-95"
-                            }`}
-                            style={tone ? { backgroundColor: tone } : undefined}
-                            title={`${apartmentLabel(row.unit)} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
-                              c.source !== "derived" ? ` · ${c.source}` : ""
-                            }${tone && typical ? ` · ${Math.round(((c.price as number) / typical) * 100)}% of typical ₪${typical}` : ""}`}
-                          >
-                            <div className="font-medium">
-                              {c.closed ? <Lock className="mx-auto h-3 w-3" /> : (c.price ?? "—")}
-                            </div>
-                            <div className="text-[9px] text-muted-foreground">
-                              {c.booked ? "sold" : c.closed ? "" : c.minNights !== data.defaultMinNights ? `≥${c.minNights}` : ""}
-                            </div>
-                            {c.source !== "derived" && (
-                              <span
-                                className={`absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full ${
-                                  c.source === "minihotel" ? "bg-info" : "bg-primary"
-                                }`}
-                              />
-                            )}
-                          </button>
-                        </td>
-                      );
-                    })}
+                    {row.cells.map((c) => (
+                      <PriceCell
+                        key={c.date}
+                        c={c}
+                        unitId={row.unit.id}
+                        unitLabel={apartmentLabel(row.unit)}
+                        selected={sel?.unitId === row.unit.id && sel?.date === c.date}
+                        defaultMinNights={data.defaultMinNights}
+                        typical={typical}
+                        onSelect={onCellSelect}
+                        onHover={onCellHover}
+                        onLeave={onCellLeave}
+                      />
+                    ))}
                   </tr>
                   );
                 })}
@@ -1042,6 +1090,188 @@ export function RateCalendar() {
           </p>
         </CardContent>
       </Card>
+
+      {hover && bd && bd.key === `${hover.unitId}|${hover.date}` && (
+        <BreakdownTooltip rect={hover.rect} unitLabel={hover.unitLabel} date={hover.date} state={bd} />
+      )}
+    </div>
+  );
+}
+
+/** One price cell in the multi-calendar. Memoized so hovering (which updates the
+ *  breakdown card's state on the parent) doesn't re-render the whole grid — its
+ *  props are all stable across a hover, so React skips the re-render. */
+const PriceCell = memo(function PriceCell({
+  c,
+  unitId,
+  unitLabel,
+  selected,
+  defaultMinNights,
+  typical,
+  onSelect,
+  onHover,
+  onLeave,
+}: {
+  c: RateCell;
+  unitId: string;
+  unitLabel: string;
+  selected: boolean;
+  defaultMinNights: number;
+  typical: number | null;
+  onSelect: (unitId: string, date: string) => void;
+  onHover: (unitId: string, date: string, unitLabel: string, el: HTMLElement) => void;
+  onLeave: () => void;
+}) {
+  const monthStart = partsUTC(c.date).day === 1;
+  const tone = !c.closed && !c.booked && c.price != null && typical ? priceTone(c.price, typical) : null;
+  return (
+    <td className={`p-0 ${monthStart ? "border-l border-border" : ""}`}>
+      <button
+        type="button"
+        onClick={() => onSelect(unitId, c.date)}
+        onMouseEnter={(e) => onHover(unitId, c.date, unitLabel, e.currentTarget)}
+        onMouseLeave={onLeave}
+        className={`relative h-11 w-14 px-1 leading-tight transition-colors ${tone ? "text-foreground" : cellTone(c)} ${
+          selected ? "ring-2 ring-primary ring-inset" : "hover:brightness-95"
+        }`}
+        style={tone ? { backgroundColor: tone } : undefined}
+        title={`${unitLabel} · ${c.date}${c.closed ? " · closed" : c.booked ? " · booked" : ""} · min ${c.minNights}n${
+          c.source !== "derived" ? ` · ${c.source}` : ""
+        } — hover for the price breakdown`}
+      >
+        <div className="font-medium">
+          {c.closed ? <Lock className="mx-auto h-3 w-3" /> : (c.price ?? "—")}
+        </div>
+        <div className="text-[9px] text-muted-foreground">
+          {c.booked ? "sold" : c.closed ? "" : c.minNights !== defaultMinNights ? `≥${c.minNights}` : ""}
+        </div>
+        {c.source !== "derived" && (
+          <span
+            className={`absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full ${
+              c.source === "minihotel" ? "bg-info" : "bg-primary"
+            }`}
+          />
+        )}
+      </button>
+    </td>
+  );
+});
+
+const BREAKDOWN_SECTION: Record<Exclude<BreakdownKind, "base">, string> = {
+  market: "Market factors",
+  customization: "Price customizations",
+  threshold: "Thresholds",
+  override: "This date's overrides",
+};
+
+const fmtDateLong = (iso: string) => {
+  const d = new Date(iso + "T00:00:00Z");
+  return `${WD[d.getUTCDay()]} · ${d.getUTCDate()} ${MON[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+};
+
+/** The PriceLabs-style hover card: the full Base → factors → thresholds → final
+ *  walk for one night. Fixed-positioned beside the cell (so the calendar's
+ *  horizontal scroll never clips it) and click-through (pointer-events-none). */
+function BreakdownTooltip({
+  rect,
+  unitLabel,
+  date,
+  state,
+}: {
+  rect: { left: number; right: number; top: number; bottom: number };
+  unitLabel: string;
+  date: string;
+  state: { loading: boolean; data: PriceBreakdown | null };
+}) {
+  const W = 300;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const left = rect.right + 8 + W <= vw ? rect.right + 8 : Math.max(8, rect.left - 8 - W);
+  const top = Math.max(8, Math.min(rect.top, vh - 380));
+  const d = state.data;
+
+  let lastKind: BreakdownKind | null = null;
+  return (
+    <div className="pointer-events-none fixed z-50" style={{ left, top, width: W }}>
+      <div className="overflow-hidden rounded-lg border border-border bg-card text-[11px] shadow-xl ring-1 ring-black/5">
+        <div className="border-b border-border bg-muted/30 px-3 py-2">
+          <div className="truncate font-medium text-foreground">{unitLabel}</div>
+          <div className="text-[10px] text-muted-foreground">
+            {fmtDateLong(date)}
+            {d ? ` · ${d.leadDays}d out` : ""}
+          </div>
+        </div>
+
+        {state.loading ? (
+          <div className="px-3 py-3 text-muted-foreground">Calculating breakdown…</div>
+        ) : !d ? (
+          <div className="px-3 py-3 text-muted-foreground">
+            No breakdown — this night has no Base price set (or isn&rsquo;t engine-priced).
+          </div>
+        ) : (
+          <div className="px-3 py-2">
+            {d.steps.map((s, i) => {
+              const header =
+                s.kind !== "base" && s.kind !== lastKind ? BREAKDOWN_SECTION[s.kind] : null;
+              lastKind = s.kind;
+              return (
+                <div key={`${s.key}-${i}`}>
+                  {header && (
+                    <div className="mt-2 mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+                      {header}
+                    </div>
+                  )}
+                  <div className="flex items-baseline justify-between gap-2 py-0.5">
+                    <span className={s.kind === "base" ? "font-medium text-foreground" : "text-muted-foreground"}>
+                      {s.label}
+                      {s.detail && s.kind !== "base" && (
+                        <span className="ml-1 text-[9px] text-muted-foreground/60">· {s.detail}</span>
+                      )}
+                    </span>
+                    <span className="flex shrink-0 items-baseline gap-1.5 tabular-nums">
+                      {s.pct != null && s.pct !== 0 && (
+                        <span
+                          className={
+                            s.pct > 0 ? "text-[hsl(var(--success))]" : "text-[hsl(var(--danger))]"
+                          }
+                        >
+                          {s.pct > 0 ? "+" : ""}
+                          {s.pct}%
+                        </span>
+                      )}
+                      <span className="text-foreground">{fmtILS(s.subtotal)}</span>
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="mt-2 flex items-baseline justify-between border-t border-border pt-1 text-muted-foreground">
+              <span>Thresholds</span>
+              <span className="tabular-nums">
+                min {fmtILS(d.minPrice)} · max {fmtILS(d.maxPrice)}
+              </span>
+            </div>
+            {d.final !== d.recommended && (
+              <div className="flex items-baseline justify-between py-0.5 text-muted-foreground">
+                <span>Recommended (pre-override)</span>
+                <span className="tabular-nums">{fmtILS(d.recommended)}</span>
+              </div>
+            )}
+            <div className="mt-1 flex items-baseline justify-between rounded-md bg-muted/40 px-2 py-1.5 font-semibold text-foreground">
+              <span>Final</span>
+              <span className="tabular-nums">{fmtILS(d.final)}</span>
+            </div>
+            <div className="mt-1.5 flex items-baseline justify-between text-[10px] text-muted-foreground">
+              <span>Minimum stay</span>
+              <span className="tabular-nums">
+                {d.minStay}n <span className="text-muted-foreground/60">· {d.minStaySource}</span>
+              </span>
+            </div>
+            {d.note && <p className="mt-1.5 text-[10px] italic text-muted-foreground/80">{d.note}</p>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
