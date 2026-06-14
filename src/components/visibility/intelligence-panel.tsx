@@ -233,7 +233,6 @@ function SuggestionsQueue({
               <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left">Listing</th>
-                  <th className="px-3 py-2 text-left">Area</th>
                   <th className="px-3 py-2 text-left" title="Check-in (stay start) date this suggestion is computed for — the soonest scanned window">
                     Check-in
                   </th>
@@ -266,7 +265,6 @@ function SuggestionsQueue({
                           {s.label}
                         </button>
                       </td>
-                      <td className="px-3 py-2 text-muted-foreground">{s.area}</td>
                       <td className="px-3 py-2 font-mono text-muted-foreground">{s.checkIn ?? "soonest"}</td>
                       <td className="px-3 py-2 text-right font-mono">₪{s.currentNightly}</td>
                       <td className="px-3 py-2 text-right font-mono font-semibold">
