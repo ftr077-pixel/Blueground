@@ -268,7 +268,7 @@ function SuggestionsQueue({
                         {s.floored && (
                           <span
                             className="ml-1 align-middle text-[9px] font-normal uppercase tracking-wide text-muted-foreground"
-                            title="Capped at your margin floor — the curve pointed lower, but a deeper cut would price below cost"
+                            title="Capped at your margin floor — the curve pointed lower, but a deeper cut would breach the margin floor you set (which may be a deliberate loss)"
                           >
                             floor
                           </span>

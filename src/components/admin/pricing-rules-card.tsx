@@ -27,7 +27,7 @@ const DEFAULTS: Rules = {
   urgentDays: "14",
   relaxedDays: "45",
   stepPct: "5",
-  floorMargin: "10",
+  floorMargin: "-10",
 };
 
 export function PricingRulesCard() {
@@ -117,7 +117,7 @@ export function PricingRulesCard() {
           {field("Urgent ≤ days", "urgentDays")}
           {field("Relaxed ≥ days", "relaxedDays")}
           {field("Suggest step %", "stepPct")}
-          {field("Floor margin %", "floorMargin", "never lower below")}
+          {field("Floor margin %", "floorMargin", "stop cutting here; negative = allow a loss")}
           <button type="button" disabled={busy} onClick={save} className={btn}>
             {saved ? "Saved ✓" : "Save"}
           </button>
