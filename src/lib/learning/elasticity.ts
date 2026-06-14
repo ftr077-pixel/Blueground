@@ -42,8 +42,8 @@ type CostDefaults = ReturnType<typeof costDefaults>;
 //   minMonthlyRev = fixed / (1 − feePct − floorMargin)         [recommend()]
 //   askingNightly = minMonthlyRev / (30 · (1 − monthlyDiscount))
 // Null when economics are unknown (no rent) or the floor is infeasible. The
-// learner never recommends below this — buying a search slot at a loss isn't a
-// real move.
+// learner never recommends below this. floorMargin may be negative — a deliberate
+// loss-leader floor (e.g. −10% caps how far into a loss we'll cut to buy a slot).
 function floorNightly(
   listing: TrackedListing,
   costs: CostDefaults,
@@ -271,7 +271,7 @@ export function elasticityForListing(
   if (n === 0) note = "No market ladder captured for this segment yet — run scans to build it.";
   else if (n < LEARNING.nMin) note = `Learning — only ${n} market points in this segment; treat as indicative.`;
   else if (target?.floored)
-    note = `Held at your ${floorPct}% margin floor — the curve points lower, but pricing there would fall below cost.`;
+    note = `Held at your ${floorPct}% margin floor — the curve points lower, but a deeper cut would breach the floor you set.`;
   else if (target && cur != null && target.deltaNightly != null && target.deltaNightly >= 0)
     note = `Already priced for page ${targetPage} or better — no cut needed.`;
   else if (target && !target.reachable)

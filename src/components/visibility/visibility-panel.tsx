@@ -182,7 +182,7 @@ export function VisibilityPanel() {
     urgentDays: 14,
     relaxedDays: 45,
     stepPct: 5,
-    floorMargin: 10,
+    floorMargin: -10,
   });
   const [recFilter, setRecFilter] = useState("all");
 

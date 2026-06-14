@@ -28,7 +28,7 @@ export async function GET() {
       urgentDays: num("pr_urgent_days", 14),
       relaxedDays: num("pr_relaxed_days", 45),
       stepPct: num("pr_step_pct", 5),
-      floorMargin: num("pr_floor_margin", 10),
+      floorMargin: num("pr_floor_margin", -10),
     },
   });
 }
@@ -88,7 +88,11 @@ export async function POST(req: Request) {
     setNum("pr_urgent_days", pr.urgentDays);
     setNum("pr_relaxed_days", pr.relaxedDays);
     setNum("pr_step_pct", pr.stepPct);
-    setNum("pr_floor_margin", pr.floorMargin);
+    // Floor margin alone may be negative: a loss-leader floor (−10 ⇒ allow cuts
+    // down to a 10% loss to buy a search slot). Bounded to keep the cost math sane
+    // (below ~94% the floor-price denominator would go non-positive).
+    if (pr.floorMargin !== undefined && Number.isFinite(pr.floorMargin))
+      setSetting("pr_floor_margin", String(Math.max(-100, Math.min(90, pr.floorMargin))));
   }
   return NextResponse.json({ ok: true });
 }

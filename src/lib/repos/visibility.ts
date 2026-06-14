@@ -713,12 +713,13 @@ export function getDashboard() {
   };
 }
 
-/** Configured margin-floor % ("Pricing rules → Floor margin"; default 10).
+/** Configured margin-floor % ("Pricing rules → Floor margin"; default −10).
  *  Exported so the price→position learner clamps its suggestions at the SAME
- *  floor recommend() uses — neither surface should ever recommend below cost. */
+ *  floor recommend() uses. May be NEGATIVE — a deliberate loss-leader floor (−10
+ *  ⇒ suggest cuts down to a 10% loss to buy a search slot), never below it. */
 export function floorMarginPct(): number {
   const v = getSetting("pr_floor_margin");
-  return v != null && v !== "" ? Number(v) : 10;
+  return v != null && v !== "" ? Number(v) : -10;
 }
 
 // What the scraper box pulls: active profiles, each with its active listings.
