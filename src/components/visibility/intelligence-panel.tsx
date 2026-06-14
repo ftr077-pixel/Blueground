@@ -193,7 +193,7 @@ function SuggestionsQueue({
           <CardTitle>Suggested moves</CardTitle>
           {batch && (
             <span className="text-[11px] text-muted-foreground">
-              {batch.suggestions.length} of {batch.scanned} listings have a move ≥2%
+              {batch.suggestions.length} of {batch.scanned} listings have a suggested move
               {batch.hiddenLowConfidence > 0 && ` · ${batch.hiddenLowConfidence} low-confidence hidden`}
               {batch.appliedPending > 0 && ` · ${batch.appliedPending} applied, awaiting scan`}
               {batch.hiddenFloorBound > 0 && ` · ${batch.hiddenFloorBound} can’t profitably reach a better page`}

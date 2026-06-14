@@ -381,9 +381,9 @@ export interface SuggestionBatch {
   /** Would-be suggestions suppressed because the move was already applied and no
    *  scan has re-priced the listing yet (shown as "applied, awaiting scan"). */
   appliedPending: number;
-  /** Would-be moves dropped as non-visibility plays: a raise forced by the margin
-   *  floor, or a drop the floor stops short of any page gain (the target page
-   *  needs below-cost pricing here). A raise never improves search position. */
+  /** Floor-forced raises dropped as non-visibility plays: the curve wanted a drop
+   *  but the margin floor pushed the price above current, so it can't improve the
+   *  page. Drops are never dropped here — any confident cut is surfaced. */
   hiddenFloorBound: number;
   suggestions: SuggestionRow[];
 }
@@ -406,8 +406,11 @@ export function suggestionList(
     if (r.current.nightly == null || r.target.deltaPct == null) continue;
     const suggestedNightly = r.target.nightly;
     const deltaPct = r.target.deltaPct;
-    if (Math.abs(deltaPct) < minAbsPct) continue; // already priced about right
-    if (deltaPct < 0 && !r.target.reachable) continue; // page not reachable on price alone
+    // Size gate applies to RAISES only. A small hold-and-earn raise is clutter, but
+    // a small DROP — "lower a little to improve position" — is a genuine move: it's
+    // the ▼ Lower that Search & Profit surfaces, and this queue (where Base rate /
+    // Override live) must show the same set. deltaPct === 0 lands here too (no move).
+    if (deltaPct >= 0 && deltaPct < minAbsPct) continue;
     if (r.confidence.level === "low") {
       hiddenLowConfidence++;
       continue;
@@ -418,31 +421,22 @@ export function suggestionList(
       appliedPending++;
       continue;
     }
-    // Keep only genuine visibility (or hold-and-earn) moves. A raise can't improve
-    // search position: a raise forced by the margin floor (curve wanted a drop, the
-    // floor pushed it above the current price) would WORSEN the page, so it's a
-    // margin signal, not a move for this queue. A drop only belongs here if it
-    // actually buys a better page within the floor — otherwise the target page
-    // needs below-cost pricing and there's no real move.
     const curPage = r.current.page ?? r.current.expectedPage;
     let suggestedPage = r.target.expectedRank != null ? pageOf(r.target.expectedRank) : r.target.page;
-    // A higher price can only hold or worsen search position — never improve it.
-    // suggestedPage is modeled (curve + offset); curPage prefers the latest scan.
-    // When the two disagree, the model's page at the higher price can come out
-    // *better* than the scanned current page (scan says page 2, but the curve says
-    // we're really a page-1 listing that's underpriced) — which would render a raise
-    // as a "2→1" visibility win it cannot deliver. Clamp so a raise shows the page
-    // holding, not gaining. This is the non-floored sibling of the floor-flipped
-    // raise already handled below (dc0460f covered only the floored case).
-    if (deltaPct >= 0 && curPage != null && suggestedPage < curPage) {
-      suggestedPage = curPage;
+    // Keep the page column honest when the modeled page at the suggested price
+    // disagrees with where the listing sits now (model offset vs the latest scan):
+    // a higher price can only hold or worsen position; a lower price can only hold
+    // or improve it. Clamp so a move is never shown crossing the wrong way — no
+    // raise "2→1", no drop "2→3".
+    if (curPage != null) {
+      suggestedPage =
+        deltaPct >= 0 ? Math.max(suggestedPage, curPage) : Math.min(suggestedPage, curPage);
     }
-    if (deltaPct >= 0) {
-      if (r.target.floored) {
-        hiddenFloorBound++;
-        continue;
-      }
-    } else if (!(curPage != null && suggestedPage < curPage)) {
+    // A raise forced UP by the margin floor (the curve wanted a drop) can't improve
+    // position — it's a margin signal, not a move for this queue, so drop and count
+    // it. Every confident drop stays: even a sub-page or floor-limited cut is a real
+    // "improve the rating" move, shown at the honest page it actually reaches.
+    if (deltaPct >= 0 && r.target.floored) {
       hiddenFloorBound++;
       continue;
     }
