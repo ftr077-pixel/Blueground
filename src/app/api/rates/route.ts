@@ -106,6 +106,11 @@ export async function PATCH(req: Request) {
     note?: string | null;
     clear?: boolean;
     applyToGroup?: boolean;
+    // bulk targeting (range shape): apply to every listing minus an exclude
+    // list (the opt-out promo pattern), or to an explicit set of listings.
+    applyToAll?: boolean;
+    excludeUnitIds?: string[];
+    unitIds?: string[];
     // shared fields
     price?: number | null;
     minNights?: number | null;
@@ -209,37 +214,71 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ ok: true, repriced, push });
   }
 
-  // ---- range shape: { unitId, from, to, ... } --------------------------------
+  // ---- range shape: { from, to, ... + a target selector } --------------------
   if (body.from !== undefined || body.to !== undefined) {
-    const { unitId, from, to } = body;
-    if (!unitId || !from || !to || !DATE_RE.test(from) || !DATE_RE.test(to)) {
+    const { from, to } = body;
+    if (!from || !to || !DATE_RE.test(from) || !DATE_RE.test(to)) {
       return NextResponse.json(
-        { error: "unitId and valid from/to dates (YYYY-MM-DD) required" },
+        { error: "valid from/to dates (YYYY-MM-DD) required" },
         { status: 400 },
       );
     }
-    if (!unitExists(unitId)) {
-      return NextResponse.json({ error: "unknown unit" }, { status: 404 });
-    }
-    // Group-level DSO (PriceLabs account/group overrides): fan the same range
-    // out to every listing attached to this unit's group customization.
-    let targetIds = [unitId];
-    let groupLabel: string | null = null;
-    if (body.applyToGroup) {
-      const all = listAllUnits();
-      const me = all.find((u) => u.id === unitId);
-      const g = me?.group ?? me?.subgroup ?? null;
-      if (!g) {
-        return NextResponse.json({ error: "unit has no customization group" }, { status: 400 });
+    // Resolve the target listings. Four shapes, most-specific intent first:
+    //   applyToAll  → every listing minus excludeUnitIds (the opt-out bulk promo)
+    //   unitIds     → an explicit set of listings
+    //   applyToGroup→ every listing in the unit's customization group
+    //   unitId      → the single listing (legacy Date Specific Override)
+    const all = listAllUnits();
+    let targetIds: string[];
+    let who: string;
+    if (body.applyToAll) {
+      const exclude = new Set(
+        (Array.isArray(body.excludeUnitIds) ? body.excludeUnitIds : []).map(String),
+      );
+      targetIds = all.filter((u) => !exclude.has(u.id)).map((u) => u.id);
+      who = exclude.size
+        ? `all listings except ${exclude.size} (${targetIds.length})`
+        : `all ${targetIds.length} listings`;
+    } else if (Array.isArray(body.unitIds)) {
+      const valid = new Set(all.map((u) => u.id));
+      targetIds = [...new Set(body.unitIds.map(String))].filter((id) => valid.has(id));
+      who = `${targetIds.length} listing(s)`;
+    } else {
+      const { unitId } = body;
+      if (!unitId) {
+        return NextResponse.json(
+          { error: "a target is required: unitId, unitIds, or applyToAll" },
+          { status: 400 },
+        );
       }
-      groupLabel = g;
-      targetIds = all.filter((u) => u.group === g || u.subgroup === g).map((u) => u.id);
+      if (!unitExists(unitId)) {
+        return NextResponse.json({ error: "unknown unit" }, { status: 404 });
+      }
+      if (body.applyToGroup) {
+        const me = all.find((u) => u.id === unitId);
+        const g = me?.group ?? me?.subgroup ?? null;
+        if (!g) {
+          return NextResponse.json({ error: "unit has no customization group" }, { status: 400 });
+        }
+        targetIds = all.filter((u) => u.group === g || u.subgroup === g).map((u) => u.id);
+        who = `group "${g}" (${targetIds.length} listings)`;
+      } else {
+        targetIds = [unitId];
+        who = unitId;
+      }
+    }
+    if (targetIds.length === 0) {
+      return NextResponse.json(
+        { error: "no target listings (is every listing excluded?)" },
+        { status: 400 },
+      );
     }
     const dow = Array.isArray(body.daysOfWeek)
       ? body.daysOfWeek.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
       : undefined;
 
-    const range: RangeOverride = { unitId, from, to, daysOfWeek: dow };
+    // unitId here is just a placeholder; applyOverrideRange runs once per target.
+    const range: RangeOverride = { unitId: targetIds[0], from, to, daysOfWeek: dow };
     if (body.clear) range.clear = true;
     if (body.price !== undefined)
       range.price = body.price === null ? null : Math.max(0, Math.round(Number(body.price)));
@@ -345,7 +384,6 @@ export async function PATCH(req: Request) {
     if (frozen > 0) {
       pushTxt += `; ${frozen} unavailable night(s) kept their last synced price (freeze)`;
     }
-    const who = groupLabel ? `group "${groupLabel}" (${targetIds.length} listings)` : unitId;
     logActivity({
       department: "revenue",
       worker: "Pricing Specialist",
