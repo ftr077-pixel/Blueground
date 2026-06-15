@@ -303,6 +303,7 @@ export function RateCalendar() {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "listing", dir: 1 });
   const [diagnosing, setDiagnosing] = useState(false);
   const [diag, setDiag] = useState<DiagResult | null>(null);
+  const [showBulk, setShowBulk] = useState(false);
 
   const refresh = useCallback(async () => {
     const r = await fetch(`/api/rates?from=${from}&days=${days}`, { cache: "no-store" });
@@ -698,6 +699,14 @@ export function RateCalendar() {
             {diagnosing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Stethoscope className="h-4 w-4" />}
             Diagnose
           </button>
+          <button
+            className={btnGhost}
+            title="Bulk overrides: apply a price change (or min-stay / close) to a date range across every apartment, excluding any you opt out — e.g. −50% for the next 3 nights on all but two listings"
+            onClick={() => setShowBulk(true)}
+          >
+            <Percent className="h-4 w-4" />
+            Bulk overrides
+          </button>
           <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
               <span
@@ -826,6 +835,21 @@ export function RateCalendar() {
           busy={busy}
           onClose={() => setSel(null)}
           onApply={applyOverride}
+        />
+      )}
+
+      {/* Bulk overrides panel (date range × many apartments, opt-out excludes) */}
+      {showBulk && (
+        <BulkOverridePanel
+          units={data.rows.map((r) => ({
+            id: r.unit.id,
+            label: apartmentLabel(r.unit),
+            neighborhood: r.unit.neighborhood,
+          }))}
+          windowFrom={data.from}
+          busy={busy}
+          onApply={applyOverride}
+          onClose={() => setShowBulk(false)}
         />
       )}
 
@@ -2001,6 +2025,303 @@ function OverridePanel({
               <button type="button" className={btnCls} disabled={busy} onClick={() => submit(false)}>
                 {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                 Add
+              </button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+/** Bulk Date-Specific Overrides: one date range applied across MANY apartments
+ *  at once. Opt-out by design — it targets EVERY listing minus the ones ticked
+ *  in the exclude list (the request: "−50% for the next few nights on all
+ *  apartments except this one and that one"). Posts the range shape with
+ *  applyToAll + excludeUnitIds; the same endpoint fans it out and pushes each
+ *  night to MiniHotel, so a bulk promo lands on the PMS in one action. */
+function BulkOverridePanel({
+  units,
+  windowFrom,
+  busy,
+  onApply,
+  onClose,
+}: {
+  units: { id: string; label: string; neighborhood: string }[];
+  windowFrom: string;
+  busy: boolean;
+  onApply: (body: Record<string, unknown>) => Promise<number>;
+  onClose: () => void;
+}) {
+  const [start, setStart] = useState(windowFrom);
+  const [end, setEnd] = useState(addDays(windowFrom, 2));
+  const [priceMode, setPriceMode] = useState<"fixed" | "pct" | "pctDyn">("pctDyn");
+  const [priceVal, setPriceVal] = useState("-50");
+  const [minNightsVal, setMinNightsVal] = useState("");
+  const [avail, setAvail] = useState<"" | "close" | "open">("");
+  const [expiry, setExpiry] = useState("");
+  const [note, setNote] = useState("");
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+
+  const nights = useMemo(() => {
+    const a = Date.parse(start + "T00:00:00Z");
+    const b = Date.parse(end + "T00:00:00Z");
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+    return Math.round((b - a) / 86400000) + 1;
+  }, [start, end]);
+
+  const applies = units.length - excluded.size;
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return units;
+    return units.filter(
+      (u) => u.label.toLowerCase().includes(q) || u.neighborhood.toLowerCase().includes(q),
+    );
+  }, [units, filter]);
+
+  const toggle = (id: string) =>
+    setExcluded((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  function buildBody(clear: boolean): Record<string, unknown> | string {
+    if (nights === 0) return "Pick a valid date range (To on/after From).";
+    if (applies <= 0) return "Every apartment is excluded — include at least one.";
+    const body: Record<string, unknown> = { from: start, to: end, applyToAll: true };
+    if (excluded.size) body.excludeUnitIds = [...excluded];
+    if (clear) {
+      body.clear = true;
+      return body;
+    }
+    if (priceVal.trim() !== "") {
+      const n = parseFloat(priceVal);
+      if (!Number.isFinite(n)) return "Price must be a number.";
+      if (priceMode === "fixed") body.price = Math.max(0, Math.round(n));
+      else {
+        if (n < -90 || n > 500) return "Percent must be between -90 and 500.";
+        body.pricePct = n;
+        body.pricePctMode = priceMode === "pctDyn" ? "dynamic" : "fixed";
+      }
+    }
+    if (minNightsVal.trim() !== "") body.minNights = Math.max(1, Math.round(parseFloat(minNightsVal)));
+    if (avail !== "") body.closed = avail === "close";
+    if (expiry.trim() !== "") body.expiresOn = expiry.trim();
+    if (note.trim() !== "") body.note = note.trim();
+    const hasAny = Object.keys(body).some(
+      (k) => !["from", "to", "applyToAll", "excludeUnitIds"].includes(k),
+    );
+    if (!hasAny) return "Set at least one field to apply (price, min-stay, or availability).";
+    return body;
+  }
+
+  async function submit(clear: boolean) {
+    setErr(null);
+    setOkMsg(null);
+    const body = buildBody(clear);
+    if (typeof body === "string") {
+      setErr(body);
+      return;
+    }
+    try {
+      const n = await onApply(body);
+      setOkMsg(
+        `${clear ? "Cleared overrides for" : "Applied to"} ${applies} apartment${applies === 1 ? "" : "s"} — ${n} night-row${n === 1 ? "" : "s"} updated.`,
+      );
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "bulk update failed");
+    }
+  }
+
+  const radio = (mode: "pctDyn" | "pct" | "fixed", label: string) => (
+    <label className="flex items-center gap-1.5 text-xs text-foreground">
+      <input
+        type="radio"
+        name="bulk-price-mode"
+        className="h-3.5 w-3.5 accent-[hsl(var(--primary))]"
+        checked={priceMode === mode}
+        onChange={() => setPriceMode(mode)}
+      />
+      {label}
+    </label>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <aside className="absolute inset-y-0 right-0 flex w-full max-w-md flex-col border-l border-border bg-card shadow-2xl">
+        {/* header */}
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Bulk overrides</h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              One date range across <span className="font-medium text-foreground">every apartment</span> — then
+              tick any to opt out.
+            </p>
+          </div>
+          <button type="button" className={iconBtn} title="Close" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* body */}
+        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 text-[11px] text-muted-foreground">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className={fieldLabelCls}>
+              From
+              <DmyDateInput value={start} onChange={(v) => setStart(v || windowFrom)} />
+            </label>
+            <label className={fieldLabelCls}>
+              To
+              <DmyDateInput value={end} onChange={(v) => setEnd(v || windowFrom)} />
+            </label>
+          </div>
+
+          {/* price */}
+          <div className={sectionCls}>Price</div>
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-3">
+              {radio("pctDyn", "% of recommended")}
+              {radio("pct", "% of base")}
+              {radio("fixed", "Fixed")}
+              <div className="relative">
+                <input
+                  className={`${inputCls} w-32 pr-9`}
+                  value={priceVal}
+                  onChange={(e) => setPriceVal(e.target.value)}
+                  inputMode="decimal"
+                  placeholder={priceMode === "fixed" ? "₪ price" : "e.g. -50"}
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-[10px] text-muted-foreground">
+                  {priceMode === "fixed" ? "ILS" : "%"}
+                </span>
+              </div>
+            </div>
+            <p className="text-[10px] text-muted-foreground/80">
+              {priceMode === "fixed"
+                ? "A fixed nightly price on every selected apartment/night (bypasses each listing's min/max)."
+                : priceMode === "pctDyn"
+                  ? "Negative = discount (e.g. −50 = 50% off). Stays dynamic — reapplied to each night's recommended price, honoring per-date min/max."
+                  : "Negative = discount (e.g. −50 = 50% off). Materialized once into a static price off each night's current rate."}
+            </p>
+          </div>
+
+          {/* stay & availability */}
+          <div className={sectionCls}>Stay &amp; availability (optional)</div>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className={fieldLabelCls}>
+              Minimum stay
+              <input
+                className={`${inputCls} w-24`}
+                value={minNightsVal}
+                onChange={(e) => setMinNightsVal(e.target.value)}
+                inputMode="numeric"
+                placeholder="no change"
+              />
+            </label>
+            <label className={fieldLabelCls}>
+              Availability
+              <select className={inputCls} value={avail} onChange={(e) => setAvail(e.target.value as "" | "close" | "open")}>
+                <option value="">No change</option>
+                <option value="close">Close these nights</option>
+                <option value="open">Open these nights</option>
+              </select>
+            </label>
+            <label className={fieldLabelCls}>
+              Auto-expire after
+              <DmyDateInput allowEmpty width="w-40" value={expiry} onChange={setExpiry} />
+            </label>
+          </div>
+          <label className={fieldLabelCls}>
+            Note / reason
+            <input
+              className={inputCls}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. flash sale"
+              maxLength={500}
+            />
+          </label>
+
+          {/* exclude list */}
+          <div className="flex items-center justify-between">
+            <div className={sectionCls}>Exclude apartments</div>
+            <div className="flex items-center gap-2 text-[10px]">
+              <button type="button" className="text-primary hover:underline" onClick={() => setExcluded(new Set(units.map((u) => u.id)))}>
+                Exclude all
+              </button>
+              <span className="text-muted-foreground/40">·</span>
+              <button type="button" className="text-primary hover:underline" onClick={() => setExcluded(new Set())}>
+                Clear
+              </button>
+            </div>
+          </div>
+          <input
+            className={`${inputCls} w-full`}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter apartments…"
+          />
+          <div className="max-h-52 space-y-1 overflow-y-auto rounded-md border border-border/60 p-2">
+            {filtered.length === 0 ? (
+              <p className="px-1 py-2 text-muted-foreground/70">No apartments match “{filter}”.</p>
+            ) : (
+              filtered.map((u) => {
+                const ex = excluded.has(u.id);
+                return (
+                  <label key={u.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-muted/40">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 accent-[hsl(var(--danger))]"
+                      checked={ex}
+                      onChange={() => toggle(u.id)}
+                    />
+                    <span className={ex ? "text-muted-foreground/50 line-through" : "text-foreground"}>{u.label}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground/60">{u.neighborhood}</span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+
+          {err && <p className="text-[11px] text-[hsl(var(--danger))]">{err}</p>}
+          {okMsg && <p className="text-[11px] text-[hsl(var(--success))]">{okMsg}</p>}
+        </div>
+
+        {/* footer */}
+        <div className="border-t border-border px-5 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-[11px] text-muted-foreground">
+              <div>
+                <span className="font-medium text-foreground">{applies}</span> of {units.length} apartment
+                {units.length === 1 ? "" : "s"}
+                {excluded.size > 0 && <span> · {excluded.size} excluded</span>}
+              </div>
+              <div>
+                {nights} night{nights === 1 ? "" : "s"} each
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className={btnGhost}
+                disabled={busy}
+                title="Remove overrides on the selected nights for the targeted apartments — the baseline price and default min-stay are re-pushed to MiniHotel in the same action"
+                onClick={() => submit(true)}
+              >
+                Clear range
+              </button>
+              <button type="button" className={btnGhost} onClick={onClose}>
+                Cancel
+              </button>
+              <button type="button" className={btnCls} disabled={busy || applies <= 0} onClick={() => submit(false)}>
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Apply
               </button>
             </div>
           </div>
