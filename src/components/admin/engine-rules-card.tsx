@@ -311,6 +311,10 @@ interface EffectiveConfig {
 interface RulesResp {
   effective: EffectiveConfig;
   groups: string[];
+  /** Listing scope only: the merged account→group→sub-group→listing config the
+   *  engine actually prices on, plus which scope supplies each customization. */
+  merged?: EffectiveConfig;
+  sources?: Record<string, string | null>;
 }
 
 interface PreviewUnit {
@@ -395,6 +399,42 @@ const SOURCE_COLOR: Record<string, string> = {
   account: "#d97706",
 };
 const sourceKind = (s: string | null) => (s ? s.split(":")[0] : "default");
+/** Human label for a section's source level (from sectionSourcesForUnit). */
+const sourceText = (s: string | null): string =>
+  !s
+    ? "Default"
+    : s === "account"
+      ? "Account"
+      : s === "listing"
+        ? "Listing"
+        : s.startsWith("group:")
+          ? `Group: ${s.slice(6)}`
+          : s.startsWith("subgroup:")
+            ? `Sub-group: ${s.slice(9)}`
+            : s;
+
+// Read-only "effective for this listing" rows: the merged config's section key
+// (for source attribution) + a one-line effective summary. Labels mirror the
+// toggle row so the two read the same.
+const onOff = (b: boolean) => (b ? "On" : "Off");
+const EFFECTIVE_ROWS: Array<{ key: string; label: string; summary: (m: EffectiveConfig) => string }> = [
+  { key: "seasonality", label: "Seasonality", summary: (m) => (m.seasonality.enabled ? `On · ${m.seasonality.sensitivity}` : "Off") },
+  { key: "demandEvents", label: "Demand / events", summary: (m) => (m.demandEvents.enabled ? `On · ${m.demandEvents.sensitivity}` : "Off") },
+  { key: "pacing", label: "Booking pace", summary: (m) => onOff(m.pacing.enabled) },
+  { key: "occupancy", label: "Occupancy bands", summary: (m) => (m.occupancy.enabled ? `On · ${m.occupancy.profile}` : "Off") },
+  { key: "farOut", label: "Far-out premium", summary: (m) => (m.farOut.enabled ? `On · ${m.farOut.mode}` : "Off") },
+  { key: "lastMinute", label: "Last-minute discount", summary: (m) => (m.lastMinute.enabled ? `On · ${m.lastMinute.mode}` : "Off") },
+  { key: "adjacent", label: "Adjacent factor", summary: (m) => onOff(m.adjacent.enabled) },
+  { key: "orphanDayPrices", label: "Orphan day prices", summary: (m) => onOff(m.orphanDayPrices.enabled) },
+  { key: "portfolioOccupancy", label: "Portfolio occupancy", summary: (m) => (m.portfolioOccupancy.enabled ? `On · ${m.portfolioOccupancy.profile}` : "Off") },
+  { key: "dayOfWeek", label: "Day-of-week", summary: (m) => onOff(m.dayOfWeek.enabled) },
+  { key: "los", label: "LOS / quarter discount", summary: (m) => onOff(m.los.enabled) },
+  { key: "freezeUnavailable", label: "Freeze unavailable", summary: (m) => onOff(m.freezeUnavailable.enabled) },
+  { key: "bookingRecency", label: "Booking recency", summary: (m) => onOff(m.bookingRecency.enabled) },
+  { key: "pricingOffset", label: "Pricing offset", summary: (m) => onOff(m.pricingOffset.enabled) },
+  { key: "safetyMinPrice", label: "Safety minimum price", summary: (m) => onOff(m.safetyMinPrice.enabled) },
+  { key: "minStayRules", label: "Min-stay rules", summary: (m) => (m.minStayRules.profile ? `Profile: ${m.minStayRules.profile}` : m.minStayRules.mode) },
+];
 
 const pct = (f: number) => String(Math.round(f * 1000) / 10);
 const frac = (s: string) => (parseFloat(s) || 0) / 100;
@@ -574,6 +614,9 @@ export function EngineRulesCard() {
   const [groupInfo, setGroupInfo] = useState<GroupInfo[]>([]);
   const [units, setUnits] = useState<PreviewUnit[]>([]);
   const [f, setF] = useState<Form | null>(null);
+  // Listing scope only: the true inherited config + per-section source attribution.
+  const [merged, setMerged] = useState<EffectiveConfig | null>(null);
+  const [sources, setSources] = useState<Record<string, string | null> | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -645,6 +688,8 @@ export function EngineRulesCard() {
     const b = (await res.json()) as RulesResp;
     setGroups(b.groups);
     setF(toForm(b.effective));
+    setMerged(b.merged ?? null);
+    setSources(b.sources ?? null);
   }, []);
 
   const loadGroups = useCallback(async () => {
@@ -1216,6 +1261,43 @@ export function EngineRulesCard() {
             Saving writes every section below to {scopeLabel}; Reset clears the scope so it inherits again.
           </span>
         </div>
+
+        {scope.startsWith("unit:") && merged && sources && (
+          <div className={sectionBox}>
+            <span className={sectionHead}>Effective for this listing — what it actually prices on</span>
+            <p className="text-[10px] text-muted-foreground/70">
+              The merged account → group → sub-group → listing result the engine prices on. Each badge
+              shows which scope supplies that customization (most specific wins; levels never combine).
+              The form below edits only this listing&apos;s own layer — so a rule can read differently
+              here than in the form when a parent scope sets it.
+            </p>
+            <div className="grid grid-cols-1 gap-x-6 gap-y-0.5 sm:grid-cols-2">
+              {EFFECTIVE_ROWS.map((row) => {
+                const src = sources[row.key] ?? null;
+                const summary = row.summary(merged);
+                const off = summary === "Off";
+                const color = SOURCE_COLOR[sourceKind(src)] ?? "hsl(var(--muted-foreground))";
+                return (
+                  <div
+                    key={row.key}
+                    className="flex items-center justify-between gap-2 border-b border-border/30 py-0.5 last:border-0"
+                  >
+                    <span className="text-muted-foreground">{row.label}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className={off ? "text-muted-foreground/50" : "font-medium text-foreground"}>
+                        {summary}
+                      </span>
+                      <span className="inline-flex items-center gap-1 text-[9px]" style={{ color }}>
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: "currentColor" }} />
+                        {sourceText(src)}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {presetLoaded && (
           <div className={`${sectionBox} ${!presetChoice ? "border-primary/40 bg-primary/5" : ""}`}>

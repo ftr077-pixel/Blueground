@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import { PRICING_RULES, PRICING_AGENT } from "@/lib/config/pricing";
 import {
   effectiveRules,
+  effectiveRulesForUnit,
   effectiveHumanGatePct,
   getRuleOverrides,
   saveRuleOverrides,
   resetRuleOverrides,
   rulesWithOverrides,
+  sectionSourcesForUnit,
   scopeStoreKey,
   type RuleOverrides,
   type RuleScope,
@@ -37,18 +39,35 @@ function validScope(scope: string | null): RuleScope | { error: string } {
 
 function payload(scope: RuleScope) {
   const overrides = getRuleOverrides(scope);
-  return {
+  const base = {
     scope,
     defaults: { ...PRICING_RULES, humanGatePct: PRICING_AGENT.humanGatePct },
     overrides,
     // The scope's standalone effective view: ITS overrides on code defaults
-    // (PriceLabs levels don't combine — see rules-config resolveChain).
+    // (PriceLabs levels don't combine within a section — see resolveChain).
     effective:
       scope === "account"
         ? { ...effectiveRules(), humanGatePct: effectiveHumanGatePct() }
         : { ...rulesWithOverrides(overrides), humanGatePct: effectiveHumanGatePct() },
     groups: listGroupNames(),
   };
+  // For a listing scope, also surface the TRUE config it actually prices on:
+  // the full account → group → sub-group → listing merge, with per-section
+  // attribution. Lets the operator see, e.g., that last-minute is OFF for this
+  // listing even when it's ON at the account level — a more specific scope
+  // shadows the parent (and the per-scope `effective` above, edited in
+  // isolation, doesn't reveal what the listing inherits).
+  if (scope.startsWith("unit:")) {
+    const unit = listUnits().find((u) => u.id === scope.slice(5));
+    if (unit) {
+      return {
+        ...base,
+        merged: { ...effectiveRulesForUnit(unit), humanGatePct: effectiveHumanGatePct() },
+        sources: sectionSourcesForUnit(unit),
+      };
+    }
+  }
+  return base;
 }
 
 // Pricing Configuration → engine rules. Browser-facing (behind the dashboard login).
