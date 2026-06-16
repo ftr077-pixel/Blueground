@@ -34,7 +34,10 @@ export const PROPERTY_TYPES = [
 export type PropertyType = (typeof PROPERTY_TYPES)[number];
 
 const STR_PATCH: RuleOverrides = {
-  lastMinute: { enabled: true, mode: "gradual", windowDays: 15, value: -0.3 },
+  // Gradual ramp deepening toward check-in: full price 14 days out → 60% of base
+  // on the nearest night, with a matching last-minute floor so it isn't clamped.
+  lastMinute: { enabled: true, mode: "gradual", windowDays: 14, value: -0.4 },
+  minPrices: { lastMinute: { enabled: true, withinDays: 14, mode: "pctBase", value: -0.4 } },
   dayOfWeek: { enabled: true },
   adjacent: { enabled: true, mode: "percent", value: -0.1, daysBefore: 2, daysAfter: 2 },
   orphanDayPrices: {
@@ -53,9 +56,12 @@ const STR_PATCH: RuleOverrides = {
 };
 
 const MTR_PATCH: RuleOverrides = {
-  // Market Driven (Balanced): track the market's near-arrival discounting on
-  // open dates over the 30 days to arrival (uses live market data where synced).
-  lastMinute: { enabled: true, mode: "marketDriven", marketFlavor: "balanced", windowDays: 30 },
+  // Last-minute as a gradual ramp deepening toward check-in: full price 14 days
+  // out → 60% of base on the nearest night. Paired with a 60% last-minute floor
+  // so the ramp actually lands (instead of clamping flat at the 80% floor), and
+  // the engine stands the occupancy discount down while last-minute is on.
+  lastMinute: { enabled: true, mode: "gradual", windowDays: 14, value: -0.4 },
+  minPrices: { lastMinute: { enabled: true, withinDays: 14, mode: "pctBase", value: -0.4 } },
   dayOfWeek: { enabled: false },
   // The operator's live PriceLabs mid-term setup (the configuration screenshot):
   // 40% off 3–7-night orphan gaps, a 30% adjacent discount 2 days either side of
@@ -120,7 +126,7 @@ export const SMART_PRESETS: Record<PropertyType, SmartPreset> = {
     blurb: "Nightly turnover mechanics on: lead-time discounts, gap management, day-of-week.",
     patch: STR_PATCH,
     items: [
-      { label: "Last-minute prices (gradual 30% / 15d)", why: "Unsold near dates convert better with a ramping discount." },
+      { label: "Last-minute prices (ramp to 60% of base over 14d)", why: "Unsold near dates convert better as the price eases down toward check-in; a matching floor lets it actually fall." },
       { label: "Day-of-week + adjacent factor", why: "Weekend premiums and back-to-back gap control are core STR levers." },
       { label: "Orphan day prices (20% on ≤2-night gaps)", why: "Short scraps between bookings rarely sell at full rate." },
       { label: "Min-stay: Recommended (Short-Term) + orphan gap fill", why: "Opportunity-cost engine with 1-night gap fills." },
@@ -134,7 +140,7 @@ export const SMART_PRESETS: Record<PropertyType, SmartPreset> = {
     items: [
       { label: "Custom min-stay: 3-night default, far-out 4→28 ladder, gap−1 orphan fills", why: "Your live PriceLabs minimum-stay setup — distant dates require longer commitments, short gaps stay bookable." },
       { label: "Orphan-day 40% off 3–7-night gaps + 30% adjacent discount", why: "Fill the short scraps between mid-term stays instead of leaving them empty." },
-      { label: "Last-minute: Market Driven (Balanced); day-of-week off; conservative seasonality & demand", why: "Match the market's near-arrival discounting on open nights to fill short gaps; long-stay demand stays smooth." },
+      { label: "Last-minute ramp to 60% of base over 14d; day-of-week off; conservative seasonality & demand", why: "Open near dates ease down toward check-in (occupancy discount stands down so the ramp shows); long-stay demand stays smooth." },
       { label: "Far-out premium, Safety Minimum Price, freeze + booking recency", why: "Hold distant inventory, floor it at last year's realized rates, and auto-revive cold listings." },
     ],
   },
