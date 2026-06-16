@@ -520,16 +520,18 @@ export const PRICING_RULES: PricingRulesConfig = {
     cap: 0.08,
     rampDays: 120,
   },
-  /** Last-minute prices — Market Driven (Balanced): tracks the market's
-   *  near-arrival discounting over the 30 days to arrival ("Hyper Local Pulse"),
-   *  using live market data where synced. `value` is the gradual fallback shape
-   *  used only when no market data is available. */
+  /** Last-minute prices — a gradual ramp that deepens toward check-in: the rate
+   *  eases from full price at `windowDays` out down to (1 + value) of base on the
+   *  nearest night (−0.4 ⇒ 60% of base at day 0). It's the near-term lever, so the
+   *  Occupancy discount stands down inside this window (engine.ts) and the
+   *  matching last-minute min-price floor (minPrices.lastMinute) lets the ramp
+   *  actually land instead of clamping flat at the listing's 80% floor. */
   lastMinute: {
     enabled: true,
-    mode: "marketDriven",
+    mode: "gradual",
     marketFlavor: "balanced",
-    windowDays: 30,
-    value: -0.3,
+    windowDays: 14,
+    value: -0.4,
   },
   /** Adjacent factor (PriceLabs): adjust the open days right before/after a
    *  booking — discount to fill gaps, premium to discourage back-to-back
@@ -611,7 +613,10 @@ export const PRICING_RULES: PricingRulesConfig = {
   minPrices: {
     farOut: { enabled: false, beyondDays: 60, mode: "pctBase", value: 0 },
     weekend: { enabled: false, mode: "pctBase", value: 0 },
-    lastMinute: { enabled: false, withinDays: 14, mode: "pctMin", value: 0 },
+    // Last-minute floor at 60% of base within 14 days — replaces the listing's
+    // 80% floor so the last-minute ramp can actually fall toward check-in
+    // (without this the near-term nights all clamp flat at the higher floor).
+    lastMinute: { enabled: true, withinDays: 14, mode: "pctBase", value: -0.4 },
     orphan: { enabled: false, mode: "pctMin", value: 0 },
   },
   /** PriceLabs ships SMP on by default; ~110% is their "safe choice". Inert

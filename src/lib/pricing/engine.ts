@@ -290,10 +290,21 @@ function quoteNightBase(
   const add = (r: FactorResult | null) => {
     if (r) factors.push(r);
   };
+  // Last-minute is the near-term price lever. Compute it first so it can own the
+  // DECREASES: when it's enabled, the Occupancy rule's DISCOUNT stands down (its
+  // PREMIUMS for high-demand dates still apply). Two reasons: (1) inside the
+  // last-minute window the two would compound, blow past the min-price floor,
+  // and pin every near night to the floor — the "flat near-term" instead of a
+  // slope toward check-in; (2) beyond the window an occupancy discount on a soft
+  // far date would make far-out cheaper than near-out, which inverts "prices
+  // shouldn't fall until check-in nears". Turn last-minute off to restore full
+  // occupancy discounting.
+  const lastMin = lastMinuteRule(unit, date, leadDays, market, cfg);
   add(seasonalityRule(date, market, cfg));
   add(demandRule(unit, date, market, cfg));
   add(pacingRule(unit, market, cfg));
-  add(occupancyRule(unit, date, leadDays, market, cfg));
+  const occ = occupancyRule(unit, date, leadDays, market, cfg);
+  if (occ && !(cfg.lastMinute.enabled && occ.factor < 1)) add(occ);
   add(portfolioOccupancyRule(unit, date, leadDays, market, cfg));
   add(bookingRecencyRule(unit, date, leadDays, market, cfg));
   add(farOutRule(unit, date, leadDays, market, cfg));
@@ -303,7 +314,7 @@ function quoteNightBase(
   // when both fire, last-minute beats orphan-day (the PriceLabs fixed-override
   // hierarchy: date-specific > last-minute > orphan-day).
   const orphan = orphanDayPriceRule(unit, date, leadDays, market, cfg);
-  const lastMin = lastMinuteRule(unit, date, leadDays, market, cfg);
+  // lastMin computed above (it gates the near-term occupancy discount).
   const stackCandidates: (FactorResult | null)[] = [adjacentRule(unit, date, market, cfg)];
   let pin: number | null = null;
   let lmPinned = false;
