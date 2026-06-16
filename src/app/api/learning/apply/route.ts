@@ -3,7 +3,7 @@ import { elasticityForListing } from "@/lib/learning/elasticity";
 import { recordPriceChange } from "@/lib/learning/dataset";
 import { getListing } from "@/lib/repos/visibility";
 import { setUnitBaseRate } from "@/lib/repos/units";
-import { applyOverrideRange } from "@/lib/repos/rates";
+import { applyTotalAcrossNights } from "@/lib/repos/rates";
 import { logActivity } from "@/lib/repos/activity";
 import { roundRate } from "@/lib/config/pricing";
 
@@ -90,13 +90,17 @@ export async function POST(req: Request) {
       rateUpdated = true;
     } else {
       try {
-        const res = applyOverrideRange({
+        // Hold the month's TOTAL (newNightly × nights) but spread it along the
+        // last-minute curve instead of pinning a flat nightly — nearer nights
+        // cheaper, later nights dearer, same sum.
+        const total = newNightly * nights;
+        const res = applyTotalAcrossNights(
           unitId,
-          from: r.checkIn!,
-          to: addDaysIso(r.checkIn!, Math.max(0, nights - 1)),
-          price: newNightly,
-          note: `Pricing Intelligence: page ${targetPage} target (check-in ${r.checkIn})`,
-        });
+          r.checkIn!,
+          addDaysIso(r.checkIn!, Math.max(0, nights - 1)),
+          total,
+          `Pricing Intelligence: page ${targetPage} target (check-in ${r.checkIn}) — ₪${total} over ${nights}n, distributed by last-minute shape`,
+        );
         overrideNights = res.nights;
         rateUpdated = res.nights > 0;
       } catch {

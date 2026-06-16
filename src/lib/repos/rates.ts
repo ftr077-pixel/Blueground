@@ -4,7 +4,7 @@ import { windowReservationRevenue } from "@/lib/repos/reservations";
 import { quoteNight, type DateQuote } from "@/lib/pricing/engine";
 import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
 import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
-import type { PricingRulesConfig } from "@/lib/config/pricing";
+import { roundRate, type PricingRulesConfig } from "@/lib/config/pricing";
 
 /**
  * Rates Calendar repo.
@@ -1106,6 +1106,65 @@ export function applyOverrideRange(o: RangeOverride): {
   });
   tx();
   return { nights, written, unresolved };
+}
+
+/**
+ * Pin a target TOTAL across [from, to] for one unit, distributed by the engine's
+ * recommended nightly SHAPE — so the last-minute slope toward check-in is kept
+ * (nearer nights cheaper, later nights dearer) instead of a flat nightly that
+ * sums to the same amount. Used when an operator accepts a monthly-sum pricing
+ * suggestion: the month still totals the target, but each night follows the
+ * curve. Fixed pins bypass the floor, so the near-term dip shows in full; the
+ * ₪-rounding remainder is folded into the highest-weight night so the pinned
+ * nights sum to `total`. No baseline (rate 0) ⇒ falls back to an even split.
+ */
+export function applyTotalAcrossNights(
+  unitId: string,
+  from: string,
+  to: string,
+  total: number,
+  note?: string,
+): { nights: number; written: AppliedCell[] } {
+  const unit = listUnits().find((u) => u.id === unitId);
+  if (!unit) throw new Error("unknown unit");
+  const fromIdx = dayIndex(from);
+  const toIdx = dayIndex(to);
+  if (toIdx < fromIdx) throw new Error("'to' is before 'from'");
+  if (toIdx - fromIdx + 1 > MAX_RANGE_NIGHTS) throw new Error(`range too long (max ${MAX_RANGE_NIGHTS} nights)`);
+  if (!(total > 0)) return { nights: 0, written: [] };
+
+  const dates: string[] = [];
+  for (let i = 0; i <= toIdx - fromIdx; i++) dates.push(isoAddDays(from, i));
+
+  // Weight each night by its recommended rate (the sloping curve). With no Base
+  // anchor every weight is 0 — fall back to an even split so the total still lands.
+  const priceOf = makeNightPricer();
+  let weights = dates.map((d) => Math.max(0, priceOf(unit, d).rate));
+  let sumW = weights.reduce((a, b) => a + b, 0);
+  if (sumW <= 0) {
+    weights = dates.map(() => 1);
+    sumW = dates.length;
+  }
+
+  const prices = weights.map((w) => Math.max(0, roundRate((total * w) / sumW)));
+  // Fold the rounding remainder into the highest-weight (priciest) night.
+  const drift = roundRate(total) - prices.reduce((a, b) => a + b, 0);
+  if (drift !== 0) {
+    let maxi = 0;
+    for (let i = 1; i < weights.length; i++) if (weights[i] > weights[maxi]) maxi = i;
+    prices[maxi] = Math.max(0, prices[maxi] + drift);
+  }
+
+  const written: AppliedCell[] = [];
+  const db = getDb();
+  const tx = db.transaction(() => {
+    for (let i = 0; i < dates.length; i++) {
+      upsertOverride(unitId, dates[i], { price: prices[i], note: note ?? null }, "manual");
+      written.push({ date: dates[i], price: prices[i] });
+    }
+  });
+  tx();
+  return { nights: dates.length, written };
 }
 
 /**
