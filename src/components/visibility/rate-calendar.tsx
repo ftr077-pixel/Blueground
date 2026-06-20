@@ -317,6 +317,7 @@ export function RateCalendar() {
   const [diagnosing, setDiagnosing] = useState(false);
   const [diag, setDiag] = useState<DiagResult | null>(null);
   const [showBulk, setShowBulk] = useState(false);
+  const [showBase, setShowBase] = useState(false);
 
   const refresh = useCallback(async () => {
     const r = await fetch(`/api/rates?from=${from}&days=${days}`, { cache: "no-store" });
@@ -720,6 +721,14 @@ export function RateCalendar() {
             <Percent className="h-4 w-4" />
             Bulk overrides
           </button>
+          <button
+            className={btnGhost}
+            title="Suggest each apartment's Base (anchor) rate from its costs — rent + bills + fees — anchored to market ADR with a margin floor"
+            onClick={() => setShowBase(true)}
+          >
+            <Banknote className="h-4 w-4" />
+            Base from costs
+          </button>
           <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
               <span
@@ -863,6 +872,15 @@ export function RateCalendar() {
           busy={busy}
           onApply={applyOverride}
           onClose={() => setShowBulk(false)}
+        />
+      )}
+
+      {/* Base-from-costs panel (suggest each unit's anchor rate from rent+bills) */}
+      {showBase && (
+        <BasePricePanel
+          busy={busy}
+          onApplyBase={(unitId, baseRate) => applyOverride({ unitId, baseRate })}
+          onClose={() => setShowBase(false)}
         />
       )}
 
@@ -2393,6 +2411,233 @@ function BulkOverridePanel({
                 Apply
               </button>
             </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- base-from-costs panel
+type BaseMethod = "marketFloor" | "costPlus" | "vacancy" | "blend";
+interface BaseSuggestion {
+  unitId: string;
+  name: string;
+  neighborhood: string;
+  rentKnown: boolean;
+  currentBase: number;
+  costFloor: number | null;
+  marketADR: number | null;
+  occupancy: number | null;
+  suggested: number | null;
+  projectedMarginPct: number | null;
+  projectedMonthlyProfit: number | null;
+  note: string | null;
+}
+const BASE_METHOD_OPTS: { value: BaseMethod; label: string }[] = [
+  { value: "marketFloor", label: "Market ADR, cost floor" },
+  { value: "costPlus", label: "Cost-plus to margin" },
+  { value: "vacancy", label: "Vacancy-aware (÷ occupancy)" },
+  { value: "blend", label: "Blend (market + cost)" },
+];
+
+/** Suggest each apartment's Base (anchor) rate from its costs — rent + bills +
+ *  fees — anchored to market ADR with a target-margin floor. Applying writes the
+ *  unit's Base via PATCH /api/rates, which rebuilds the forward calendar. */
+function BasePricePanel({
+  busy,
+  onApplyBase,
+  onClose,
+}: {
+  busy: boolean;
+  onApplyBase: (unitId: string, baseRate: number) => Promise<number>;
+  onClose: () => void;
+}) {
+  const [method, setMethod] = useState<BaseMethod>("marketFloor");
+  const [marginPct, setMarginPct] = useState("25");
+  const [rows, setRows] = useState<BaseSuggestion[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [applyingId, setApplyingId] = useState<string | null>(null);
+  const [applyingAll, setApplyingAll] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const margin = (parseFloat(marginPct) || 0) / 100;
+      const res = await fetch(
+        `/api/rates/base-suggestions?margin=${margin}&method=${method}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`failed to load (${res.status})`);
+      const b = (await res.json()) as { units: BaseSuggestion[] };
+      setRows(b.units);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "failed to load suggestions");
+    } finally {
+      setLoading(false);
+    }
+  }, [method, marginPct]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const changed = (r: BaseSuggestion) => r.suggested != null && r.suggested !== r.currentBase;
+  const actionable = (rows ?? []).filter(changed);
+  const missingRent = (rows ?? []).filter((r) => !r.rentKnown).length;
+
+  async function applyOne(r: BaseSuggestion) {
+    if (r.suggested == null) return;
+    setApplyingId(r.unitId);
+    try {
+      await onApplyBase(r.unitId, r.suggested);
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "apply failed");
+    } finally {
+      setApplyingId(null);
+    }
+  }
+  async function applyAll() {
+    setApplyingAll(true);
+    try {
+      for (const r of actionable) {
+        if (r.suggested != null) await onApplyBase(r.unitId, r.suggested);
+      }
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "apply failed");
+    } finally {
+      setApplyingAll(false);
+    }
+  }
+
+  const pctCls = (p: number | null) =>
+    p == null ? "text-muted-foreground/50" : p < 15 ? "text-[hsl(var(--warning))]" : "text-foreground";
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <aside className="absolute inset-y-0 right-0 flex w-full max-w-2xl flex-col border-l border-border bg-card shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Base price from costs</h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              Each apartment&rsquo;s anchor rate from rent + bills + fees, floored at your target margin.
+              Applying rebuilds that unit&rsquo;s forward calendar.
+            </p>
+          </div>
+          <button type="button" className={iconBtn} title="Close" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-border px-5 py-3 text-[11px] text-muted-foreground">
+          <label className="flex flex-col gap-1">
+            Method
+            <select className={`${inputCls} w-56`} value={method} onChange={(e) => setMethod(e.target.value as BaseMethod)}>
+              {BASE_METHOD_OPTS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            Target margin
+            <div className="relative">
+              <input
+                className={`${inputCls} w-24 pr-7`}
+                value={marginPct}
+                onChange={(e) => setMarginPct(e.target.value)}
+                inputMode="decimal"
+              />
+              <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-[10px] text-muted-foreground">
+                %
+              </span>
+            </div>
+          </label>
+          <button type="button" className={iconBtn} title="Recalculate" disabled={loading} onClick={() => load()}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          </button>
+          {missingRent > 0 && (
+            <span className="pb-1 text-[10px] text-[hsl(var(--warning))]">
+              {missingRent} apartment(s) need rent set (link a listing + rent) to price from cost.
+            </span>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2 py-2">
+          {err && <p className="px-3 py-2 text-[11px] text-[hsl(var(--danger))]">{err}</p>}
+          {rows == null ? (
+            <p className="px-3 py-3 text-[11px] text-muted-foreground">Calculating…</p>
+          ) : (
+            <table className="w-full text-[11px]">
+              <thead className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                <tr className="border-b border-border">
+                  <th className="px-2 py-1.5 text-left font-medium">Apartment</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Current</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Cost floor</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Market</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Suggested</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Margin</th>
+                  <th className="px-2 py-1.5 text-right font-medium" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.unitId} className="border-b border-border/40 hover:bg-muted/30">
+                    <td className="px-2 py-1.5">
+                      <div className="font-medium text-foreground">{r.name}</div>
+                      <div className="text-[10px] text-muted-foreground/70">
+                        {r.neighborhood}
+                        {r.note ? ` · ${r.note}` : ""}
+                      </div>
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{r.currentBase > 0 ? fmtILS(r.currentBase) : "—"}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{r.costFloor != null ? fmtILS(r.costFloor) : "—"}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{r.marketADR != null ? fmtILS(r.marketADR) : "—"}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums font-semibold text-foreground">{r.suggested != null ? fmtILS(r.suggested) : "—"}</td>
+                    <td className={`px-2 py-1.5 text-right tabular-nums ${pctCls(r.projectedMarginPct)}`}>
+                      {r.projectedMarginPct != null ? `${r.projectedMarginPct}%` : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-right">
+                      <button
+                        type="button"
+                        className={btnGhost}
+                        disabled={busy || applyingAll || !changed(r)}
+                        title={r.suggested == null ? "set rent first" : !changed(r) ? "already at this base" : `Set Base to ${fmtILS(r.suggested)}`}
+                        onClick={() => applyOne(r)}
+                      >
+                        {applyingId === r.unitId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Apply"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-3 text-[11px] text-muted-foreground">
+          <span>
+            {actionable.length} of {rows?.length ?? 0} apartment(s) would change
+          </span>
+          <div className="flex items-center gap-2">
+            <button type="button" className={btnGhost} onClick={onClose}>
+              Close
+            </button>
+            <button
+              type="button"
+              className={btnCls}
+              disabled={busy || applyingAll || actionable.length === 0}
+              title="Set Base for every apartment whose suggestion differs (rebuilds each forward calendar)"
+              onClick={applyAll}
+            >
+              {applyingAll ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Apply all ({actionable.length})
+            </button>
           </div>
         </div>
       </aside>
