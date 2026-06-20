@@ -3,8 +3,9 @@ import { getDb } from "@/lib/db";
 import { windowReservationRevenue } from "@/lib/repos/reservations";
 import { quoteNight, type DateQuote } from "@/lib/pricing/engine";
 import { marketProviders, type MarketProviders } from "@/lib/pricing/providers";
-import { effectiveRulesForUnit } from "@/lib/pricing/rules-config";
+import { effectiveRulesForUnit, effectiveNeighborhood } from "@/lib/pricing/rules-config";
 import { roundRate, type PricingRulesConfig } from "@/lib/config/pricing";
+import { listMarketSnapshots } from "@/lib/repos/market";
 
 /**
  * Rates Calendar repo.
@@ -138,6 +139,32 @@ export interface PriceBreakdown {
   minStaySource: string;
   source: "derived" | "manual" | "minihotel";
   note: string | null;
+  /** Raw AirROI market inputs that fed this night's market factors, or null when
+   *  no market data is synced (the engine then uses the configured curve). */
+  market: MarketInputs | null;
+}
+
+/** The AirROI numbers behind a night's market factors — surfaced in the hover
+ *  card so each factor shows the figure it came from. */
+export interface MarketInputs {
+  /** "airroi" = a snapshot for this listing's neighborhood fed the factors;
+   *  "fallback" = snapshots exist but none matched, so market-wide values applied. */
+  source: "airroi" | "fallback";
+  neighborhood: string;
+  marketName: string | null;
+  fetchedAt: string | null;
+  /** Forward occupancy (fill_rate) for THIS date, 0..1, or null. */
+  fillRate: number | null;
+  /** Market booked ADR for THIS date (₪), or null. */
+  bookedRateAvg: number | null;
+  /** Market summary forward occupancy 0..1 (market-wide mean on fallback). */
+  occupancy: number | null;
+  /** Market summary ADR (₪), or null. */
+  adr: number | null;
+  /** Market median minimum nights, or null. */
+  minNights: number | null;
+  /** Market booking lead time (days), or null. */
+  leadTime: number | null;
 }
 
 export interface OverridePatch {
@@ -397,6 +424,50 @@ export function priceBreakdown(unitId: string, date: string): PriceBreakdown | n
     minStaySource,
     source,
     note,
+    market: marketInputsFor(unit, date),
+  };
+}
+
+/** The raw AirROI figures the engine read for one (unit, night): the snapshot for
+ *  the unit's effective neighborhood + that date's forward pacing point. Mirrors
+ *  airRoiProviders()'s lookups so the hover card shows the numbers behind the
+ *  market factors. null when nothing is synced (engine uses the configured curve). */
+function marketInputsFor(unit: Unit, date: string): MarketInputs | null {
+  const snaps = listMarketSnapshots();
+  if (snaps.length === 0) return null;
+  const hood = effectiveNeighborhood(unit);
+  const snap = snaps.find((s) => s.neighborhood === hood) ?? null;
+  if (!snap) {
+    // Snapshots exist but none for this neighborhood — the providers fall back to
+    // the market-wide mean occupancy; surface just that.
+    const occs = snaps.map((s) => s.summary?.occupancy).filter((x): x is number => x != null && x > 0);
+    const globalOcc = occs.length ? occs.reduce((a, b) => a + b, 0) / occs.length : null;
+    return {
+      source: "fallback",
+      neighborhood: hood,
+      marketName: null,
+      fetchedAt: null,
+      fillRate: null,
+      bookedRateAvg: null,
+      occupancy: globalOcc,
+      adr: null,
+      minNights: null,
+      leadTime: null,
+    };
+  }
+  const pt = snap.pacing.find((p) => p.date === date) ?? null;
+  const s = snap.summary;
+  return {
+    source: "airroi",
+    neighborhood: hood,
+    marketName: snap.marketName,
+    fetchedAt: snap.fetchedAt,
+    fillRate: pt && pt.fill_rate > 0 ? pt.fill_rate : null,
+    bookedRateAvg: pt && pt.booked_rate_avg > 0 ? Math.round(pt.booked_rate_avg) : null,
+    occupancy: s?.occupancy ?? null,
+    adr: s?.average_daily_rate != null ? Math.round(s.average_daily_rate) : null,
+    minNights: s?.min_nights ?? null,
+    leadTime: s?.booking_lead_time != null ? Math.round(s.booking_lead_time) : null,
   };
 }
 
