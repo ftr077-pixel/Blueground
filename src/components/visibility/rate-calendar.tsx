@@ -107,6 +107,18 @@ interface BreakdownStep {
   subtotal: number;
   kind: BreakdownKind;
 }
+interface MarketInputs {
+  source: "airroi" | "fallback";
+  neighborhood: string;
+  marketName: string | null;
+  fetchedAt: string | null;
+  fillRate: number | null;
+  bookedRateAvg: number | null;
+  occupancy: number | null;
+  adr: number | null;
+  minNights: number | null;
+  leadTime: number | null;
+}
 interface PriceBreakdown {
   unitId: string;
   date: string;
@@ -121,6 +133,7 @@ interface PriceBreakdown {
   minStaySource: string;
   source: "derived" | "manual" | "minihotel";
   note: string | null;
+  market: MarketInputs | null;
 }
 
 const HORIZONS = [30, 60, 90];
@@ -1292,6 +1305,62 @@ function BreakdownTooltip({
                 {d.minStay}n <span className="text-muted-foreground/60">· {d.minStaySource}</span>
               </span>
             </div>
+
+            {d.market && (
+              <div className="mt-2 border-t border-border pt-1.5">
+                <div className="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+                  Market data · {d.market.source === "airroi" ? (d.market.marketName ?? d.market.neighborhood) : "AirROI"}
+                </div>
+                {d.market.source === "fallback" ? (
+                  <div className="text-[10px] text-muted-foreground/70">
+                    No snapshot for {d.market.neighborhood} — using market-wide occupancy
+                    {d.market.occupancy != null ? ` ${(d.market.occupancy * 100).toFixed(0)}%` : ""}.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+                    {d.market.fillRate != null && (
+                      <div className="flex justify-between gap-2">
+                        <span>Fill · this date</span>
+                        <span className="tabular-nums text-foreground">{(d.market.fillRate * 100).toFixed(0)}%</span>
+                      </div>
+                    )}
+                    {d.market.bookedRateAvg != null && (
+                      <div className="flex justify-between gap-2">
+                        <span>Mkt ADR · date</span>
+                        <span className="tabular-nums text-foreground">{fmtILS(d.market.bookedRateAvg)}</span>
+                      </div>
+                    )}
+                    {d.market.occupancy != null && (
+                      <div className="flex justify-between gap-2">
+                        <span>Occupancy</span>
+                        <span className="tabular-nums text-foreground">{(d.market.occupancy * 100).toFixed(0)}%</span>
+                      </div>
+                    )}
+                    {d.market.adr != null && (
+                      <div className="flex justify-between gap-2">
+                        <span>Mkt ADR</span>
+                        <span className="tabular-nums text-foreground">{fmtILS(d.market.adr)}</span>
+                      </div>
+                    )}
+                    {d.market.minNights != null && (
+                      <div className="flex justify-between gap-2">
+                        <span>Min nights</span>
+                        <span className="tabular-nums text-foreground">{d.market.minNights}</span>
+                      </div>
+                    )}
+                    {d.market.leadTime != null && (
+                      <div className="flex justify-between gap-2">
+                        <span>Lead time</span>
+                        <span className="tabular-nums text-foreground">{d.market.leadTime}d</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {d.market.fetchedAt && (
+                  <div className="mt-0.5 text-[9px] text-muted-foreground/50">as of {d.market.fetchedAt.slice(0, 10)}</div>
+                )}
+              </div>
+            )}
             {d.note && <p className="mt-1.5 text-[10px] italic text-muted-foreground/80">{d.note}</p>}
           </div>
         )}
