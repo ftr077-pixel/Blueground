@@ -883,15 +883,20 @@ function OutcomeBadge({ row }: { row: ScorecardRow }) {
 // apply time; the verdict here is derived live from what actually happened.
 function ScorecardCard() {
   const [d, setD] = useState<ScorecardData | null>(null);
+  // How long to give a price move before its rank outcome is called hit/miss. The
+  // default 21d left every recent suggestion stuck on "pending"; a shorter window
+  // settles verdicts while the move is still relevant. Operator-tunable — the API
+  // already scores against whatever windowDays it's handed.
+  const [windowDays, setWindowDays] = useState(7);
   useEffect(() => {
     // Pull the full applied history (API caps at 200), not just the latest page —
     // the operator wants to scroll back through past suggestions and watch each
     // one settle (hit/miss/pending) over its evaluation window.
-    fetch("/api/learning/scorecard?limit=200", { cache: "no-store" })
+    fetch(`/api/learning/scorecard?limit=200&windowDays=${windowDays}`, { cache: "no-store" })
       .then((r) => r.json())
       .then(setD)
       .catch(() => setD(null));
-  }, []);
+  }, [windowDays]);
 
   if (!d) return null;
   const s = d.summary;
@@ -900,7 +905,24 @@ function ScorecardCard() {
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle>Suggestion scorecard</CardTitle>
-          <Badge variant="muted">{s.total} applied</Badge>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              window
+              <select
+                className="rounded-md border border-border bg-background px-2 py-1 text-[11px] outline-none focus:border-primary/50"
+                value={windowDays}
+                onChange={(e) => setWindowDays(Number(e.target.value))}
+                title="How long to wait after a move before its rank outcome is settled as hit or missed"
+              >
+                {[7, 14, 21].map((w) => (
+                  <option key={w} value={w}>
+                    {w}d
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Badge variant="muted">{s.total} applied</Badge>
+          </div>
         </div>
         <p className="text-[11px] text-muted-foreground">
           Every applied suggestion — most recent first — scored against what happened next: did the
