@@ -884,7 +884,10 @@ function OutcomeBadge({ row }: { row: ScorecardRow }) {
 function ScorecardCard() {
   const [d, setD] = useState<ScorecardData | null>(null);
   useEffect(() => {
-    fetch("/api/learning/scorecard", { cache: "no-store" })
+    // Pull the full applied history (API caps at 200), not just the latest page —
+    // the operator wants to scroll back through past suggestions and watch each
+    // one settle (hit/miss/pending) over its evaluation window.
+    fetch("/api/learning/scorecard?limit=200", { cache: "no-store" })
       .then((r) => r.json())
       .then(setD)
       .catch(() => setD(null));
@@ -900,8 +903,9 @@ function ScorecardCard() {
           <Badge variant="muted">{s.total} applied</Badge>
         </div>
         <p className="text-[11px] text-muted-foreground">
-          Every applied suggestion scored against what happened next: did the listing reach the
-          target page within {d.windowDays}d, and did the mapped unit book?
+          Every applied suggestion — most recent first — scored against what happened next: did the
+          listing reach the target page within {d.windowDays}d, and did the mapped unit book? Scroll
+          for older applies.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -912,9 +916,9 @@ function ScorecardCard() {
           </p>
         ) : (
           <>
-            <div className="overflow-x-auto rounded-lg border border-border">
+            <div className="max-h-96 overflow-auto rounded-lg border border-border">
               <table className="w-full text-[11px]">
-                <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <thead className="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wider text-muted-foreground">
                   <tr>
                     <th className="px-2 py-1 text-left">Listing</th>
                     <th className="px-2 py-1 text-left">Applied</th>
@@ -925,7 +929,7 @@ function ScorecardCard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {d.rows.slice(0, 10).map((r) => (
+                  {d.rows.map((r) => (
                     <tr key={r.changeId} className="border-t border-border/40">
                       <td className="max-w-[14rem] truncate px-2 py-1 font-medium" title={r.label}>
                         {r.label}
