@@ -382,45 +382,41 @@ export function PacingPanel() {
     fetchReport(controls);
   }
 
-  // Pull real booking-creation dates from MiniHotel so the curves stop collapsing
-  // to one step per month. Backfills ~2 years of CreateDate (not the endpoint's
-  // 30-day default) so past stay months fill in too, then reloads the report.
+  // Force the booking dates to refresh by re-running the reservation sync — the
+  // same bounded pull the P&L already uses (it works wherever MiniHotel is
+  // reachable), which now also captures each booking's real created-on date. A
+  // wide multi-year pull blows MiniHotel's 20s request timeout ("operation
+  // aborted"); this curve-sized window stays well under it.
   async function syncBookings() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      const today = new Date().toISOString().slice(0, 10);
-      const from = `${Number(today.slice(0, 4)) - 2}-01-01`;
-      const res = await fetch("/api/integrations/minihotel/bookings", {
+      const today = new Date();
+      const from = new Date(today.getTime() - 45 * 86_400_000).toISOString().slice(0, 10);
+      const res = await fetch("/api/reservations/sync", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ from, to: today }),
+        // ~1.5 months back through ~8 months ahead (by arrival) — covers the curve's
+        // default months and stays under the 370-day / 20s ceiling that the wide pull blew.
+        body: JSON.stringify({ from, days: 300 }),
       });
       const b = (await res.json().catch(() => null)) as
-        | { ok?: boolean; stored?: number; parsed?: number; unmappedTypes?: string[]; message?: string }
+        | { ok?: boolean; recorded?: number; parsed?: number; message?: string }
         | null;
       if (!res.ok) throw new Error(`sync failed: ${res.status}`);
-      // The hosted server can't reach MiniHotel (or the connection isn't set up);
-      // the route explains that in `message` — surface it verbatim.
       if (!b || b.ok === false) {
-        setSyncMsg(b?.message || "Couldn’t sync from here — run it from your whitelisted box.");
+        setSyncMsg(b?.message || "Couldn’t refresh — check the MiniHotel connection in Settings.");
         return;
       }
-      const stored = b.stored ?? 0;
-      if (stored > 0) {
-        setSyncMsg(`Synced ${stored} booking(s) — rebuilding curves…`);
-        await fetchReport(controls);
-      } else if ((b.parsed ?? 0) > 0) {
-        setSyncMsg(
-          `Pulled ${b.parsed} reservation(s) but none mapped to units` +
-            (b.unmappedTypes?.length ? ` (unmapped room types: ${b.unmappedTypes.join(", ")})` : "") +
-            " — fix the room-type mapping in Settings.",
-        );
-      } else {
-        setSyncMsg("No bookings found in that window.");
-      }
+      const n = b.recorded ?? 0;
+      setSyncMsg(
+        n > 0
+          ? `Refreshed ${n} booking(s) with real dates — rebuilding curves…`
+          : "No bookings found in that window.",
+      );
+      await fetchReport(controls);
     } catch (e) {
-      setSyncMsg(e instanceof Error ? e.message : "sync failed");
+      setSyncMsg(e instanceof Error ? e.message : "refresh failed");
     } finally {
       setSyncing(false);
     }
