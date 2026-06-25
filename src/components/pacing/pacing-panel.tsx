@@ -73,6 +73,7 @@ interface PacingReport {
   curves: BookingCurve[];
   curveDefaults: string[];
   curveSource: "bookings" | "reservations" | null;
+  curveApprox: boolean;
   sources: { market: boolean; compPrices: boolean; yours: "reservations" | "calendar" | null };
 }
 
@@ -755,12 +756,12 @@ export function PacingPanel() {
                 metric by days till the month completes. Helps spot months booking unusually early
                 or falling behind in time to fix them.
               </p>
-              {report?.curveSource === "reservations" && (
+              {report?.curveApprox && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                   <p className="max-w-2xl text-[11px] text-[hsl(var(--warning))]">
-                    Curves are approximate — booking dates are guessed from when each reservation
-                    first synced (the reservation feed carries no created-at). Sync MiniHotel
-                    bookings for the real created-on dates and exact curves.
+                    Curves are approximate until the next reservation sync — booking dates fall back
+                    to first-sync time until then. The sync now captures each booking&apos;s real
+                    created-on date and runs on its own; refresh to force it.
                   </p>
                   <button
                     type="button"
@@ -768,7 +769,7 @@ export function PacingPanel() {
                     disabled={syncing}
                     className="shrink-0 rounded-md border border-primary/30 bg-primary/15 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
                   >
-                    {syncing ? "Syncing…" : "Sync booking dates now"}
+                    {syncing ? "Syncing…" : "Refresh booking dates now"}
                   </button>
                   {syncMsg && <span className="text-[11px] text-muted-foreground">{syncMsg}</span>}
                 </div>

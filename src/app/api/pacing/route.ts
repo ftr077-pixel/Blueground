@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { buildPacingReport } from "@/lib/pacing";
+import { ensureFreshReservations } from "@/lib/integrations/minihotel";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,10 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   const p = new URL(req.url).searchParams;
   try {
+    // The booking curves read reservation data — kick a background re-sync if it's
+    // stale (whitelisted box only; no-ops where MiniHotel is unreachable). This is
+    // what backfills the real created_on dates with no manual step.
+    ensureFreshReservations();
     const report = buildPacingReport({
       from: p.get("from"),
       to: p.get("to"),

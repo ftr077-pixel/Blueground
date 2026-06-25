@@ -410,6 +410,12 @@ function init(db: Database.Database) {
   ensureColumn(db, "listing_price_changes", "confidence", "TEXT");
   ensureColumn(db, "listing_price_changes", "n", "INTEGER");
 
+  // Real booking-creation date (MiniHotel createDateTime). The reservation feed
+  // carries it on every <Booking>; capturing it lets the Booking Curves plot each
+  // booking at its true lead time instead of the sync-time proxy (updated_at).
+  // NULL on rows synced before this column existed — they re-sync to fill it.
+  ensureColumn(db, "reservation", "created_on", "TEXT");
+
   // One-time backfill: give every apartment the default utilities/cleaning the
   // operator asked for, so the costs are filled in and visible (not just applied
   // implicitly in the profit math). Runs once, guarded by a meta flag.
