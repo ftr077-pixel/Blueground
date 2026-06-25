@@ -304,6 +304,10 @@ export function PacingPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Booking-curve real-date backfill (MiniHotel bookings sync) state.
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
   // Booking-curve month selection (the gear). null = not yet initialized.
   const [monthsSel, setMonthsSel] = useState<Set<string> | null>(null);
   const [gearOpen, setGearOpen] = useState(false);
@@ -375,6 +379,50 @@ export function PacingPanel() {
       /* storage unavailable — selection just won't persist */
     }
     fetchReport(controls);
+  }
+
+  // Pull real booking-creation dates from MiniHotel so the curves stop collapsing
+  // to one step per month. Backfills ~2 years of CreateDate (not the endpoint's
+  // 30-day default) so past stay months fill in too, then reloads the report.
+  async function syncBookings() {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const from = `${Number(today.slice(0, 4)) - 2}-01-01`;
+      const res = await fetch("/api/integrations/minihotel/bookings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from, to: today }),
+      });
+      const b = (await res.json().catch(() => null)) as
+        | { ok?: boolean; stored?: number; parsed?: number; unmappedTypes?: string[]; message?: string }
+        | null;
+      if (!res.ok) throw new Error(`sync failed: ${res.status}`);
+      // The hosted server can't reach MiniHotel (or the connection isn't set up);
+      // the route explains that in `message` — surface it verbatim.
+      if (!b || b.ok === false) {
+        setSyncMsg(b?.message || "Couldn’t sync from here — run it from your whitelisted box.");
+        return;
+      }
+      const stored = b.stored ?? 0;
+      if (stored > 0) {
+        setSyncMsg(`Synced ${stored} booking(s) — rebuilding curves…`);
+        await fetchReport(controls);
+      } else if ((b.parsed ?? 0) > 0) {
+        setSyncMsg(
+          `Pulled ${b.parsed} reservation(s) but none mapped to units` +
+            (b.unmappedTypes?.length ? ` (unmapped room types: ${b.unmappedTypes.join(", ")})` : "") +
+            " — fix the room-type mapping in Settings.",
+        );
+      } else {
+        setSyncMsg("No bookings found in that window.");
+      }
+    } catch (e) {
+      setSyncMsg(e instanceof Error ? e.message : "sync failed");
+    } finally {
+      setSyncing(false);
+    }
   }
 
   const sym = report?.currency === "ILS" ? "₪" : report?.currency === "USD" ? "$" : "";
@@ -708,10 +756,22 @@ export function PacingPanel() {
                 or falling behind in time to fix them.
               </p>
               {report?.curveSource === "reservations" && (
-                <p className="mt-1 text-[11px] text-[hsl(var(--warning))]">
-                  Booking dates approximated from when each reservation first synced (the
-                  reservation feed carries no created-at) — sync MiniHotel bookings for exact curves.
-                </p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <p className="max-w-2xl text-[11px] text-[hsl(var(--warning))]">
+                    Curves are approximate — booking dates are guessed from when each reservation
+                    first synced (the reservation feed carries no created-at). Sync MiniHotel
+                    bookings for the real created-on dates and exact curves.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={syncBookings}
+                    disabled={syncing}
+                    className="shrink-0 rounded-md border border-primary/30 bg-primary/15 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+                  >
+                    {syncing ? "Syncing…" : "Sync booking dates now"}
+                  </button>
+                  {syncMsg && <span className="text-[11px] text-muted-foreground">{syncMsg}</span>}
+                </div>
               )}
             </div>
             <div className="relative shrink-0">
@@ -786,9 +846,20 @@ export function PacingPanel() {
         <CardContent className="space-y-8">
           {report?.curveSource == null ? (
             <div className="grid h-32 place-items-center rounded-lg border border-dashed border-border">
-              <p className="px-4 text-center text-[11px] text-muted-foreground">
-                No booking history yet — sync MiniHotel bookings to build the curves.
-              </p>
+              <div className="space-y-2 px-4 text-center">
+                <p className="text-[11px] text-muted-foreground">
+                  No booking history yet — sync MiniHotel bookings to build the curves.
+                </p>
+                <button
+                  type="button"
+                  onClick={syncBookings}
+                  disabled={syncing}
+                  className="rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+                >
+                  {syncing ? "Syncing…" : "Sync MiniHotel bookings"}
+                </button>
+                {syncMsg && <p className="text-[11px] text-muted-foreground">{syncMsg}</p>}
+              </div>
             </div>
           ) : (
             <>
