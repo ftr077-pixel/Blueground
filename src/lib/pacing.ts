@@ -92,6 +92,7 @@ export interface PacingReport {
   curves: BookingCurve[];
   curveDefaults: string[]; // past 1 + future 6 months (the PriceLabs default)
   curveSource: "bookings" | "reservations" | null;
+  curveApprox: boolean; // true while booking dates are still guessed from sync time (no real created-on yet)
   sources: { market: boolean; compPrices: boolean; yours: "reservations" | "calendar" | null };
 }
 
@@ -385,7 +386,11 @@ interface StayEvent {
   perNight: number | null;
 }
 
-function loadStayEvents(): { events: StayEvent[]; source: "bookings" | "reservations" | null } {
+function loadStayEvents(): {
+  events: StayEvent[];
+  source: "bookings" | "reservations" | null;
+  approx: boolean;
+} {
   const db = getDb();
   const events: StayEvent[] = [];
   const brows = db
@@ -410,14 +415,16 @@ function loadStayEvents(): { events: StayEvent[]; source: "bookings" | "reservat
     const perNight = b.nightly ?? (b.total != null && b.total > 0 ? b.total / nights : null);
     events.push({ created, from: arr, to: dep, perNight });
   }
-  if (events.length > 0) return { events, source: "bookings" };
+  if (events.length > 0) return { events, source: "bookings", approx: false };
 
-  // Fallback: the reservation feed carries no created-at; updated_at (when we
-  // first received the row) is the closest proxy for the booking date.
+  // Fallback to the reservation table. It now carries the real booking-creation
+  // date (created_on = MiniHotel's createDateTime, captured on sync); rows synced
+  // before we started keeping it have only updated_at (first-sync time), which is
+  // the same for a bulk import and collapses the curve to one step per month.
   const excluded = getExcludedRoomCodes();
   const rrows = db
     .prepare(
-      "SELECT room_type, room_number, check_in, check_out, nights, revenue, status, updated_at FROM reservation",
+      "SELECT room_type, room_number, check_in, check_out, nights, revenue, status, created_on, updated_at FROM reservation",
     )
     .all() as Array<{
     room_type: string | null;
@@ -427,15 +434,22 @@ function loadStayEvents(): { events: StayEvent[]; source: "bookings" | "reservat
     nights: number;
     revenue: number;
     status: string | null;
+    created_on: string | null;
     updated_at: string | null;
   }>;
+  let realCreated = 0;
   for (const r of rrows) {
     if (r.status && CANCELLED_RE.test(r.status)) continue;
     if (isExcludedRoom(r.room_type, r.room_number, excluded)) continue;
-    const created = (r.updated_at ?? "").slice(0, 10);
+    // Prefer the real creation date; fall back to the sync-time proxy only when
+    // it's missing (rows not yet re-synced since this column was added).
+    const realDate = (r.created_on ?? "").slice(0, 10);
+    const hasReal = DATE_RE.test(realDate);
+    const created = hasReal ? realDate : (r.updated_at ?? "").slice(0, 10);
     if (!DATE_RE.test(created) || !DATE_RE.test(r.check_in) || !DATE_RE.test(r.check_out)) continue;
     const nights = r.nights > 0 ? r.nights : daysBetween(r.check_in, r.check_out);
     if (nights <= 0) continue;
+    if (hasReal) realCreated++;
     events.push({
       created,
       from: r.check_in,
@@ -443,14 +457,20 @@ function loadStayEvents(): { events: StayEvent[]; source: "bookings" | "reservat
       perNight: r.revenue > 0 ? r.revenue / nights : null,
     });
   }
-  return { events, source: events.length > 0 ? "reservations" : null };
+  // Only flag the curves "approximate" while NO real creation date is available
+  // yet (pre-sync). Once the reservation sync backfills created_on, they're exact.
+  return {
+    events,
+    source: events.length > 0 ? "reservations" : null,
+    approx: events.length > 0 && realCreated === 0,
+  };
 }
 
 function bookingCurves(
   today: string,
   rooms: number,
-): { curves: BookingCurve[]; source: "bookings" | "reservations" | null } {
-  const { events, source } = loadStayEvents();
+): { curves: BookingCurve[]; source: "bookings" | "reservations" | null; approx: boolean } {
+  const { events, source, approx } = loadStayEvents();
   const curYm = today.slice(0, 7);
   const curves: BookingCurve[] = [];
   for (let off = -12; off <= 12; off++) {
@@ -506,7 +526,7 @@ function bookingCurves(
     if (last.dtc > dtcNow) points.push({ ...last, dtc: dtcNow });
     curves.push({ month, label: monthLabel(month), final, points });
   }
-  return { curves, source };
+  return { curves, source, approx };
 }
 
 // ------------------------------------------------------------------ assembly
@@ -734,7 +754,7 @@ export function buildPacingReport(q: PacingQuery): PacingReport {
     }));
 
   const thisKey = bucketStart(today, agg);
-  const { curves, source: curveSource } = bookingCurves(today, yours.rooms);
+  const { curves, source: curveSource, approx: curveApprox } = bookingCurves(today, yours.rooms);
   const curveDefaults: string[] = [];
   for (let off = -1; off <= 6; off++) curveDefaults.push(addMonths(curYm, off));
 
@@ -754,6 +774,7 @@ export function buildPacingReport(q: PacingQuery): PacingReport {
     curves,
     curveDefaults,
     curveSource,
+    curveApprox,
     sources: {
       market: mkt.hasData,
       compPrices: comps.size > 0,

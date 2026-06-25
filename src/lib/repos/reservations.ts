@@ -42,6 +42,7 @@ export interface ReservationInput {
   country?: string | null; // guest country (iso2/iso3/name) — drives VAT when liable unknown
   currency?: string | null;
   status?: string | null;
+  createdOn?: string | null; // booking creation date (YYYY-MM-DD), when the source carries it
 }
 
 interface ReservationSql {
@@ -153,14 +154,14 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
 
   const upsert = db.prepare(
     `INSERT INTO reservation
-       (id, unit_id, room_type, room_number, check_in, check_out, nights, revenue, gross, vat, vat_basis, currency, country, status, source, updated_at)
+       (id, unit_id, room_type, room_number, check_in, check_out, nights, revenue, gross, vat, vat_basis, currency, country, status, created_on, source, updated_at)
      VALUES
-       (@id, @unit_id, @room_type, @room_number, @check_in, @check_out, @nights, @revenue, @gross, @vat, @vat_basis, @currency, @country, @status, 'minihotel', @updated_at)
+       (@id, @unit_id, @room_type, @room_number, @check_in, @check_out, @nights, @revenue, @gross, @vat, @vat_basis, @currency, @country, @status, @created_on, 'minihotel', @updated_at)
      ON CONFLICT(id) DO UPDATE SET
        unit_id = @unit_id, room_type = @room_type, room_number = @room_number,
        check_in = @check_in, check_out = @check_out, nights = @nights, revenue = @revenue,
        gross = @gross, vat = @vat, vat_basis = @vat_basis, currency = @currency, country = @country,
-       status = @status, updated_at = @updated_at`,
+       status = @status, created_on = COALESCE(@created_on, created_on), updated_at = @updated_at`,
   );
 
   let recorded = 0;
@@ -191,6 +192,7 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
         currency: r.currency ?? null,
         country: r.country ?? null,
         status: r.status ?? null,
+        created_on: r.createdOn ? String(r.createdOn).slice(0, 10) : null,
         updated_at: now,
       });
       recorded++;

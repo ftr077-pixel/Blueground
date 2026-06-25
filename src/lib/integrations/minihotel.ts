@@ -1263,6 +1263,7 @@ export interface MiniReservation {
   country?: string; // guest country (iso2/iso3/name) — drives VAT-net
   vatFlag?: string; // MiniHotel's Vat flag ("Yes" incl / "Not" excl), when present
   status?: string;
+  createdOn?: string; // booking creation date (createDateTime), YYYY-MM-DD — drives booking-curve lead time
 }
 
 // Field aliases for the generic JSON path, normalized to lowercase, separators stripped.
@@ -1442,6 +1443,9 @@ function parseBookingsXml(xml: string): MiniReservation[] {
       vatFlag: attr(country, "Vat") || attr(head, "Vat") || undefined,
       currency: attr(totalAttrs, "CurrencyCode") || attr(globalTotal, "CurrencyCode") || undefined,
       status: attr(head, "Status") || undefined,
+      // The real booking date is right here on the head — keep it (we used to drop
+      // it, which forced the booking curves onto the sync-time proxy).
+      createdOn: normDate(attr(head, "createDateTime")) ?? undefined,
     });
   }
   return out;
@@ -1676,6 +1680,7 @@ export async function syncReservationsFromMiniHotel(opts: {
       vatFlag: r.vatFlag,
       currency: r.currency,
       status: r.status,
+      createdOn: r.createdOn,
     })),
   );
 
