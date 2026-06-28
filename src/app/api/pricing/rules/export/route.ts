@@ -107,7 +107,7 @@ export async function GET(req: Request) {
     stats: reservationStats(),
     byMonth: report.byMonth,
     totals: report.totals,
-    recent: report.rows.slice(0, 200),
+    recent: report.rows.slice(0, 500),
   };
 
   // Success / outcomes: did past price changes reach their predicted rank and
@@ -137,7 +137,7 @@ export async function GET(req: Request) {
       effective,
     },
     portfolio: { units },
-    pricingHistory: listPricingHistory(undefined, 200),
+    pricingHistory: listPricingHistory(undefined, 500),
     reservations,
     market: {
       snapshots: market,
