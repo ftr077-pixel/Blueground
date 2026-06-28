@@ -66,6 +66,17 @@ export function nightsBetween(checkIn: string, checkOut: string): number {
 const isoAddDays = (iso: string, n: number) =>
   new Date(Date.parse(iso + "T00:00:00Z") + n * 86400000).toISOString().slice(0, 10);
 
+/** Whole days between two ISO dates (b − a), or null if either is unparseable.
+ *  Used for booking lead time (booked-on → check-in); clamped at 0 so a booking
+ *  keyed on/after arrival reads as same-day rather than negative. */
+function daysBetween(a: string | null | undefined, b: string | null | undefined): number | null {
+  if (!a || !b) return null;
+  const ta = Date.parse(String(a).slice(0, 10) + "T00:00:00Z");
+  const tb = Date.parse(String(b).slice(0, 10) + "T00:00:00Z");
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return null;
+  return Math.max(0, Math.round((tb - ta) / 86400000));
+}
+
 /** RoomTypeCode (upper-cased) -> first mapped Hub unit id. */
 function roomTypeToUnit(): Map<string, string> {
   const m = new Map<string, string>();
@@ -427,6 +438,11 @@ export interface ReservationReportRow {
   vatBasis: string | null; // flag | country | explicit-* | assumed-none
   counted: boolean;
   excludedReason: "cancelled" | "test" | null;
+  /** Booking creation date (YYYY-MM-DD), when the source carried it; else null. */
+  bookedOn: string | null;
+  /** Days from booking to check-in (booked-on → arrival). Null when bookedOn is
+   *  missing. The lead time that makes last-minute pricing measurable. */
+  leadDays: number | null;
 }
 
 export interface MonthBucket {
@@ -459,6 +475,7 @@ interface ReportSql {
   revenue: number;
   currency: string | null;
   vat_basis: string | null;
+  created_on: string | null;
 }
 
 /**
@@ -475,7 +492,7 @@ export function reservationReport(thisMonth?: string): ReservationReport {
       : new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(new Date()).slice(0, 7);
   const rows = getDb()
     .prepare(
-      "SELECT id, status, room_type, room_number, country, check_in, check_out, nights, gross, vat, revenue, currency, vat_basis FROM reservation ORDER BY check_in",
+      "SELECT id, status, room_type, room_number, country, check_in, check_out, nights, gross, vat, revenue, currency, vat_basis, created_on FROM reservation ORDER BY check_in",
     )
     .all() as ReportSql[];
 
@@ -506,6 +523,8 @@ export function reservationReport(thisMonth?: string): ReservationReport {
       vatBasis: r.vat_basis,
       counted,
       excludedReason: reason,
+      bookedOn: r.created_on,
+      leadDays: daysBetween(r.created_on, r.check_in),
     });
 
     if (cancelled) totals.cancelled++;
@@ -548,4 +567,91 @@ export function reservationReport(thisMonth?: string): ReservationReport {
 
   const current = byMonth[ym] ?? { net: 0, gross: 0, vat: 0, count: 0 };
   return { thisMonth: ym, current, byMonth, vatBasis, totals, rows: out };
+}
+
+export interface LeadTimeBucket {
+  label: string;
+  /** Inclusive lower / exclusive upper bound on lead days (upTo null = open-ended). */
+  fromDays: number;
+  upToDays: number | null;
+  bookings: number;
+  nights: number;
+  net: number; // counted NET revenue booked at this lead time
+  adr: number | null; // net per night — the realized nightly rate for this window
+}
+
+export interface BookingLeadStats {
+  /** Counted bookings that carried a booking-creation date (the measurable set). */
+  withLeadTime: number;
+  /** Counted bookings missing a booked-on date (older syncs, manual rows). */
+  unknownLeadTime: number;
+  /** Share of counted bookings with a known lead time, 0..1 (null when none). */
+  coverage: number | null;
+  medianLeadDays: number | null;
+  buckets: LeadTimeBucket[];
+}
+
+/**
+ * Booking lead-time breakdown — the answer surface for "is the last-minute drop
+ * worth it?". Buckets every counted booking by how far ahead it was made
+ * (booked-on → check-in) and reports volume, nights, NET revenue, and realized
+ * ADR per window. A deep last-minute discount is only earning its keep if the
+ * ≤3-day bucket carries real volume at an ADR that beats leaving those nights
+ * empty; if that bucket is thin, the cut is mostly discounting bookings that
+ * would have come anyway. Only bookings with a captured booked-on date count
+ * toward the buckets — `coverage` says how much of the book that is.
+ */
+export function bookingLeadStats(): BookingLeadStats {
+  const bounds: Array<{ label: string; from: number; upTo: number | null }> = [
+    { label: "≤3 days (last-minute)", from: 0, upTo: 4 },
+    { label: "4–7 days", from: 4, upTo: 8 },
+    { label: "8–14 days", from: 8, upTo: 15 },
+    { label: "15–30 days", from: 15, upTo: 31 },
+    { label: "31+ days", from: 31, upTo: null },
+  ];
+  const buckets: LeadTimeBucket[] = bounds.map((b) => ({
+    label: b.label,
+    fromDays: b.from,
+    upToDays: b.upTo,
+    bookings: 0,
+    nights: 0,
+    net: 0,
+    adr: null,
+  }));
+
+  const { rows } = reservationReport();
+  const leads: number[] = [];
+  let withLeadTime = 0;
+  let unknownLeadTime = 0;
+
+  for (const r of rows) {
+    if (!r.counted) continue;
+    if (r.leadDays == null) {
+      unknownLeadTime++;
+      continue;
+    }
+    withLeadTime++;
+    leads.push(r.leadDays);
+    const bkt = buckets.find((b) => r.leadDays! >= b.fromDays && (b.upToDays == null || r.leadDays! < b.upToDays));
+    if (!bkt) continue;
+    bkt.bookings++;
+    bkt.nights += r.nights;
+    bkt.net += r.net;
+  }
+
+  for (const b of buckets) {
+    b.net = Math.round(b.net);
+    b.adr = b.nights > 0 ? Math.round(b.net / b.nights) : null;
+  }
+  leads.sort((a, b) => a - b);
+  const medianLeadDays = leads.length ? leads[Math.floor((leads.length - 1) / 2)] : null;
+  const counted = withLeadTime + unknownLeadTime;
+
+  return {
+    withLeadTime,
+    unknownLeadTime,
+    coverage: counted > 0 ? withLeadTime / counted : null,
+    medianLeadDays,
+    buckets,
+  };
 }

@@ -11,7 +11,7 @@ import { listUnits, listPricingHistory } from "@/lib/repos/units";
 import { listMarketSnapshots } from "@/lib/repos/market";
 import { marketRateBands, marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { suggestionList } from "@/lib/learning/elasticity";
-import { reservationStats, reservationReport } from "@/lib/repos/reservations";
+import { reservationStats, reservationReport, bookingLeadStats } from "@/lib/repos/reservations";
 import { searchResultsStats } from "@/lib/repos/search-results";
 import { buildScorecard } from "@/lib/learning/scorecard";
 import { listGroupNames } from "@/lib/repos/groups";
@@ -114,6 +114,9 @@ export async function GET(req: Request) {
     stats: reservationStats(),
     byMonth: report.byMonth,
     totals: report.totals,
+    // Lead-time breakdown (booked-on → check-in): makes last-minute pricing
+    // measurable — volume + realized ADR by how far ahead each booking was made.
+    leadTime: bookingLeadStats(),
     recent: report.rows.slice(0, rowLimit),
   };
 
@@ -125,7 +128,8 @@ export async function GET(req: Request) {
     _readme:
       "Raw pricing-intelligence snapshot: current config, the portfolio's units, " +
       "every recent price change (pricingHistory), actual bookings (reservations), " +
-      "the search-rank ladder (ranking), the learner's suggestions, and an outcome " +
+      "the search-rank ladder (ranking), booking lead-time stats so last-minute " +
+      "pricing is measurable (reservations.leadTime), the learner's suggestions, and an outcome " +
       "scorecard grading whether past moves hit their target rank and booked " +
       "(success). To tune: hand this to an AI and ask for an override file shaped " +
       "{ scope, overrides }, where `overrides` is a partial of `config.effective` " +
