@@ -11,6 +11,9 @@ import { listUnits, listPricingHistory } from "@/lib/repos/units";
 import { listMarketSnapshots } from "@/lib/repos/market";
 import { marketRateBands, marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { suggestionList } from "@/lib/learning/elasticity";
+import { reservationStats, reservationReport } from "@/lib/repos/reservations";
+import { searchResultsStats } from "@/lib/repos/search-results";
+import { buildScorecard } from "@/lib/learning/scorecard";
 import { listGroupNames } from "@/lib/repos/groups";
 
 export const dynamic = "force-dynamic";
@@ -41,8 +44,15 @@ function validScope(scope: string | null): RuleScope | { error: string } {
 }
 
 export async function GET(req: Request) {
-  const scope = validScope(new URL(req.url).searchParams.get("scope"));
+  const params = new URL(req.url).searchParams;
+  const scope = validScope(params.get("scope"));
   if (typeof scope !== "string") return NextResponse.json(scope, { status: 400 });
+
+  // Row cap for the two bounded history sections (reservations, price changes).
+  // Defaults to 500; ?limit= raises or lowers it, clamped to 1..5000 so a
+  // typo can't pull the whole table or an empty download.
+  const rawLimit = parseInt(params.get("limit") ?? "", 10);
+  const rowLimit = Number.isFinite(rawLimit) ? Math.min(5000, Math.max(1, rawLimit)) : 500;
 
   const overrides = getRuleOverrides(scope);
   const effective =
@@ -88,19 +98,44 @@ export async function GET(req: Request) {
     currentNightly: s.currentNightly,
     suggestedNightly: s.suggestedNightly,
     deltaPct: s.deltaPct,
+    // Ranking context: where the listing sits now and where the move lands it.
+    currentPage: s.currentPage,
+    expectedPage: s.expectedPage,
+    targetPage: s.targetPage,
+    suggestedPage: s.suggestedPage,
     confidence: s.confidence,
     profitAfter: s.profitAfter,
   }));
 
+  // Reservations: compact aggregates (monthly NET, totals, VAT basis) plus
+  // bounded raw bookings so an AI sees the actual demand, not just summaries.
+  const report = reservationReport();
+  const reservations = {
+    stats: reservationStats(),
+    byMonth: report.byMonth,
+    totals: report.totals,
+    recent: report.rows.slice(0, rowLimit),
+  };
+
+  // Success / outcomes: did past price changes reach their predicted rank and
+  // book within the window? This is the engine's own self-grading.
+  const scorecard = buildScorecard({ windowDays: 21 });
+
   return NextResponse.json({
     _readme:
-      "Raw pricing-intelligence snapshot. To tune: hand this to an AI and ask for an " +
-      "override file shaped { scope, overrides }, where `overrides` is a partial of " +
-      "`config.effective` (only the sections to change). Re-import it via POST " +
-      "/api/pricing/rules/import to preview the price impact before it goes live.",
+      "Raw pricing-intelligence snapshot: current config, the portfolio's units, " +
+      "every recent price change (pricingHistory), actual bookings (reservations), " +
+      "the search-rank ladder (ranking), the learner's suggestions, and an outcome " +
+      "scorecard grading whether past moves hit their target rank and booked " +
+      "(success). To tune: hand this to an AI and ask for an override file shaped " +
+      "{ scope, overrides }, where `overrides` is a partial of `config.effective` " +
+      "(only the sections to change). Re-import it via POST /api/pricing/rules/import " +
+      "to preview the price impact before it goes live.",
     meta: {
       generatedAt: new Date().toISOString(),
       scope,
+      // Cap applied to reservations.recent and pricingHistory (raise via ?limit=).
+      rowLimit,
       app: "Rental Orchestrator Hub — pricing engine",
       engine: "deterministic rule stack (no model); overrides drive it per scope",
     },
@@ -111,12 +146,15 @@ export async function GET(req: Request) {
       effective,
     },
     portfolio: { units },
-    pricingHistory: listPricingHistory(undefined, 200),
+    pricingHistory: listPricingHistory(undefined, rowLimit),
+    reservations,
     market: {
       snapshots: market,
       bands: marketRateBands(),
       minNights: marketMinNightsBenchmark(),
     },
+    ranking: { ladderRuns: searchResultsStats(20) },
     learning: { suggestions },
+    success: { scorecard },
   });
 }
