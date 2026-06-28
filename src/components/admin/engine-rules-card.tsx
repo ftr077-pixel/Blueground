@@ -620,6 +620,8 @@ export function EngineRulesCard() {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Status line for an imported override file loaded into the editor (pre-Save).
+  const [importMsg, setImportMsg] = useState<string | null>(null);
 
   // Groups manager state
   const [newGroup, setNewGroup] = useState("");
@@ -1159,6 +1161,76 @@ export function EngineRulesCard() {
     } finally {
       setTableBusy(false);
     }
+  }
+
+  // Raw-data export for the AI-in-the-loop tuning workflow: download the current
+  // scope's config plus the performance context an AI needs to propose overrides.
+  async function exportBundle() {
+    setBusy(true);
+    setErr(null);
+    setImportMsg(null);
+    try {
+      const res = await fetch(`/api/pricing/rules/export?scope=${encodeURIComponent(scope)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`export failed: ${res.status}`);
+      const text = JSON.stringify(await res.json(), null, 2);
+      const blob = new Blob([text], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `pricing-export-${scope.replace(/[^a-z0-9]+/gi, "-")}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "export failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Import an AI-produced override file: DRY-RUN it against the current scope and
+  // load the resulting config into the editor below. Nothing is saved — the
+  // operator reviews the price diff (Review changes) and commits with Save.
+  function importBundle() {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.accept = "application/json,.json";
+    inp.onchange = async () => {
+      const file = inp.files?.[0];
+      if (!file) return;
+      setBusy(true);
+      setErr(null);
+      setImportMsg(null);
+      try {
+        const parsed = JSON.parse(await file.text()) as Record<string, unknown>;
+        const fileScope = (parsed.scope as string | undefined) ?? null;
+        const res = await fetch("/api/pricing/rules/import", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          // Current editing scope wins, so the import always previews where you're
+          // looking; the file's own scope is only a hint we surface below.
+          body: JSON.stringify({ ...parsed, scope, apply: false }),
+        });
+        if (!res.ok) {
+          const b = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(b?.error || `import failed: ${res.status}`);
+        }
+        const b = (await res.json()) as { effective: EffectiveConfig };
+        setF(toForm(b.effective));
+        setPvStale(true);
+        setImportMsg(
+          `Loaded into ${scopeLabel} — review the price diff, then Save to apply.` +
+            (fileScope && fileScope !== scope
+              ? ` (File was tagged "${fileScope}"; applied to the scope you're editing instead.)`
+              : ""),
+        );
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : "import failed");
+      } finally {
+        setBusy(false);
+      }
+    };
+    inp.click();
   }
 
   function downloadTableCsv() {
@@ -2326,6 +2398,27 @@ export function EngineRulesCard() {
             restriction never retracts it from MiniHotel by itself — clearing overrides re-pushes
             the defaults in the same action (Rates Calendar → Date Specific Overrides).
           </span>
+        </div>
+
+        <div className="space-y-1.5 rounded-md border border-dashed border-border/70 bg-muted/10 p-3">
+          <span className="text-xs font-medium text-foreground">AI tuning round-trip</span>
+          <p className="text-[10px] text-muted-foreground/80">
+            Export the raw data + current config for this scope, hand it to an AI, and import the
+            override file it returns. Import loads the proposed config into the form below without
+            saving — review the price impact (Preview Prices), then Save to apply. The engine stays
+            deterministic; nothing prices autonomously.
+          </p>
+          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            <button type="button" disabled={busy} onClick={exportBundle} className={btnGhost}>
+              ⬇ Export raw data
+            </button>
+            <button type="button" disabled={busy} onClick={importBundle} className={btnGhost}>
+              ⬆ Import config file
+            </button>
+            {importMsg && (
+              <span className="text-[10px] text-[hsl(var(--primary))]">{importMsg}</span>
+            )}
+          </div>
         </div>
 
         <div className="space-y-2 border-t border-border/60 pt-3">
