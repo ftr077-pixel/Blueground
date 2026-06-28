@@ -11,6 +11,9 @@ import { listUnits, listPricingHistory } from "@/lib/repos/units";
 import { listMarketSnapshots } from "@/lib/repos/market";
 import { marketRateBands, marketMinNightsBenchmark } from "@/lib/repos/visibility";
 import { suggestionList } from "@/lib/learning/elasticity";
+import { reservationStats, reservationReport } from "@/lib/repos/reservations";
+import { searchResultsStats } from "@/lib/repos/search-results";
+import { buildScorecard } from "@/lib/learning/scorecard";
 import { listGroupNames } from "@/lib/repos/groups";
 
 export const dynamic = "force-dynamic";
@@ -88,16 +91,39 @@ export async function GET(req: Request) {
     currentNightly: s.currentNightly,
     suggestedNightly: s.suggestedNightly,
     deltaPct: s.deltaPct,
+    // Ranking context: where the listing sits now and where the move lands it.
+    currentPage: s.currentPage,
+    expectedPage: s.expectedPage,
+    targetPage: s.targetPage,
+    suggestedPage: s.suggestedPage,
     confidence: s.confidence,
     profitAfter: s.profitAfter,
   }));
 
+  // Reservations: compact aggregates (monthly NET, totals, VAT basis) plus
+  // bounded raw bookings so an AI sees the actual demand, not just summaries.
+  const report = reservationReport();
+  const reservations = {
+    stats: reservationStats(),
+    byMonth: report.byMonth,
+    totals: report.totals,
+    recent: report.rows.slice(0, 200),
+  };
+
+  // Success / outcomes: did past price changes reach their predicted rank and
+  // book within the window? This is the engine's own self-grading.
+  const scorecard = buildScorecard({ windowDays: 21 });
+
   return NextResponse.json({
     _readme:
-      "Raw pricing-intelligence snapshot. To tune: hand this to an AI and ask for an " +
-      "override file shaped { scope, overrides }, where `overrides` is a partial of " +
-      "`config.effective` (only the sections to change). Re-import it via POST " +
-      "/api/pricing/rules/import to preview the price impact before it goes live.",
+      "Raw pricing-intelligence snapshot: current config, the portfolio's units, " +
+      "every recent price change (pricingHistory), actual bookings (reservations), " +
+      "the search-rank ladder (ranking), the learner's suggestions, and an outcome " +
+      "scorecard grading whether past moves hit their target rank and booked " +
+      "(success). To tune: hand this to an AI and ask for an override file shaped " +
+      "{ scope, overrides }, where `overrides` is a partial of `config.effective` " +
+      "(only the sections to change). Re-import it via POST /api/pricing/rules/import " +
+      "to preview the price impact before it goes live.",
     meta: {
       generatedAt: new Date().toISOString(),
       scope,
@@ -112,11 +138,14 @@ export async function GET(req: Request) {
     },
     portfolio: { units },
     pricingHistory: listPricingHistory(undefined, 200),
+    reservations,
     market: {
       snapshots: market,
       bands: marketRateBands(),
       minNights: marketMinNightsBenchmark(),
     },
+    ranking: { ladderRuns: searchResultsStats(20) },
     learning: { suggestions },
+    success: { scorecard },
   });
 }
