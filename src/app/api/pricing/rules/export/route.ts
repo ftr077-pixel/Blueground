@@ -44,8 +44,15 @@ function validScope(scope: string | null): RuleScope | { error: string } {
 }
 
 export async function GET(req: Request) {
-  const scope = validScope(new URL(req.url).searchParams.get("scope"));
+  const params = new URL(req.url).searchParams;
+  const scope = validScope(params.get("scope"));
   if (typeof scope !== "string") return NextResponse.json(scope, { status: 400 });
+
+  // Row cap for the two bounded history sections (reservations, price changes).
+  // Defaults to 500; ?limit= raises or lowers it, clamped to 1..5000 so a
+  // typo can't pull the whole table or an empty download.
+  const rawLimit = parseInt(params.get("limit") ?? "", 10);
+  const rowLimit = Number.isFinite(rawLimit) ? Math.min(5000, Math.max(1, rawLimit)) : 500;
 
   const overrides = getRuleOverrides(scope);
   const effective =
@@ -107,7 +114,7 @@ export async function GET(req: Request) {
     stats: reservationStats(),
     byMonth: report.byMonth,
     totals: report.totals,
-    recent: report.rows.slice(0, 500),
+    recent: report.rows.slice(0, rowLimit),
   };
 
   // Success / outcomes: did past price changes reach their predicted rank and
@@ -127,6 +134,8 @@ export async function GET(req: Request) {
     meta: {
       generatedAt: new Date().toISOString(),
       scope,
+      // Cap applied to reservations.recent and pricingHistory (raise via ?limit=).
+      rowLimit,
       app: "Rental Orchestrator Hub — pricing engine",
       engine: "deterministic rule stack (no model); overrides drive it per scope",
     },
@@ -137,7 +146,7 @@ export async function GET(req: Request) {
       effective,
     },
     portfolio: { units },
-    pricingHistory: listPricingHistory(undefined, 500),
+    pricingHistory: listPricingHistory(undefined, rowLimit),
     reservations,
     market: {
       snapshots: market,
