@@ -622,6 +622,8 @@ export function EngineRulesCard() {
   const [err, setErr] = useState<string | null>(null);
   // Status line for an imported override file loaded into the editor (pre-Save).
   const [importMsg, setImportMsg] = useState<string | null>(null);
+  // How many reservation + price-change rows the export bundles (server clamps 1..5000).
+  const [exportLimit, setExportLimit] = useState("500");
 
   // Groups manager state
   const [newGroup, setNewGroup] = useState("");
@@ -1170,9 +1172,11 @@ export function EngineRulesCard() {
     setErr(null);
     setImportMsg(null);
     try {
-      const res = await fetch(`/api/pricing/rules/export?scope=${encodeURIComponent(scope)}`, {
-        cache: "no-store",
-      });
+      const lim = Math.min(5000, Math.max(1, parseInt(exportLimit, 10) || 500));
+      const res = await fetch(
+        `/api/pricing/rules/export?scope=${encodeURIComponent(scope)}&limit=${lim}`,
+        { cache: "no-store" },
+      );
       if (!res.ok) throw new Error(`export failed: ${res.status}`);
       const text = JSON.stringify(await res.json(), null, 2);
       const blob = new Blob([text], { type: "application/json" });
@@ -2412,6 +2416,18 @@ export function EngineRulesCard() {
             <button type="button" disabled={busy} onClick={exportBundle} className={btnGhost}>
               ⬇ Export raw data
             </button>
+            <label className="inline-flex items-center gap-1 text-[10px] text-muted-foreground/80">
+              rows
+              <input
+                className={`${input} w-20`}
+                type="number"
+                min={1}
+                max={5000}
+                value={exportLimit}
+                onChange={(e) => setExportLimit(e.target.value)}
+                title="Reservation & price-change rows to include (1–5000)"
+              />
+            </label>
             <button type="button" disabled={busy} onClick={importBundle} className={btnGhost}>
               ⬆ Import config file
             </button>
