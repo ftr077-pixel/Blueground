@@ -120,6 +120,23 @@ no further wiring.
 | `PRICELABS_NEIGHBORHOOD` | Which area the report is for. `*` (default) fans a city-wide report out to **every** portfolio neighborhood; or set a specific `unit.neighborhood`, or a comma-separated list |
 | `PRICELABS_CURRENCY` | Display currency label (default `ILS`) |
 
+### Routine: drop a PDF, auto-ingest — `pricelabs_ingest_dir.py`
+
+For a hands-off routine, don't automate the PriceLabs login (brittle + ToS). Instead:
+**export the PDF whenever** (MTR market data moves slowly — weekly/monthly is plenty)
+and **drop it in the inbox**. A cron scans the folder and ingests anything new, then
+moves it to `processed/` (or `failed/`) so each PDF loads exactly once.
+
+```bash
+PRICELABS_INBOX=~/pricelabs-inbox APP_URL=http://localhost:3000 SCRAPER_API_KEY=xxx \
+  python pricelabs_ingest_dir.py
+```
+
+`deploy/setup-box.sh` wires this up automatically (on by default): it creates
+`<app>/scraper/pricelabs-inbox` and a cron (`PRICELABS_CRON_SCHEDULE`, default every
+30 min). Drop a PDF in that folder and the next tick loads it — `tail -f
+/var/log/pricelabs-pdf.log`. Turn it off with `PRICELABS_INGEST=0`.
+
 ### What it extracts (and what it can't)
 
 Only the PDF **text layer** is read, which covers the summary-level data cleanly:

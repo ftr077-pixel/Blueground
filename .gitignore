@@ -15,3 +15,6 @@ __pycache__/
 *.pyc
 .venv/
 scraper/.venv/
+
+# PriceLabs PDF drop folder (operator's downloaded reports, not source)
+scraper/pricelabs-inbox/
