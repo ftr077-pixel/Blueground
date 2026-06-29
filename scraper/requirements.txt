@@ -1,1 +1,4 @@
 pyairbnb==2.2.1
+# PriceLabs Market Dashboard PDF parsing (pricelabs_pdf.py). Pure-Python, no
+# system deps — reads the PDF text layer only.
+pypdf>=4.0
