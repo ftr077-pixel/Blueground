@@ -91,3 +91,67 @@ Daily cron at 08:00:
   vantage, so treat the index as a **relative trend**, not absolute truth.
 - Airbnb caps total search results (~a few hundred). "Not found but in-area"
   means *ranked beyond the cap* — itself a useful signal.
+
+---
+
+# PriceLabs market data (PDF) — `pricelabs_pdf.py`
+
+A second, separate tool (not Airbnb). If you have a PriceLabs subscription, you can
+feed its **Market Dashboard** into the Hub without scraping the site, hitting the
+API, or using the proxy: **download the dashboard as a PDF**, then parse it.
+
+```bash
+cd scraper
+pip install -r requirements.txt          # adds pypdf
+python pricelabs_pdf.py MarketDashboardTLV.pdf --dry-run   # preview, post nothing
+APP_URL=http://localhost:3000 SCRAPER_API_KEY=xxx \
+  python pricelabs_pdf.py MarketDashboardTLV.pdf           # parse + ingest
+```
+
+It POSTs to `POST /api/market/pricelabs` (same `x-scraper-key` auth as the other box
+endpoints) and the rows land in `market_snapshots` — the **same** table the pricing
+engine already reads (`src/lib/pricing/providers.ts`), so prices start using it with
+no further wiring.
+
+| Var | Purpose |
+|-----|---------|
+| `APP_URL` | Dashboard base URL (default `http://localhost:3000`) |
+| `SCRAPER_API_KEY` | Must match the app's `SCRAPER_API_KEY` |
+| `PRICELABS_NEIGHBORHOOD` | Which area the report is for. `*` (default) fans a city-wide report out to **every** portfolio neighborhood; or set a specific `unit.neighborhood`, or a comma-separated list |
+| `PRICELABS_CURRENCY` | Display currency label (default `ILS`) |
+
+### Routine: drop a PDF, auto-ingest — `pricelabs_ingest_dir.py`
+
+For a hands-off routine, don't automate the PriceLabs login (brittle + ToS). Instead:
+**export the PDF whenever** (MTR market data moves slowly — weekly/monthly is plenty)
+and **drop it in the inbox**. A cron scans the folder and ingests anything new, then
+moves it to `processed/` (or `failed/`) so each PDF loads exactly once.
+
+```bash
+PRICELABS_INBOX=~/pricelabs-inbox APP_URL=http://localhost:3000 SCRAPER_API_KEY=xxx \
+  python pricelabs_ingest_dir.py
+```
+
+`deploy/setup-box.sh` wires this up automatically (on by default): it creates
+`<app>/scraper/pricelabs-inbox` and a cron (`PRICELABS_CRON_SCHEDULE`, default every
+30 min). Drop a PDF in that folder and the next tick loads it — `tail -f
+/var/log/pricelabs-pdf.log`. Turn it off with `PRICELABS_INGEST=0`.
+
+### What it extracts (and what it can't)
+
+Only the PDF **text layer** is read, which covers the summary-level data cleanly:
+
+- **KPIs** — occupancy, ADR, RevPAR, booking window, length-of-stay, listings, revenue.
+- **Summary Table** — per-bedroom median nightly / weekly / **monthly** booked price
+  (the monthly median is the key mid-term comp).
+- **Key Future Dates** — high-demand date ranges with a % occupancy lift, projected
+  onto the baseline occupancy as per-day `pacing` points.
+
+The dashboard's **charts are images**, so their granular per-date series (the
+future-occupancy curve, booking curves, day-of-week factors, amenities, policies)
+are **not** in the PDF and can't be read from it. For those, use PriceLabs' **CSV
+export / API** and POST `pacing[]` / `metrics[]` to the same endpoint — the shape
+already supports them.
+
+> ⚠️ `market_snapshots` is keyed by neighborhood. Run **one** market source per area
+> (AirROI *or* PriceLabs) — whichever syncs last wins for that neighborhood.

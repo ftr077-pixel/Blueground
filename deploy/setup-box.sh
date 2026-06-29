@@ -38,9 +38,17 @@ PROXY_URL="${PROXY_URL:-}"
 AIRROI_API_KEY="${AIRROI_API_KEY:-}"
 AIRROI_REGION_HINT="${AIRROI_REGION_HINT:-Tel Aviv-Yafo, Israel}"
 
-# Daily scan time + market-sync time (cron syntax, box local time).
+# PriceLabs PDF auto-ingest — watches a drop folder and loads any Market Dashboard
+# PDF you export there (no proxy / no login). On by default; harmless no-op when
+# the inbox is empty. PRICELABS_NEIGHBORHOOD "*" fans a city-wide report out to
+# every portfolio neighborhood.
+PRICELABS_INGEST="${PRICELABS_INGEST:-1}"
+PRICELABS_NEIGHBORHOOD="${PRICELABS_NEIGHBORHOOD:-*}"
+
+# Daily scan time + market-sync time + PriceLabs inbox poll (cron syntax, box local time).
 CRON_SCHEDULE="${CRON_SCHEDULE:-0 8 * * *}"
 MARKET_CRON_SCHEDULE="${MARKET_CRON_SCHEDULE:-0 7 * * *}"
+PRICELABS_CRON_SCHEDULE="${PRICELABS_CRON_SCHEDULE:-*/30 * * * *}"
 # -----------------------------------------------------------------------------
 
 log()  { echo -e "\n\033[1;36m== $* ==\033[0m"; }
@@ -169,6 +177,23 @@ else
   rm -f /etc/cron.d/market-sync
 fi
 
+if [ "$PRICELABS_INGEST" = "1" ]; then
+  PRICELABS_INBOX="${PRICELABS_INBOX:-$APP_DIR/scraper/pricelabs-inbox}"
+  log "PriceLabs PDF inbox + ingest cron ($PRICELABS_CRON_SCHEDULE)"
+  mkdir -p "$PRICELABS_INBOX"
+  # No proxy/creds needed — it just parses PDFs you drop in the inbox and posts
+  # them to localhost. PRICELABS_NEIGHBORHOOD is single-quoted so '*' isn't globbed.
+  cat >/etc/cron.d/pricelabs-pdf <<CRON
+SHELL=/bin/bash
+$PRICELABS_CRON_SCHEDULE root cd $APP_DIR/scraper && APP_URL=http://localhost:$APP_PORT SCRAPER_API_KEY=$SCRAPER_API_KEY PRICELABS_INBOX='$PRICELABS_INBOX' PRICELABS_NEIGHBORHOOD='$PRICELABS_NEIGHBORHOOD' ./.venv/bin/python pricelabs_ingest_dir.py >> /var/log/pricelabs-pdf.log 2>&1
+CRON
+  # Root-only: the file embeds the API key.
+  chmod 0600 /etc/cron.d/pricelabs-pdf
+else
+  log "PriceLabs PDF auto-ingest left OFF (PRICELABS_INGEST != 1)"
+  rm -f /etc/cron.d/pricelabs-pdf
+fi
+
 if [ -n "$DOMAIN" ]; then
   log "Caddy (HTTPS + login) for $DOMAIN"
   HASH="$(caddy hash-password --plaintext "$BASIC_AUTH_PASS")"
@@ -204,4 +229,11 @@ else
   echo "script with PROXY_URL set to turn on the nightly scan."
 fi
 echo
+if [ "$PRICELABS_INGEST" = "1" ]; then
+  echo "PriceLabs market data: export a Market Dashboard PDF and drop it in"
+  echo "  ${PRICELABS_INBOX:-$APP_DIR/scraper/pricelabs-inbox}"
+  echo "  (auto-ingested every poll; processed files move to processed/)."
+  echo
+fi
 echo "Logs:  journalctl -u rohub -f   |   tail -f /var/log/visibility-scan.log"
+[ "$PRICELABS_INGEST" = "1" ] && echo "       tail -f /var/log/pricelabs-pdf.log"

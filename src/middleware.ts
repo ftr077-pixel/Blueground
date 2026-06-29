@@ -11,6 +11,8 @@ const BYPASS = [
   // without the bypass, Basic auth 401s the box job and revenue actuals never land.
   "/api/reservations/snapshot",
   "/api/market/sync",
+  // PriceLabs Market Dashboard PDF ingest (pricelabs_pdf.py posts here, x-scraper-key auth).
+  "/api/market/pricelabs",
 ];
 
 export function middleware(req: NextRequest) {
