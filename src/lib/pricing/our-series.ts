@@ -8,6 +8,7 @@ import { occupancyByMonth } from "@/lib/repos/occupancy";
 import { monthlyReservationRevenue } from "@/lib/repos/reservations";
 import { listUnits } from "@/lib/repos/units";
 import { unavailableDatesForUnit } from "@/lib/repos/rates";
+import { buildPacingReport } from "@/lib/pacing";
 
 export interface OurMonthly {
   month: string; // YYYY-MM
@@ -29,11 +30,21 @@ export interface OurByBedroom {
   adr: number;
   occupancy: number; // %
 }
+export interface OurForwardRate {
+  date: string;
+  rate: number; // our booked nightly for that check-in date
+}
+export interface OurPickup {
+  month: string; // YYYY-MM
+  points: { w: number; occ: number }[]; // w = days out (≈ booking window), occ %
+}
 export interface OurSeries {
   monthly: OurMonthly[];
   forwardOcc: OurForward[];
+  forwardRate: OurForwardRate[];
   los: OurLos[];
   byBedroom: OurByBedroom[];
+  pickup: OurPickup[];
   hasData: boolean; // true when there's real reservation/occupancy history (not just units)
 }
 
@@ -79,8 +90,15 @@ export function ourMarketSeries(): OurSeries {
   // Reservations drive both LOS and realized per-bedroom ADR (revenue ÷ nights —
   // unit base rates are often unset, so realized rate is the honest comparison).
   const resRows = getDb()
-    .prepare("SELECT unit_id, nights, revenue, status FROM reservation")
-    .all() as { unit_id: string | null; nights: number; revenue: number; status: string | null }[];
+    .prepare("SELECT unit_id, check_in, check_out, nights, revenue, status FROM reservation")
+    .all() as {
+    unit_id: string | null;
+    check_in: string;
+    check_out: string;
+    nights: number;
+    revenue: number;
+    status: string | null;
+  }[];
   const unitBed = new Map(units.map((u) => [u.id, u.bedrooms]));
 
   const losCount: Record<string, number> = {};
@@ -119,11 +137,49 @@ export function ourMarketSeries(): OurSeries {
       occupancy: 0, // not split by bedroom — the market column carries occupancy
     }));
 
+  // Forward booked nightly rate: our reservations covering each future date.
+  const horizonEnd = isoAdd(today, HORIZON);
+  const fwdRate = new Map<string, { sum: number; n: number }>();
+  for (const r of resRows) {
+    if (r.status && CANCELLED_RE.test(r.status)) continue;
+    if (!(r.nights > 0) || !r.check_in) continue;
+    const nightly = r.revenue / r.nights;
+    for (let i = 0; i < r.nights; i++) {
+      const d = isoAdd(r.check_in, i);
+      if (d < today || d > horizonEnd) continue;
+      const e = fwdRate.get(d) ?? { sum: 0, n: 0 };
+      e.sum += nightly;
+      e.n++;
+      fwdRate.set(d, e);
+    }
+  }
+  const forwardRate: OurForwardRate[] = [...fwdRate.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([date, v]) => ({ date, rate: Math.round(v.sum / v.n) }));
+
+  // Our booking-pickup curves — reuse the Pacing report (occupancy build-up per
+  // stay-month). x = days-out (dtc), close enough to overlay on the market's
+  // booking-window curve.
+  let pickup: OurPickup[] = [];
+  try {
+    const rep = buildPacingReport({});
+    pickup = (rep.curves ?? []).map((c) => ({
+      month: c.month,
+      points: c.points
+        .map((p) => ({ w: p.dtc, occ: Math.round(p.occ) }))
+        .sort((a, b) => a.w - b.w),
+    }));
+  } catch {
+    pickup = [];
+  }
+
   return {
     monthly,
     forwardOcc: fwdHasData ? forwardOcc : [],
+    forwardRate,
     los,
     byBedroom,
+    pickup,
     hasData: monthly.length > 0 || losTotal > 0,
   };
 }

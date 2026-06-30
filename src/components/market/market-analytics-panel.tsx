@@ -66,8 +66,10 @@ interface Snapshot {
 interface OurSeries {
   monthly: { month: string; occupancy: number; adr: number; revpar: number }[];
   forwardOcc: { date: string; occupancy: number }[];
+  forwardRate: { date: string; rate: number }[];
   los: { bucket: string; share: number }[];
   byBedroom: { label: string; count: number; adr: number; occupancy: number }[];
+  pickup: { month: string; points: { w: number; occ: number }[] }[];
   hasData: boolean;
 }
 interface MarketResp {
@@ -104,6 +106,14 @@ const shortDate = (iso: string) => {
 const monthLabel = (iso: string) => {
   const [y, m] = iso.slice(0, 10).split("-").map(Number);
   return y && m ? `${m}/${String(y).slice(2)}` : iso;
+};
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+// "February 2026" (PriceLabs booking-curve label) → "2026-02" (our pickup key).
+const monthKey = (label: string | null) => {
+  if (!label) return null;
+  const [name, yr] = label.split(" ");
+  const i = MONTHS.indexOf(name);
+  return i >= 0 && yr ? `${yr}-${String(i + 1).padStart(2, "0")}` : null;
 };
 const fmtRel = (iso: string) => {
   const h = Math.round((Date.now() - new Date(iso).getTime()) / 3_600_000);
@@ -366,8 +376,10 @@ export function MarketAnalyticsPanel() {
   const ourMonthly = new Map((ours?.monthly ?? []).map((o) => [o.month, o]));
   const ourFwd = new Map((ours?.forwardOcc ?? []).map((p) => [p.date, p.occupancy]));
   const ourLos = new Map((ours?.los ?? []).map((b) => [b.bucket, b.share]));
+  const ourFwdRate = new Map((ours?.forwardRate ?? []).map((p) => [p.date, p.rate]));
   const hasOurMonthly = (ours?.monthly?.length ?? 0) > 0;
   const hasOurFwd = (ours?.forwardOcc?.length ?? 0) > 0;
+  const hasOurRate = (ours?.forwardRate?.length ?? 0) > 0;
   const hasOurLos = !!ours?.los?.some((b) => b.share > 0);
 
   const histOcc = snap.metrics.map((m) => {
@@ -393,11 +405,20 @@ export function MarketAnalyticsPanel() {
     label: shortDate(p.date),
     booked: Math.round(p.booked_rate_avg),
     available: Math.round(p.available_rate_avg),
+    ours: ourFwdRate.get(p.date) ?? null,
   }));
 
   const bc = snap.extras?.bookingCurves ?? [];
   const curMonth = bcMonth && bc.some((m) => m.month === bcMonth) ? bcMonth : (bc[0]?.month ?? null);
   const bcPoints = bc.find((m) => m.month === curMonth)?.points ?? [];
+  // Merge our pickup curve (by days-out) with the market's for the selected month.
+  const ourPickMonth = (ours?.pickup ?? []).find((p) => p.month === monthKey(curMonth));
+  const hasOurPick = !!ourPickMonth?.points?.length;
+  const mktByW = new Map(bcPoints.map((p) => [p.w, p]));
+  const oursByW = new Map((ourPickMonth?.points ?? []).map((p) => [p.w, p.occ]));
+  const bcData = Array.from(new Set([...bcPoints.map((p) => p.w), ...(ourPickMonth?.points ?? []).map((p) => p.w)]))
+    .sort((a, b) => a - b)
+    .map((w) => ({ w, o: mktByW.get(w)?.o ?? null, ly: mktByW.get(w)?.ly ?? null, ours: oursByW.get(w) ?? null }));
   const losData = (snap.extras?.los ?? []).map((b) => ({ label: b.bucket, share: b.share, bnp: b.bnp, ours: ourLos.get(b.bucket) ?? null }));
   const tbl = snap.extras?.summaryTable ?? null;
 
@@ -535,6 +556,9 @@ export function MarketAnalyticsPanel() {
           <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => `${sym}${v}`} />
           <Line type="monotone" dataKey="booked" name="Booked" stroke="#16a34a" strokeWidth={2} dot={false} isAnimationActive={false} />
           <Line type="monotone" dataKey="available" name="Available" stroke="#64748b" strokeWidth={2} dot={false} isAnimationActive={false} />
+          {hasOurRate && (
+            <Line type="monotone" dataKey="ours" name="Ours (booked)" stroke="#ea580c" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+          )}
         </LineChart>
       </ChartCard>
 
@@ -564,12 +588,12 @@ export function MarketAnalyticsPanel() {
             </div>
           </CardHeader>
           <CardContent>
-            {bcPoints.length === 0 ? (
+            {bcData.length === 0 ? (
               <p className="text-[11px] text-muted-foreground">No data for this month.</p>
             ) : (
               <div style={{ width: "100%", height: 240 }}>
                 <ResponsiveContainer>
-                  <LineChart data={bcPoints} margin={{ top: 8, right: 12, bottom: 4, left: -12 }}>
+                  <LineChart data={bcData} margin={{ top: 8, right: 12, bottom: 4, left: -12 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
                     <XAxis
                       dataKey="w"
@@ -585,8 +609,11 @@ export function MarketAnalyticsPanel() {
                       labelFormatter={(l) => `${l} days before check-in`}
                       formatter={(v, n) => [`${v}%`, String(n)]}
                     />
-                    <Line type="monotone" dataKey="o" name="This year" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="ly" name="Last year" stroke="#94a3b8" strokeWidth={2} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="o" name="Market" stroke="#2563eb" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+                    <Line type="monotone" dataKey="ly" name="Market LY" stroke="#94a3b8" strokeWidth={2} strokeDasharray="4 3" dot={false} connectNulls isAnimationActive={false} />
+                    {hasOurPick && (
+                      <Line type="monotone" dataKey="ours" name="Ours" stroke="#ea580c" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+                    )}
                   </LineChart>
                 </ResponsiveContainer>
               </div>
