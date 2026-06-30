@@ -243,6 +243,8 @@ export function MarketAnalyticsPanel() {
   if (loading) return <p className="text-xs text-muted-foreground">Loading market data…</p>;
 
   const snapshots = resp?.snapshots ?? [];
+  const source = resp?.source ?? "none";
+  const isPL = source === "pricelabs";
 
   if (snapshots.length === 0) {
     return (
@@ -250,9 +252,12 @@ export function MarketAnalyticsPanel() {
         <CardContent className="space-y-3 py-8 text-center">
           <p className="text-sm font-medium">No market data yet</p>
           <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
+            Import a PriceLabs market report to populate this dashboard:
+            <br />
+            <code className="text-[11px]">python scraper/pricelabs_csv.py &lt;reports-dir&gt;</code>
             {resp?.configured
-              ? "AirROI is connected. Pick a unit type and click Sync now."
-              : "AirROI isn't configured yet (set AIRROI_API_KEY). Once it is, Sync now pulls the data."}
+              ? " — or pick a unit type and click Sync now to pull AirROI instead."
+              : ""}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-2">
             {BedroomSelect}
@@ -306,13 +311,19 @@ export function MarketAnalyticsPanel() {
           ) : (
             <span className="text-sm font-medium">{areaName}</span>
           )}
-          <Badge variant="success">live · AirROI</Badge>
+          <Badge variant="success">live · {isPL ? "PriceLabs" : "AirROI"}</Badge>
           {snap.filterLabel && <Badge variant="info">{snap.filterLabel}</Badge>}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-[11px] text-muted-foreground">updated {fmtRel(snap.fetchedAt)}</span>
-          {BedroomSelect}
-          {SyncBtn}
+          {isPL ? (
+            <span className="text-[11px] text-muted-foreground">imported from PriceLabs reports</span>
+          ) : (
+            <>
+              {BedroomSelect}
+              {SyncBtn}
+            </>
+          )}
         </div>
       </div>
 
@@ -340,7 +351,7 @@ export function MarketAnalyticsPanel() {
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
           <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => [`${v}%`, "Occupancy"]} />
-          <Line type="monotone" dataKey="occupancy" stroke="#2563eb" strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="occupancy" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
       </ChartCard>
 
@@ -354,8 +365,8 @@ export function MarketAnalyticsPanel() {
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis tick={{ fontSize: 10 }} stroke={AXIS} />
           <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => `${sym}${v}`} />
-          <Line type="monotone" dataKey="adr" name="ADR" stroke="#16a34a" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="revpar" name="RevPAR" stroke="#9333ea" strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="adr" name="ADR" stroke="#16a34a" strokeWidth={2} dot={false} isAnimationActive={false} />
+          <Line type="monotone" dataKey="revpar" name="RevPAR" stroke="#9333ea" strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
       </ChartCard>
 
@@ -369,7 +380,7 @@ export function MarketAnalyticsPanel() {
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
           <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => [`${v}%`, "Occupancy"]} />
-          <Area type="monotone" dataKey="occupancy" stroke="#2563eb" fill="#2563eb" fillOpacity={0.15} strokeWidth={2} />
+          <Area type="monotone" dataKey="occupancy" stroke="#2563eb" fill="#2563eb" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
         </AreaChart>
       </ChartCard>
 
@@ -383,8 +394,8 @@ export function MarketAnalyticsPanel() {
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis tick={{ fontSize: 10 }} stroke={AXIS} />
           <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => `${sym}${v}`} />
-          <Line type="monotone" dataKey="booked" name="Booked" stroke="#16a34a" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="available" name="Available" stroke="#64748b" strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="booked" name="Booked" stroke="#16a34a" strokeWidth={2} dot={false} isAnimationActive={false} />
+          <Line type="monotone" dataKey="available" name="Available" stroke="#64748b" strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
       </ChartCard>
     </div>

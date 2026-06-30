@@ -62,6 +62,8 @@ export interface MarketSnapshot {
   metrics: MetricsPoint[];
   /** Human label of the comp filter applied (e.g. "2 BR"), or null for all units. */
   filterLabel: string | null;
+  /** Provider that wrote the row: "airroi" | "pricelabs". Legacy rows = "airroi". */
+  source: string;
 }
 
 interface MarketSnapshotSql {
@@ -74,6 +76,7 @@ interface MarketSnapshotSql {
   min_nights: string | null;
   metrics: string | null;
   filter: string | null;
+  source: string | null;
 }
 
 function parse<T>(raw: string | null, fallback: T): T {
@@ -96,6 +99,7 @@ function rowToSnapshot(r: MarketSnapshotSql): MarketSnapshot {
     minNights: parse<MinNightsPoint[]>(r.min_nights, []),
     metrics: parse<MetricsPoint[]>(r.metrics, []),
     filterLabel: r.filter,
+    source: r.source ?? "airroi",
   };
 }
 
@@ -108,13 +112,15 @@ export interface MarketSnapshotInput {
   minNights: MinNightsPoint[];
   metrics: MetricsPoint[];
   filterLabel: string | null;
+  /** "airroi" (default) | "pricelabs". */
+  source?: string;
 }
 
 export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
   const db = getDb();
   db.prepare(
-    `INSERT INTO market_snapshots (neighborhood, market_name, fetched_at, currency, summary, pacing, min_nights, metrics, filter)
-     VALUES (@neighborhood, @market_name, @fetched_at, @currency, @summary, @pacing, @min_nights, @metrics, @filter)
+    `INSERT INTO market_snapshots (neighborhood, market_name, fetched_at, currency, summary, pacing, min_nights, metrics, filter, source)
+     VALUES (@neighborhood, @market_name, @fetched_at, @currency, @summary, @pacing, @min_nights, @metrics, @filter, @source)
      ON CONFLICT(neighborhood) DO UPDATE SET
        market_name = excluded.market_name,
        fetched_at  = excluded.fetched_at,
@@ -123,7 +129,8 @@ export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
        pacing      = excluded.pacing,
        min_nights  = excluded.min_nights,
        metrics     = excluded.metrics,
-       filter      = excluded.filter`,
+       filter      = excluded.filter,
+       source      = excluded.source`,
   ).run({
     neighborhood: input.neighborhood,
     market_name: input.marketName,
@@ -134,7 +141,19 @@ export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
     min_nights: JSON.stringify(input.minNights ?? []),
     metrics: JSON.stringify(input.metrics ?? []),
     filter: input.filterLabel ?? null,
+    source: input.source ?? "airroi",
   });
+}
+
+// The market source the app currently treats as truth ("airroi" | "pricelabs").
+// Stored as a setting so an ingest can flip it; defaults to "airroi" so existing
+// (legacy, source-less) rows keep showing until PriceLabs data is imported.
+export function activeMarketSource(): string {
+  const db = getDb();
+  const r = db.prepare("SELECT value FROM meta WHERE key = 'setting:market_source'").get() as
+    | { value: string }
+    | undefined;
+  return r?.value ?? "airroi";
 }
 
 export function getMarketSnapshot(neighborhood: string): MarketSnapshot | null {
@@ -145,9 +164,18 @@ export function getMarketSnapshot(neighborhood: string): MarketSnapshot | null {
   return r ? rowToSnapshot(r) : null;
 }
 
-export function listMarketSnapshots(): MarketSnapshot[] {
+// Snapshots for the active market source (or an explicit one). Every reader —
+// the dashboard, the pricing engine providers, base-price + pacing — goes through
+// here, so flipping `setting:market_source` switches the whole app's source of
+// truth. Legacy rows with a NULL source count as "airroi".
+export function listMarketSnapshots(source?: string): MarketSnapshot[] {
   const db = getDb();
+  const want = source ?? activeMarketSource();
   return (
-    db.prepare("SELECT * FROM market_snapshots ORDER BY neighborhood").all() as MarketSnapshotSql[]
+    db
+      .prepare(
+        "SELECT * FROM market_snapshots WHERE COALESCE(source, 'airroi') = ? ORDER BY neighborhood",
+      )
+      .all(want) as MarketSnapshotSql[]
   ).map(rowToSnapshot);
 }

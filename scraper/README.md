@@ -153,5 +153,43 @@ are **not** in the PDF and can't be read from it. For those, use PriceLabs' **CS
 export / API** and POST `pacing[]` / `metrics[]` to the same endpoint — the shape
 already supports them.
 
-> ⚠️ `market_snapshots` is keyed by neighborhood. Run **one** market source per area
-> (AirROI *or* PriceLabs) — whichever syncs last wins for that neighborhood.
+> ℹ️ The app reads **one active market source** at a time (`market_source` setting).
+> Importing PriceLabs flips it to `pricelabs`; the AirROI sync no-ops while it's set.
+> Each source's rows are tagged, so switching back to `airroi` restores them.
+
+---
+
+## PriceLabs CSV exports → dashboard source — `pricelabs_csv.py`
+
+The Market Dashboard's per-report **CSV** exports carry the full per-date series the
+PDF can't (daily occupancy, price percentiles, monthly history). Point the ingester
+at a folder holding them and PriceLabs becomes the **market source of truth** — the
+Market Analytics dashboard, the pricing engine, base-price and pacing all switch from
+AirROI to PriceLabs (the POST flips `market_source`; AirROI sync no-ops while set).
+
+```bash
+cd scraper && pip install -r requirements.txt
+python pricelabs_csv.py ./reports --dry-run          # preview, post nothing
+APP_URL=http://localhost:3000 SCRAPER_API_KEY=xxx \
+  python pricelabs_csv.py ./reports                  # ingest + switch source
+```
+
+Drop the exports in the folder (any filename prefix is fine):
+
+| File | Mapped to |
+|------|-----------|
+| `*market_history.csv` | monthly `metrics[]` — Occ/ADR/RevPAR/Rev/BW/LOS (Aggregate) |
+| `*supply_demand.csv`  | active listings per month + summary |
+| `*occupancy.csv`      | forward `pacing[]` fill-rate (daily occupancy %) |
+| `*prices.csv`         | forward booked / listed nightly rate (median booked, p50) |
+| `*LOS.csv`, `*Booking_Curves.csv` | not mapped yet (no snapshot slot — see below) |
+
+| Var | Purpose |
+|-----|---------|
+| `PRICELABS_NEIGHBORHOOD` | area label. Default `Tel Aviv` = one clean dashboard row; `*` fans out to every portfolio neighborhood so the engine applies it per-unit |
+| `PRICELABS_MIN_NIGHTS` | market min-stay floor for the summary (default 4 — CSVs don't carry min-stay) |
+| `PRICELABS_MARKET` / `PRICELABS_CURRENCY` | market name / currency label shown on the dashboard |
+
+Switch back to AirROI any time by setting `market_source` to `airroi`. `LOS.csv` and
+`Booking_Curves.csv` (LOS distribution, pickup curves) have no `market_snapshots`
+slot yet — a richer store/charts can be added later without re-exporting.

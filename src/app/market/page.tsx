@@ -13,8 +13,8 @@ export default function Page() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Market Analytics</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Live Tel Aviv market dynamics from AirROI — occupancy, rates, and forward booking
-            pace — the signals driving the pricing engine.
+            Live Tel Aviv market dynamics — occupancy, rates, and forward booking pace — from your
+            PriceLabs market reports, driving the pricing engine.
           </p>
         </div>
       </header>

@@ -511,6 +511,10 @@ function init(db: Database.Database) {
   `);
   ensureColumn(db, "market_snapshots", "metrics", "TEXT");
   ensureColumn(db, "market_snapshots", "filter", "TEXT");
+  // Which provider wrote the row (legacy rows = AirROI). The active source is a
+  // separate `setting:market_source`; readers filter to it so switching sources
+  // (AirROI → PriceLabs) flips the whole app without deleting the other's rows.
+  ensureColumn(db, "market_snapshots", "source", "TEXT");
 }
 
 // Seed version history:
