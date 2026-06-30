@@ -3,6 +3,7 @@ import { listMarketSnapshots, activeMarketSource } from "@/lib/repos/market";
 import { getSetting, setSetting } from "@/lib/repos/visibility";
 import { isAirRoiConfigured } from "@/lib/pricing/airroi-client";
 import { syncMarketData } from "@/lib/pricing/airroi-sync";
+import { ourMarketSeries } from "@/lib/pricing/our-series";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,7 @@ export async function GET() {
     configured: isAirRoiConfigured(),
     bedrooms: getSetting("market_bedrooms") ?? "",
     snapshots,
+    ours: ourMarketSeries(),
   });
 }
 
