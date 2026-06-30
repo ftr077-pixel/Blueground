@@ -2,3 +2,7 @@ pyairbnb==2.2.1
 # PriceLabs Market Dashboard PDF parsing (pricelabs_pdf.py). Pure-Python, no
 # system deps — reads the PDF text layer only.
 pypdf>=4.0
+# Browser automation for the daily Cowork job (pricelabs_browser.py). Optional —
+# only needed for the browser flow. Cowork ships Chromium (PLAYWRIGHT_BROWSERS_PATH),
+# so don't run `playwright install` there; elsewhere: playwright install chromium.
+playwright>=1.40

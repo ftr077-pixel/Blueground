@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState, type ReactElement } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
+import { Loader2, RefreshCw, Upload } from "lucide-react";
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -52,6 +54,14 @@ interface Snapshot {
   minNights: MinNightsPoint[];
   metrics: MetricsPoint[];
   filterLabel: string | null;
+  extras: {
+    bookingCurves?: { month: string; points: { w: number; o: number; ly: number }[] }[];
+    los?: { bucket: string; count: number; share: number; bnp: number }[];
+    summaryTable?: {
+      kind: string;
+      rows: { category: string; occupancy: number; adr: number; revpar: number; los: number; bookingWindow: number }[];
+    };
+  } | null;
 }
 interface MarketResp {
   source: string;
@@ -145,6 +155,10 @@ export function MarketAnalyticsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [bcMonth, setBcMonth] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   async function load() {
     const r = await fetch("/api/market", { cache: "no-store" });
@@ -212,6 +226,63 @@ export function MarketAnalyticsPanel() {
     </button>
   );
 
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setUploadMsg(null);
+    setError(null);
+    try {
+      const fd = new FormData();
+      for (const f of Array.from(files)) fd.append("files", f);
+      const r = await fetch("/api/market/pricelabs/upload", { method: "POST", body: fd });
+      const b = (await r.json()) as {
+        ok?: boolean;
+        error?: string;
+        area?: string;
+        used?: { file: string; kind: string }[];
+        skipped?: { file: string; reason: string }[];
+        stats?: { metrics: number; pacing: number };
+      };
+      if (!r.ok || !b.ok) {
+        setUploadMsg(b.error ?? `upload failed (${r.status})`);
+      } else {
+        const sk = b.skipped?.length ? ` · ${b.skipped.length} skipped` : "";
+        setUploadMsg(
+          `Updated ${b.area} from ${b.used?.length ?? 0} report(s): ${b.stats?.metrics ?? 0} month(s) history, ${b.stats?.pacing ?? 0} forward day(s)${sk}.`,
+        );
+        await load();
+      }
+    } catch (e) {
+      setUploadMsg(e instanceof Error ? e.message : "upload failed");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  const ImportBtn = (
+    <>
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        accept=".csv,.pdf"
+        hidden
+        onChange={(e) => uploadFiles(e.target.files)}
+      />
+      <button
+        type="button"
+        onClick={() => fileRef.current?.click()}
+        disabled={uploading}
+        title="Upload your PriceLabs report files (CSV exports + PDF)"
+        className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+      >
+        {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+        {uploading ? "Importing…" : "Import reports"}
+      </button>
+    </>
+  );
+
   function ResultBanner() {
     if (!syncResult) return null;
     if (!syncResult.ok) {
@@ -252,17 +323,20 @@ export function MarketAnalyticsPanel() {
         <CardContent className="space-y-3 py-8 text-center">
           <p className="text-sm font-medium">No market data yet</p>
           <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
-            Import a PriceLabs market report to populate this dashboard:
-            <br />
-            <code className="text-[11px]">python scraper/pricelabs_csv.py &lt;reports-dir&gt;</code>
-            {resp?.configured
-              ? " — or pick a unit type and click Sync now to pull AirROI instead."
-              : ""}
+            Upload your PriceLabs report files — the CSV exports (market history,
+            occupancy, prices, supply &amp; demand) — and the dashboard updates.
+            {resp?.configured ? " Or pick a unit type and Sync now to pull AirROI." : ""}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-2">
-            {BedroomSelect}
-            {SyncBtn}
+            {ImportBtn}
+            {resp?.configured ? (
+              <>
+                {BedroomSelect}
+                {SyncBtn}
+              </>
+            ) : null}
           </div>
+          {uploadMsg && <p className="text-[11px] text-muted-foreground">{uploadMsg}</p>}
           {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
           <div className="mx-auto max-w-xl text-left">
             <ResultBanner />
@@ -292,6 +366,12 @@ export function MarketAnalyticsPanel() {
     available: Math.round(p.available_rate_avg),
   }));
 
+  const bc = snap.extras?.bookingCurves ?? [];
+  const curMonth = bcMonth && bc.some((m) => m.month === bcMonth) ? bcMonth : (bc[0]?.month ?? null);
+  const bcPoints = bc.find((m) => m.month === curMonth)?.points ?? [];
+  const losData = (snap.extras?.los ?? []).map((b) => ({ label: b.bucket, share: b.share, bnp: b.bnp }));
+  const tbl = snap.extras?.summaryTable ?? null;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -316,17 +396,21 @@ export function MarketAnalyticsPanel() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-[11px] text-muted-foreground">updated {fmtRel(snap.fetchedAt)}</span>
-          {isPL ? (
-            <span className="text-[11px] text-muted-foreground">imported from PriceLabs reports</span>
-          ) : (
+          {!isPL && (
             <>
               {BedroomSelect}
               {SyncBtn}
             </>
           )}
+          {ImportBtn}
         </div>
       </div>
 
+      {uploadMsg && (
+        <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+          {uploadMsg}
+        </p>
+      )}
       {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
       <ResultBanner />
 
@@ -398,6 +482,119 @@ export function MarketAnalyticsPanel() {
           <Line type="monotone" dataKey="available" name="Available" stroke="#64748b" strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
       </ChartCard>
+
+      {bc.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle>Booking pickup curve</CardTitle>
+                <p className="text-[11px] text-muted-foreground">
+                  How {curMonth} fills as check-in approaches — this year vs. last year.
+                </p>
+              </div>
+              {bc.length > 1 && (
+                <select
+                  value={curMonth ?? ""}
+                  onChange={(e) => setBcMonth(e.target.value)}
+                  className="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs"
+                >
+                  {bc.map((m) => (
+                    <option key={m.month} value={m.month}>
+                      {m.month}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {bcPoints.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No data for this month.</p>
+            ) : (
+              <div style={{ width: "100%", height: 240 }}>
+                <ResponsiveContainer>
+                  <LineChart data={bcPoints} margin={{ top: 8, right: 12, bottom: 4, left: -12 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
+                    <XAxis
+                      dataKey="w"
+                      type="number"
+                      reversed
+                      tick={{ fontSize: 10 }}
+                      stroke={AXIS}
+                      tickFormatter={(v) => `${v}d`}
+                    />
+                    <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
+                    <Tooltip
+                      contentStyle={{ fontSize: 12 }}
+                      labelFormatter={(l) => `${l} days before check-in`}
+                      formatter={(v, n) => [`${v}%`, n === "o" ? "This year" : "Last year"]}
+                    />
+                    <Line type="monotone" dataKey="o" name="This year" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="ly" name="Last year" stroke="#94a3b8" strokeWidth={2} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {losData.length > 0 && (
+        <ChartCard
+          title="Length-of-stay mix"
+          desc="Share of market bookings by length of stay — more weight on 7+ nights means a longer-stay market."
+          empty={false}
+        >
+          <BarChart data={losData} margin={{ top: 8, right: 12, bottom: 4, left: -12 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 9 }} stroke={AXIS} interval={0} />
+            <YAxis unit="%" tick={{ fontSize: 10 }} stroke={AXIS} />
+            <Tooltip
+              contentStyle={{ fontSize: 12 }}
+              formatter={(v, n) => (n === "share" ? [`${v}%`, "Share of bookings"] : [`${sym}${v}`, "Avg nightly"])}
+            />
+            <Bar dataKey="share" fill="#2563eb" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+          </BarChart>
+        </ChartCard>
+      )}
+
+      {tbl && tbl.rows.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle>By bedroom</CardTitle>
+            <p className="text-[11px] text-muted-foreground">
+              Latest-month market comparison by unit size ({cur}).
+            </p>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <th className="py-1 font-medium">Segment</th>
+                  <th className="py-1 text-right font-medium">Occupancy</th>
+                  <th className="py-1 text-right font-medium">ADR</th>
+                  <th className="py-1 text-right font-medium">RevPAR</th>
+                  <th className="py-1 text-right font-medium">LOS</th>
+                  <th className="py-1 text-right font-medium">Book window</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tbl.rows.map((r) => (
+                  <tr key={r.category} className="border-t border-border/60">
+                    <td className="py-1.5 font-medium">{r.category}</td>
+                    <td className="py-1.5 text-right">{Math.round(r.occupancy)}%</td>
+                    <td className="py-1.5 text-right">{sym}{Math.round(r.adr)}</td>
+                    <td className="py-1.5 text-right">{sym}{Math.round(r.revpar)}</td>
+                    <td className="py-1.5 text-right">{r.los.toFixed(1)}n</td>
+                    <td className="py-1.5 text-right">{Math.round(r.bookingWindow)}d</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

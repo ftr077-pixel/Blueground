@@ -515,6 +515,9 @@ function init(db: Database.Database) {
   // separate `setting:market_source`; readers filter to it so switching sources
   // (AirROI → PriceLabs) flips the whole app without deleting the other's rows.
   ensureColumn(db, "market_snapshots", "source", "TEXT");
+  // Extra report datasets that don't fit the core columns: PriceLabs booking
+  // curves, LOS distribution, per-bedroom summary table. JSON blob, dashboard-only.
+  ensureColumn(db, "market_snapshots", "extras", "TEXT");
 }
 
 // Seed version history:

@@ -18,3 +18,8 @@ scraper/.venv/
 
 # PriceLabs PDF drop folder (operator's downloaded reports, not source)
 scraper/pricelabs-inbox/
+
+# PriceLabs browser automation: saved session + capture/download artifacts (secrets/data)
+scraper/.pricelabs_state.json
+scraper/pricelabs-captures/
+scraper/pricelabs-downloads/

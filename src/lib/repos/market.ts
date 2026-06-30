@@ -51,6 +51,32 @@ export interface MetricsPoint {
   active_listings_count: number;
 }
 
+// Extra PriceLabs report datasets that don't fit the core snapshot columns.
+export interface BookingCurveMonth {
+  month: string;
+  /** pickup points: w = days before arrival, o = occupancy %, ly = last-year occupancy %. */
+  points: { w: number; o: number; ly: number }[];
+}
+export interface LosBucket {
+  bucket: string;
+  count: number;
+  share: number; // % of bookings
+  bnp: number; // avg booked nightly price
+}
+export interface SummaryTableRow {
+  category: string;
+  occupancy: number; // %
+  adr: number;
+  revpar: number;
+  los: number;
+  bookingWindow: number;
+}
+export interface MarketExtras {
+  bookingCurves?: BookingCurveMonth[];
+  los?: LosBucket[];
+  summaryTable?: { kind: string; rows: SummaryTableRow[] };
+}
+
 export interface MarketSnapshot {
   neighborhood: string;
   marketName: string | null;
@@ -64,6 +90,8 @@ export interface MarketSnapshot {
   filterLabel: string | null;
   /** Provider that wrote the row: "airroi" | "pricelabs". Legacy rows = "airroi". */
   source: string;
+  /** Extra report datasets (PriceLabs booking curves / LOS / per-bedroom table), or null. */
+  extras: MarketExtras | null;
 }
 
 interface MarketSnapshotSql {
@@ -77,6 +105,7 @@ interface MarketSnapshotSql {
   metrics: string | null;
   filter: string | null;
   source: string | null;
+  extras: string | null;
 }
 
 function parse<T>(raw: string | null, fallback: T): T {
@@ -100,6 +129,7 @@ function rowToSnapshot(r: MarketSnapshotSql): MarketSnapshot {
     metrics: parse<MetricsPoint[]>(r.metrics, []),
     filterLabel: r.filter,
     source: r.source ?? "airroi",
+    extras: parse<MarketExtras | null>(r.extras, null),
   };
 }
 
@@ -114,13 +144,14 @@ export interface MarketSnapshotInput {
   filterLabel: string | null;
   /** "airroi" (default) | "pricelabs". */
   source?: string;
+  extras?: MarketExtras | null;
 }
 
 export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
   const db = getDb();
   db.prepare(
-    `INSERT INTO market_snapshots (neighborhood, market_name, fetched_at, currency, summary, pacing, min_nights, metrics, filter, source)
-     VALUES (@neighborhood, @market_name, @fetched_at, @currency, @summary, @pacing, @min_nights, @metrics, @filter, @source)
+    `INSERT INTO market_snapshots (neighborhood, market_name, fetched_at, currency, summary, pacing, min_nights, metrics, filter, source, extras)
+     VALUES (@neighborhood, @market_name, @fetched_at, @currency, @summary, @pacing, @min_nights, @metrics, @filter, @source, @extras)
      ON CONFLICT(neighborhood) DO UPDATE SET
        market_name = excluded.market_name,
        fetched_at  = excluded.fetched_at,
@@ -130,7 +161,8 @@ export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
        min_nights  = excluded.min_nights,
        metrics     = excluded.metrics,
        filter      = excluded.filter,
-       source      = excluded.source`,
+       source      = excluded.source,
+       extras      = excluded.extras`,
   ).run({
     neighborhood: input.neighborhood,
     market_name: input.marketName,
@@ -142,6 +174,7 @@ export function upsertMarketSnapshot(input: MarketSnapshotInput): void {
     metrics: JSON.stringify(input.metrics ?? []),
     filter: input.filterLabel ?? null,
     source: input.source ?? "airroi",
+    extras: input.extras ? JSON.stringify(input.extras) : null,
   });
 }
 
