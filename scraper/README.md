@@ -193,3 +193,57 @@ Drop the exports in the folder (any filename prefix is fine):
 Switch back to AirROI any time by setting `market_source` to `airroi`. `LOS.csv` and
 `Booking_Curves.csv` (LOS distribution, pickup curves) have no `market_snapshots`
 slot yet — a richer store/charts can be added later without re-exporting.
+
+---
+
+## Daily refresh via the browser (Cowork) — `pricelabs_browser.py`
+
+A scheduled **Cowork** session can refresh the dashboard daily with no SSH and no
+shared folder: Cowork drives a browser to PriceLabs, exports the reports to its own
+disk, then `pricelabs_csv.py` POSTs them to your app's **public URL**.
+
+```
+[daily Cowork session]
+  pricelabs_browser.py  → log into PriceLabs, export reports → ./pricelabs-downloads
+  pricelabs_csv.py ./pricelabs-downloads   (APP_URL=https://your-app  SCRAPER_API_KEY=…)
+        → POST /api/market/pricelabs → dashboard + engine refresh
+```
+
+**Step 1 — discovery (one time).** PriceLabs' login fields and CSV-export controls
+can't be scripted blind. Discovery logs in and dumps the page + network + export
+candidates to `pricelabs-captures/`:
+
+```bash
+pip install playwright      # Cowork already ships Chromium; don't `playwright install` there
+PRICELABS_EMAIL=… PRICELABS_PASSWORD=… \
+PRICELABS_DASHBOARD_URLS="https://app.pricelabs.co/market-dashboard/…" \
+  python pricelabs_browser.py --discovery
+```
+
+Share `pricelabs-captures/manifest.json` (+ a `page-*.png`) and the exact export step
+gets wired — either clicking the CSV buttons (`--download`) or reading the dashboard's
+own JSON (often more robust than the buttons).
+
+**Step 2 — daily run (after calibration).**
+
+```bash
+PRICELABS_EMAIL=… PRICELABS_PASSWORD=… PRICELABS_DASHBOARD_URLS=… \
+  python pricelabs_browser.py --download            # → ./pricelabs-downloads
+APP_URL=https://your-app SCRAPER_API_KEY=… \
+  python pricelabs_csv.py ./pricelabs-downloads      # → ingest + switch source
+```
+
+| Var | Purpose |
+|-----|---------|
+| `PRICELABS_EMAIL` / `PRICELABS_PASSWORD` | PriceLabs login — Cowork **secrets**, never commit |
+| `PRICELABS_DASHBOARD_URLS` | Market Dashboard URL(s) you export from (comma-separated) |
+| `PRICELABS_STATE` | saved session so it skips re-login (default `.pricelabs_state.json`) |
+| `APP_URL` / `SCRAPER_API_KEY` | your **public** app + key, for the ingest POST |
+| `PROXY_URL` | optional residential proxy (if PriceLabs blocks the datacenter IP) |
+
+**Scheduling.** Point a daily Claude Code on the web trigger at this flow (docs:
+code.claude.com/docs/en/claude-code-on-the-web).
+
+> ⚠️ Automating PriceLabs' site is brittle (UI changes, bot checks) and may breach
+> their ToS — it's your account's risk. If your plan exposes market data via the
+> **official PriceLabs API**, that's the robust alternative for an unattended daily job.
