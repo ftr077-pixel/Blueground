@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listMarketSnapshots } from "@/lib/repos/market";
+import { listMarketSnapshots, activeMarketSource } from "@/lib/repos/market";
 import { getSetting, setSetting } from "@/lib/repos/visibility";
 import { isAirRoiConfigured } from "@/lib/pricing/airroi-client";
 import { syncMarketData } from "@/lib/pricing/airroi-sync";
@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const snapshots = listMarketSnapshots();
   return NextResponse.json({
-    source: snapshots.length > 0 ? "airroi" : "none",
+    source: snapshots.length > 0 ? activeMarketSource() : "none",
     configured: isAirRoiConfigured(),
     bedrooms: getSetting("market_bedrooms") ?? "",
     snapshots,

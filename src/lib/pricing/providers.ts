@@ -252,9 +252,10 @@ export function mockProviders(): MarketProviders {
 }
 
 // --------------------------------------------------------------------------
-// AirROI-backed providers: map cached market_snapshots (refreshed by the daily
-// sync) onto the engine's MarketProviders. Each method draws on a *distinct*
-// AirROI signal so the rule stack doesn't double-count the same data:
+// Snapshot-backed providers: map cached market_snapshots for the ACTIVE source
+// (AirROI or PriceLabs — see listMarketSnapshots) onto the engine's
+// MarketProviders. Each method draws on a *distinct* market signal so the rule
+// stack doesn't double-count the same data:
 //   occupancy   ← forward pacing fill_rate (by date)
 //   seasonality ← forward booked-rate curve (rate seasonality)
 //   pacing      ← near-term vs window fill velocity
@@ -287,7 +288,7 @@ function prep(snap: MarketSnapshot): Prepped {
   };
 }
 
-export function airRoiProviders(): MarketProviders {
+export function snapshotProviders(): MarketProviders {
   const prepped = new Map<string, Prepped>();
   for (const s of listMarketSnapshots()) prepped.set(s.neighborhood, prep(s));
 
@@ -348,5 +349,5 @@ export function airRoiProviders(): MarketProviders {
 
 /** Pick the live provider when market data has been synced, else the mock. */
 export function marketProviders(): MarketProviders {
-  return listMarketSnapshots().length > 0 ? airRoiProviders() : mockProviders();
+  return listMarketSnapshots().length > 0 ? snapshotProviders() : mockProviders();
 }

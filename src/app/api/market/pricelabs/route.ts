@@ -10,6 +10,7 @@ import {
 } from "@/lib/repos/market";
 import { listUnits } from "@/lib/repos/units";
 import { logActivity } from "@/lib/repos/activity";
+import { setSetting } from "@/lib/repos/visibility";
 
 export const dynamic = "force-dynamic";
 
@@ -194,10 +195,14 @@ export async function POST(req: Request) {
   const written: string[] = [];
   for (const area of parsed) {
     for (const neighborhood of expandTargets(area.neighborhood)) {
-      upsertMarketSnapshot({ neighborhood, ...area.base });
+      upsertMarketSnapshot({ neighborhood, ...area.base, source: "pricelabs" });
       written.push(neighborhood);
     }
   }
+  // Importing PriceLabs data makes it the source of truth: the dashboard, the
+  // pricing engine, base-price + pacing all read the active source, and the
+  // AirROI sync no-ops while it's set. Flip on a successful ingest.
+  if (written.length > 0) setSetting("market_source", "pricelabs");
 
   const skipped = rawAreas.length - parsed.length;
   logActivity({

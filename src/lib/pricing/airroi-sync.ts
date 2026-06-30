@@ -8,6 +8,7 @@ import { getSetting } from "@/lib/repos/visibility";
 import {
   upsertMarketSnapshot,
   getMarketSnapshot,
+  activeMarketSource,
   type AirRoiMarket,
   type PacingPoint,
   type MinNightsPoint,
@@ -65,6 +66,17 @@ function compFilter(): { filter?: MarketFilter; label: string | null } {
 
 export async function syncMarketData(): Promise<MarketSyncResult> {
   const { filter, label } = compFilter();
+  // Don't let AirROI overwrite the active source's rows when it isn't the one in
+  // use (the operator switched the dashboard/engine to PriceLabs).
+  if (activeMarketSource() !== "airroi") {
+    return {
+      ok: false,
+      reason: "Market source is PriceLabs — AirROI sync is disabled (set market_source=airroi to re-enable).",
+      filterLabel: label,
+      synced: [],
+      failed: [],
+    };
+  }
   if (!isAirRoiConfigured()) {
     return { ok: false, reason: "AIRROI_API_KEY not set", filterLabel: label, synced: [], failed: [] };
   }
