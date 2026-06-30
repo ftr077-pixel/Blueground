@@ -43,6 +43,7 @@ bash setup-box.sh
 | Data | SQLite at `<app>/data/orchestrator.db` (persists on the box disk) |
 | Scraper | `/etc/cron.d/visibility-scan` runs `run_agent.py` daily |
 | Market data | `/etc/cron.d/market-sync` POSTs `/api/market/sync` daily (only if `AIRROI_API_KEY` set) |
+| MiniHotel rates | `/etc/cron.d/rates-sync` Pulls then Pushes ARI daily at **01:00 Tel Aviv** (`RATES_SYNC=1`, on by default) |
 | Auth between them | `SCRAPER_API_KEY` (auto-generated into `.env.local`) |
 | HTTPS + login | Caddy reverse-proxy with `basic_auth` (only if `DOMAIN` set) |
 
@@ -51,6 +52,9 @@ bash setup-box.sh
 - Open `https://your-domain.com` (or `http://<box-ip>:3000`) → **Search Visibility**.
 - Kick a scan immediately (don't wait for cron) with the command the script prints.
 - Logs: `journalctl -u rohub -f` (app) and `tail -f /var/log/visibility-scan.log` (scraper).
+- The nightly MiniHotel Pull+Push runs at 01:00 Tel Aviv time (`tail -f /var/log/rates-sync.log`).
+  It self-guards: if MiniHotel isn't connected yet (Settings) the push just no-ops and logs a
+  warning. Change the time with `RATES_SYNC_CRON_SCHEDULE`, or set `RATES_SYNC=0` to turn it off.
 - Re-run `setup-box.sh` anytime to pull new code and rebuild.
 
 ## Notes

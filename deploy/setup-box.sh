@@ -45,10 +45,18 @@ AIRROI_REGION_HINT="${AIRROI_REGION_HINT:-Tel Aviv-Yafo, Israel}"
 PRICELABS_INGEST="${PRICELABS_INGEST:-1}"
 PRICELABS_NEIGHBORHOOD="${PRICELABS_NEIGHBORHOOD:-*}"
 
+# Daily MiniHotel rates sync (Pull then Push). On by default; the cron self-guards
+# — if MiniHotel isn't connected yet the push just no-ops and logs a warning.
+RATES_SYNC="${RATES_SYNC:-1}"
+
 # Daily scan time + market-sync time + PriceLabs inbox poll (cron syntax, box local time).
 CRON_SCHEDULE="${CRON_SCHEDULE:-0 8 * * *}"
 MARKET_CRON_SCHEDULE="${MARKET_CRON_SCHEDULE:-0 7 * * *}"
 PRICELABS_CRON_SCHEDULE="${PRICELABS_CRON_SCHEDULE:-*/30 * * * *}"
+# MiniHotel rates Pull+Push — runs in Tel Aviv time regardless of the box's
+# timezone (see RATES_SYNC_TZ below). Defaults to 01:00 nightly.
+RATES_SYNC_CRON_SCHEDULE="${RATES_SYNC_CRON_SCHEDULE:-0 1 * * *}"
+RATES_SYNC_TZ="${RATES_SYNC_TZ:-Asia/Jerusalem}"
 # -----------------------------------------------------------------------------
 
 log()  { echo -e "\n\033[1;36m== $* ==\033[0m"; }
@@ -175,6 +183,26 @@ CRON
 else
   log "No AIRROI_API_KEY — market sync left OFF (engine uses built-in sample signals)"
   rm -f /etc/cron.d/market-sync
+fi
+
+if [ "$RATES_SYNC" = "1" ]; then
+  log "Daily MiniHotel rates Pull+Push cron ($RATES_SYNC_CRON_SCHEDULE $RATES_SYNC_TZ)"
+  # Pull live ARI from MiniHotel, THEN push the Hub's intended prices back out —
+  # sequential (single command) so the push reads the freshly-synced calendar and
+  # the two never race. Both endpoints accept the shared key via middleware's
+  # KEY_BYPASS, so this works whether or not the dashboard login is enabled.
+  # CRON_TZ pins the schedule to Tel Aviv time even if the box clock is UTC.
+  RATES_API="http://localhost:$APP_PORT"
+  cat >/etc/cron.d/rates-sync <<CRON
+SHELL=/bin/bash
+CRON_TZ=$RATES_SYNC_TZ
+$RATES_SYNC_CRON_SCHEDULE root { curl -fsS -H "x-scraper-key: $SCRAPER_API_KEY" -X POST $RATES_API/api/rates/sync && curl -fsS -H "x-scraper-key: $SCRAPER_API_KEY" -X POST $RATES_API/api/rates/push ; } >> /var/log/rates-sync.log 2>&1
+CRON
+  # Root-only: the file embeds the API key.
+  chmod 0600 /etc/cron.d/rates-sync
+else
+  log "MiniHotel rates auto Pull+Push left OFF (RATES_SYNC != 1)"
+  rm -f /etc/cron.d/rates-sync
 fi
 
 if [ "$PRICELABS_INGEST" = "1" ]; then
