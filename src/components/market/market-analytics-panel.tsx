@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, type ReactElement } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
+import { Loader2, RefreshCw, Upload } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -145,6 +145,9 @@ export function MarketAnalyticsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   async function load() {
     const r = await fetch("/api/market", { cache: "no-store" });
@@ -212,6 +215,63 @@ export function MarketAnalyticsPanel() {
     </button>
   );
 
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setUploadMsg(null);
+    setError(null);
+    try {
+      const fd = new FormData();
+      for (const f of Array.from(files)) fd.append("files", f);
+      const r = await fetch("/api/market/pricelabs/upload", { method: "POST", body: fd });
+      const b = (await r.json()) as {
+        ok?: boolean;
+        error?: string;
+        area?: string;
+        used?: { file: string; kind: string }[];
+        skipped?: { file: string; reason: string }[];
+        stats?: { metrics: number; pacing: number };
+      };
+      if (!r.ok || !b.ok) {
+        setUploadMsg(b.error ?? `upload failed (${r.status})`);
+      } else {
+        const sk = b.skipped?.length ? ` · ${b.skipped.length} skipped` : "";
+        setUploadMsg(
+          `Updated ${b.area} from ${b.used?.length ?? 0} report(s): ${b.stats?.metrics ?? 0} month(s) history, ${b.stats?.pacing ?? 0} forward day(s)${sk}.`,
+        );
+        await load();
+      }
+    } catch (e) {
+      setUploadMsg(e instanceof Error ? e.message : "upload failed");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  const ImportBtn = (
+    <>
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        accept=".csv,.pdf"
+        hidden
+        onChange={(e) => uploadFiles(e.target.files)}
+      />
+      <button
+        type="button"
+        onClick={() => fileRef.current?.click()}
+        disabled={uploading}
+        title="Upload your PriceLabs report files (CSV exports + PDF)"
+        className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/15 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+      >
+        {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+        {uploading ? "Importing…" : "Import reports"}
+      </button>
+    </>
+  );
+
   function ResultBanner() {
     if (!syncResult) return null;
     if (!syncResult.ok) {
@@ -252,17 +312,20 @@ export function MarketAnalyticsPanel() {
         <CardContent className="space-y-3 py-8 text-center">
           <p className="text-sm font-medium">No market data yet</p>
           <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
-            Import a PriceLabs market report to populate this dashboard:
-            <br />
-            <code className="text-[11px]">python scraper/pricelabs_csv.py &lt;reports-dir&gt;</code>
-            {resp?.configured
-              ? " — or pick a unit type and click Sync now to pull AirROI instead."
-              : ""}
+            Upload your PriceLabs report files — the CSV exports (market history,
+            occupancy, prices, supply &amp; demand) — and the dashboard updates.
+            {resp?.configured ? " Or pick a unit type and Sync now to pull AirROI." : ""}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-2">
-            {BedroomSelect}
-            {SyncBtn}
+            {ImportBtn}
+            {resp?.configured ? (
+              <>
+                {BedroomSelect}
+                {SyncBtn}
+              </>
+            ) : null}
           </div>
+          {uploadMsg && <p className="text-[11px] text-muted-foreground">{uploadMsg}</p>}
           {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
           <div className="mx-auto max-w-xl text-left">
             <ResultBanner />
@@ -316,17 +379,21 @@ export function MarketAnalyticsPanel() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-[11px] text-muted-foreground">updated {fmtRel(snap.fetchedAt)}</span>
-          {isPL ? (
-            <span className="text-[11px] text-muted-foreground">imported from PriceLabs reports</span>
-          ) : (
+          {!isPL && (
             <>
               {BedroomSelect}
               {SyncBtn}
             </>
           )}
+          {ImportBtn}
         </div>
       </div>
 
+      {uploadMsg && (
+        <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+          {uploadMsg}
+        </p>
+      )}
       {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
       <ResultBanner />
 

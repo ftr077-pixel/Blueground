@@ -17,7 +17,10 @@ const BYPASS = [
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  if (BYPASS.some((p) => pathname.startsWith(p))) {
+  // Exact match only: these are specific machine-to-machine endpoints. A prefix
+  // match would let sub-routes (e.g. the browser-facing /api/market/pricelabs/upload)
+  // inherit the bypass and skip the dashboard login.
+  if (BYPASS.includes(pathname)) {
     return NextResponse.next();
   }
 
