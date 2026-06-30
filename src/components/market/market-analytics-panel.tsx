@@ -5,6 +5,8 @@ import { Loader2, RefreshCw, Upload } from "lucide-react";
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -52,6 +54,14 @@ interface Snapshot {
   minNights: MinNightsPoint[];
   metrics: MetricsPoint[];
   filterLabel: string | null;
+  extras: {
+    bookingCurves?: { month: string; points: { w: number; o: number; ly: number }[] }[];
+    los?: { bucket: string; count: number; share: number; bnp: number }[];
+    summaryTable?: {
+      kind: string;
+      rows: { category: string; occupancy: number; adr: number; revpar: number; los: number; bookingWindow: number }[];
+    };
+  } | null;
 }
 interface MarketResp {
   source: string;
@@ -147,6 +157,7 @@ export function MarketAnalyticsPanel() {
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [bcMonth, setBcMonth] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   async function load() {
@@ -355,6 +366,12 @@ export function MarketAnalyticsPanel() {
     available: Math.round(p.available_rate_avg),
   }));
 
+  const bc = snap.extras?.bookingCurves ?? [];
+  const curMonth = bcMonth && bc.some((m) => m.month === bcMonth) ? bcMonth : (bc[0]?.month ?? null);
+  const bcPoints = bc.find((m) => m.month === curMonth)?.points ?? [];
+  const losData = (snap.extras?.los ?? []).map((b) => ({ label: b.bucket, share: b.share, bnp: b.bnp }));
+  const tbl = snap.extras?.summaryTable ?? null;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -465,6 +482,119 @@ export function MarketAnalyticsPanel() {
           <Line type="monotone" dataKey="available" name="Available" stroke="#64748b" strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
       </ChartCard>
+
+      {bc.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle>Booking pickup curve</CardTitle>
+                <p className="text-[11px] text-muted-foreground">
+                  How {curMonth} fills as check-in approaches — this year vs. last year.
+                </p>
+              </div>
+              {bc.length > 1 && (
+                <select
+                  value={curMonth ?? ""}
+                  onChange={(e) => setBcMonth(e.target.value)}
+                  className="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs"
+                >
+                  {bc.map((m) => (
+                    <option key={m.month} value={m.month}>
+                      {m.month}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {bcPoints.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No data for this month.</p>
+            ) : (
+              <div style={{ width: "100%", height: 240 }}>
+                <ResponsiveContainer>
+                  <LineChart data={bcPoints} margin={{ top: 8, right: 12, bottom: 4, left: -12 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
+                    <XAxis
+                      dataKey="w"
+                      type="number"
+                      reversed
+                      tick={{ fontSize: 10 }}
+                      stroke={AXIS}
+                      tickFormatter={(v) => `${v}d`}
+                    />
+                    <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
+                    <Tooltip
+                      contentStyle={{ fontSize: 12 }}
+                      labelFormatter={(l) => `${l} days before check-in`}
+                      formatter={(v, n) => [`${v}%`, n === "o" ? "This year" : "Last year"]}
+                    />
+                    <Line type="monotone" dataKey="o" name="This year" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="ly" name="Last year" stroke="#94a3b8" strokeWidth={2} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {losData.length > 0 && (
+        <ChartCard
+          title="Length-of-stay mix"
+          desc="Share of market bookings by length of stay — more weight on 7+ nights means a longer-stay market."
+          empty={false}
+        >
+          <BarChart data={losData} margin={{ top: 8, right: 12, bottom: 4, left: -12 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 9 }} stroke={AXIS} interval={0} />
+            <YAxis unit="%" tick={{ fontSize: 10 }} stroke={AXIS} />
+            <Tooltip
+              contentStyle={{ fontSize: 12 }}
+              formatter={(v, n) => (n === "share" ? [`${v}%`, "Share of bookings"] : [`${sym}${v}`, "Avg nightly"])}
+            />
+            <Bar dataKey="share" fill="#2563eb" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+          </BarChart>
+        </ChartCard>
+      )}
+
+      {tbl && tbl.rows.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle>By bedroom</CardTitle>
+            <p className="text-[11px] text-muted-foreground">
+              Latest-month market comparison by unit size ({cur}).
+            </p>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <th className="py-1 font-medium">Segment</th>
+                  <th className="py-1 text-right font-medium">Occupancy</th>
+                  <th className="py-1 text-right font-medium">ADR</th>
+                  <th className="py-1 text-right font-medium">RevPAR</th>
+                  <th className="py-1 text-right font-medium">LOS</th>
+                  <th className="py-1 text-right font-medium">Book window</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tbl.rows.map((r) => (
+                  <tr key={r.category} className="border-t border-border/60">
+                    <td className="py-1.5 font-medium">{r.category}</td>
+                    <td className="py-1.5 text-right">{Math.round(r.occupancy)}%</td>
+                    <td className="py-1.5 text-right">{sym}{Math.round(r.adr)}</td>
+                    <td className="py-1.5 text-right">{sym}{Math.round(r.revpar)}</td>
+                    <td className="py-1.5 text-right">{r.los.toFixed(1)}n</td>
+                    <td className="py-1.5 text-right">{Math.round(r.bookingWindow)}d</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

@@ -4,10 +4,14 @@
 // the rest (PDF, LOS, Booking_Curves) are reported as skipped.
 
 import type {
+  BookingCurveMonth,
+  LosBucket,
+  MarketExtras,
   MarketSnapshotInput,
   MarketSummary,
   MetricsPoint,
   PacingPoint,
+  SummaryTableRow,
 } from "@/lib/repos/market";
 
 export interface UploadFile {
@@ -169,6 +173,80 @@ function buildPacing(
   return out;
 }
 
+const LOS_BUCKETS = ["1 Day", "2 Days", "3-4 Days", "5-6 Days", "7-14 Days", "15-28 Days", "29+ Days"];
+
+// Booking_Curves.csv → per stay-month pickup curve (occupancy by booking window,
+// this year vs last year). Downsampled: full detail near arrival, coarse far out.
+function parseBookingCurves(rows: Record<string, string>[]): BookingCurveMonth[] {
+  const byMonth = new Map<string, { w: number; o: number; ly: number }[]>();
+  for (const r of rows) {
+    const month = (r["Date Range"] || "").trim();
+    if (!month) continue;
+    const w = parseInt((r["Booking Window"] || "").replace("+", ""), 10);
+    if (!Number.isFinite(w)) continue;
+    const o = num(r["Occupancy"]) ?? 0;
+    const ly = num(r["Occupancy (Last Year)"]) ?? 0;
+    if (o === 0 && ly === 0) continue; // trim the flat far-out head
+    if (w > 30 && w % 5 !== 0) continue; // keep payload small
+    if (!byMonth.has(month)) byMonth.set(month, []);
+    byMonth.get(month)!.push({ w, o, ly });
+  }
+  return [...byMonth.entries()].map(([month, points]) => ({
+    month,
+    points: points.sort((a, b) => a.w - b.w),
+  }));
+}
+
+// LOS.csv → length-of-stay distribution (share of bookings per LOS bucket), using
+// the win_max (overall) columns aggregated across all dates.
+function parseLos(rows: Record<string, string>[]): LosBucket[] {
+  const count: Record<string, number> = {};
+  const bnpWeighted: Record<string, number> = {};
+  for (const b of LOS_BUCKETS) {
+    count[b] = 0;
+    bnpWeighted[b] = 0;
+  }
+  for (const r of rows) {
+    for (const b of LOS_BUCKETS) {
+      const c = num(r[`win_max_${b}`]) ?? 0;
+      const p = num(r[`win_max_${b}_BNP`]) ?? 0;
+      count[b] += c;
+      bnpWeighted[b] += c * p;
+    }
+  }
+  const total = LOS_BUCKETS.reduce((s, b) => s + count[b], 0) || 1;
+  return LOS_BUCKETS.map((b) => ({
+    bucket: b,
+    count: Math.round(count[b]),
+    share: Math.round((count[b] / total) * 1000) / 10,
+    bnp: count[b] ? Math.round(bnpWeighted[b] / count[b]) : 0,
+  }));
+}
+
+// Per-bedroom comparison from the latest month of market_history (Aggregate/1BR/2BR).
+function buildSummaryTable(
+  rows: Record<string, string>[],
+): { kind: string; rows: SummaryTableRow[] } | undefined {
+  if (!rows.length) return undefined;
+  const last = rows[rows.length - 1];
+  const cats: [string, string][] = [
+    ["1 & 2 BR", "Aggregate"],
+    ["1 BR", "1 BR"],
+    ["2 BR", "2 BR"],
+  ];
+  return {
+    kind: "history",
+    rows: cats.map(([category, suf]) => ({
+      category,
+      occupancy: num(last[`Occ. ${suf}`]) ?? 0,
+      adr: num(last[`ADR ${suf}`]) ?? 0,
+      revpar: num(last[`RevPAR ${suf}`]) ?? 0,
+      los: num(last[`LOS ${suf}`]) ?? 0,
+      bookingWindow: num(last[`BW ${suf}`]) ?? 0,
+    })),
+  };
+}
+
 // Classify an uploaded file by name (any prefix; case-insensitive).
 function classify(name: string): string | null {
   const n = name.toLowerCase();
@@ -192,17 +270,16 @@ export function parsePriceLabsUploads(
   const used: ParseResult["used"] = [];
   const skipped: ParseResult["skipped"] = [];
 
+  const KNOWN = ["market_history", "supply_demand", "occupancy", "prices", "booking_curves", "los"];
   const byKind = new Map<string, Record<string, string>[]>();
   for (const f of files) {
     const kind = classify(f.name);
-    if (kind === "market_history" || kind === "supply_demand" || kind === "occupancy" || kind === "prices") {
+    if (kind && KNOWN.includes(kind)) {
       const rows = parseCsv(f.text);
       byKind.set(kind, rows);
       used.push({ file: f.name, kind, rows: rows.length });
     } else if (kind === "pdf") {
-      skipped.push({ file: f.name, reason: "PDF — dashboard runs on the CSVs (not charted yet)" });
-    } else if (kind === "los" || kind === "booking_curves") {
-      skipped.push({ file: f.name, reason: `${kind} — no chart slot yet` });
+      skipped.push({ file: f.name, reason: "PDF — per-bedroom table is shown from the CSVs" });
     } else {
       skipped.push({ file: f.name, reason: "unrecognized file" });
     }
@@ -232,8 +309,17 @@ export function parsePriceLabsUploads(
     };
   }
 
+  const extras: MarketExtras = {};
+  if (byKind.has("booking_curves")) extras.bookingCurves = parseBookingCurves(byKind.get("booking_curves")!);
+  if (byKind.has("los")) extras.los = parseLos(byKind.get("los")!);
+  if (byKind.has("market_history")) {
+    const st = buildSummaryTable(byKind.get("market_history")!);
+    if (st) extras.summaryTable = st;
+  }
+  const hasExtras = !!(extras.bookingCurves?.length || extras.los?.length || extras.summaryTable);
+
   const area: MarketSnapshotInput | null =
-    summary || pacing.length || metrics.length
+    summary || pacing.length || metrics.length || hasExtras
       ? {
           neighborhood,
           marketName: `${marketName(files)} (PriceLabs)`,
@@ -244,6 +330,7 @@ export function parsePriceLabsUploads(
           metrics,
           filterLabel: null,
           source: "pricelabs",
+          extras: hasExtras ? extras : null,
         }
       : null;
 
