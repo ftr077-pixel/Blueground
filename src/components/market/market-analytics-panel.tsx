@@ -63,11 +63,19 @@ interface Snapshot {
     };
   } | null;
 }
+interface OurSeries {
+  monthly: { month: string; occupancy: number; adr: number; revpar: number }[];
+  forwardOcc: { date: string; occupancy: number }[];
+  los: { bucket: string; share: number }[];
+  byBedroom: { label: string; count: number; adr: number; occupancy: number }[];
+  hasData: boolean;
+}
 interface MarketResp {
   source: string;
   configured: boolean;
   bedrooms: string;
   snapshots: Snapshot[];
+  ours?: OurSeries;
 }
 interface SyncResult {
   ok: boolean;
@@ -353,13 +361,34 @@ export function MarketAnalyticsPanel() {
   const s = snap.summary;
   const mn = snap.minNights[0];
 
-  const histOcc = snap.metrics.map((m) => ({ label: monthLabel(m.date), occupancy: Math.round(m.occupancy * 100) }));
-  const histRate = snap.metrics.map((m) => ({
-    label: monthLabel(m.date),
-    adr: Math.round(m.average_daily_rate),
-    revpar: Math.round(m.revpar),
+  // Our own portfolio series, overlaid on the market charts ("ours vs. market").
+  const ours = resp?.ours;
+  const ourMonthly = new Map((ours?.monthly ?? []).map((o) => [o.month, o]));
+  const ourFwd = new Map((ours?.forwardOcc ?? []).map((p) => [p.date, p.occupancy]));
+  const ourLos = new Map((ours?.los ?? []).map((b) => [b.bucket, b.share]));
+  const hasOurMonthly = (ours?.monthly?.length ?? 0) > 0;
+  const hasOurFwd = (ours?.forwardOcc?.length ?? 0) > 0;
+  const hasOurLos = !!ours?.los?.some((b) => b.share > 0);
+
+  const histOcc = snap.metrics.map((m) => {
+    const o = ourMonthly.get(m.date.slice(0, 7));
+    return { label: monthLabel(m.date), occupancy: Math.round(m.occupancy * 100), ours: o ? Math.round(o.occupancy * 100) : null };
+  });
+  const histRate = snap.metrics.map((m) => {
+    const o = ourMonthly.get(m.date.slice(0, 7));
+    return {
+      label: monthLabel(m.date),
+      adr: Math.round(m.average_daily_rate),
+      revpar: Math.round(m.revpar),
+      ourAdr: o ? o.adr : null,
+      ourRevpar: o ? o.revpar : null,
+    };
+  });
+  const occData = snap.pacing.map((p) => ({
+    label: shortDate(p.date),
+    occupancy: Math.round(p.fill_rate * 100),
+    ours: ourFwd.has(p.date) ? Math.round((ourFwd.get(p.date) as number) * 100) : null,
   }));
-  const occData = snap.pacing.map((p) => ({ label: shortDate(p.date), occupancy: Math.round(p.fill_rate * 100) }));
   const rateData = snap.pacing.map((p) => ({
     label: shortDate(p.date),
     booked: Math.round(p.booked_rate_avg),
@@ -369,8 +398,22 @@ export function MarketAnalyticsPanel() {
   const bc = snap.extras?.bookingCurves ?? [];
   const curMonth = bcMonth && bc.some((m) => m.month === bcMonth) ? bcMonth : (bc[0]?.month ?? null);
   const bcPoints = bc.find((m) => m.month === curMonth)?.points ?? [];
-  const losData = (snap.extras?.los ?? []).map((b) => ({ label: b.bucket, share: b.share, bnp: b.bnp }));
+  const losData = (snap.extras?.los ?? []).map((b) => ({ label: b.bucket, share: b.share, bnp: b.bnp, ours: ourLos.get(b.bucket) ?? null }));
   const tbl = snap.extras?.summaryTable ?? null;
+
+  const ourByBed = new Map((ours?.byBedroom ?? []).map((b) => [b.label, b]));
+  const ourBedAll = ours?.byBedroom ?? [];
+  const ourBedCount = ourBedAll.reduce((s, b) => s + b.count, 0);
+  const ourAgg = ourBedCount
+    ? {
+        count: ourBedCount,
+        adr: Math.round(ourBedAll.reduce((s, b) => s + b.adr * b.count, 0) / ourBedCount),
+        occupancy: Math.round(ourBedAll.reduce((s, b) => s + b.occupancy * b.count, 0) / ourBedCount),
+      }
+    : null;
+  const ourForCategory = (category: string) =>
+    category.includes("&") ? ourAgg : (ourByBed.get(category) ?? null);
+  const hasOurBed = ourBedAll.length > 0;
 
   return (
     <div className="space-y-6">
@@ -434,8 +477,11 @@ export function MarketAnalyticsPanel() {
           <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
-          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => [`${v}%`, "Occupancy"]} />
-          <Line type="monotone" dataKey="occupancy" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
+          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, n === "ours" ? "Ours" : "Market"]} />
+          <Line type="monotone" dataKey="occupancy" name="Market" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
+          {hasOurMonthly && (
+            <Line type="monotone" dataKey="ours" name="Ours" stroke="#ea580c" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+          )}
         </LineChart>
       </ChartCard>
 
@@ -448,9 +494,15 @@ export function MarketAnalyticsPanel() {
           <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis tick={{ fontSize: 10 }} stroke={AXIS} />
-          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => `${sym}${v}`} />
+          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${sym}${v}`, String(n)]} />
           <Line type="monotone" dataKey="adr" name="ADR" stroke="#16a34a" strokeWidth={2} dot={false} isAnimationActive={false} />
           <Line type="monotone" dataKey="revpar" name="RevPAR" stroke="#9333ea" strokeWidth={2} dot={false} isAnimationActive={false} />
+          {hasOurMonthly && (
+            <Line type="monotone" dataKey="ourAdr" name="ADR (ours)" stroke="#16a34a" strokeWidth={2} strokeDasharray="4 3" dot={false} connectNulls isAnimationActive={false} />
+          )}
+          {hasOurMonthly && (
+            <Line type="monotone" dataKey="ourRevpar" name="RevPAR (ours)" stroke="#9333ea" strokeWidth={2} strokeDasharray="4 3" dot={false} connectNulls isAnimationActive={false} />
+          )}
         </LineChart>
       </ChartCard>
 
@@ -463,8 +515,11 @@ export function MarketAnalyticsPanel() {
           <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
-          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => [`${v}%`, "Occupancy"]} />
-          <Area type="monotone" dataKey="occupancy" stroke="#2563eb" fill="#2563eb" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, n === "ours" ? "Ours" : "Market"]} />
+          <Area type="monotone" dataKey="occupancy" name="Market" stroke="#2563eb" fill="#2563eb" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+          {hasOurFwd && (
+            <Line type="monotone" dataKey="ours" name="Ours" stroke="#ea580c" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+          )}
         </AreaChart>
       </ChartCard>
 
@@ -528,7 +583,7 @@ export function MarketAnalyticsPanel() {
                     <Tooltip
                       contentStyle={{ fontSize: 12 }}
                       labelFormatter={(l) => `${l} days before check-in`}
-                      formatter={(v, n) => [`${v}%`, n === "o" ? "This year" : "Last year"]}
+                      formatter={(v, n) => [`${v}%`, String(n)]}
                     />
                     <Line type="monotone" dataKey="o" name="This year" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
                     <Line type="monotone" dataKey="ly" name="Last year" stroke="#94a3b8" strokeWidth={2} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
@@ -550,11 +605,9 @@ export function MarketAnalyticsPanel() {
             <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
             <XAxis dataKey="label" tick={{ fontSize: 9 }} stroke={AXIS} interval={0} />
             <YAxis unit="%" tick={{ fontSize: 10 }} stroke={AXIS} />
-            <Tooltip
-              contentStyle={{ fontSize: 12 }}
-              formatter={(v, n) => (n === "share" ? [`${v}%`, "Share of bookings"] : [`${sym}${v}`, "Avg nightly"])}
-            />
-            <Bar dataKey="share" fill="#2563eb" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+            <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, n === "ours" ? "Ours" : "Market"]} />
+            <Bar dataKey="share" name="Market" fill="#2563eb" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+            {hasOurLos && <Bar dataKey="ours" name="Ours" fill="#ea580c" radius={[3, 3, 0, 0]} isAnimationActive={false} />}
           </BarChart>
         </ChartCard>
       )}
@@ -564,7 +617,7 @@ export function MarketAnalyticsPanel() {
           <CardHeader className="pb-3">
             <CardTitle>By bedroom</CardTitle>
             <p className="text-[11px] text-muted-foreground">
-              Latest-month market comparison by unit size ({cur}).
+              {hasOurBed ? "Market vs. your portfolio by unit size" : "Latest-month market comparison by unit size"} ({cur}).
             </p>
           </CardHeader>
           <CardContent>
@@ -577,19 +630,26 @@ export function MarketAnalyticsPanel() {
                   <th className="py-1 text-right font-medium">RevPAR</th>
                   <th className="py-1 text-right font-medium">LOS</th>
                   <th className="py-1 text-right font-medium">Book window</th>
+                  {hasOurBed && <th className="py-1 text-right font-medium text-primary">Our units</th>}
+                  {hasOurBed && <th className="py-1 text-right font-medium text-primary">Our ADR</th>}
                 </tr>
               </thead>
               <tbody>
-                {tbl.rows.map((r) => (
-                  <tr key={r.category} className="border-t border-border/60">
-                    <td className="py-1.5 font-medium">{r.category}</td>
-                    <td className="py-1.5 text-right">{Math.round(r.occupancy)}%</td>
-                    <td className="py-1.5 text-right">{sym}{Math.round(r.adr)}</td>
-                    <td className="py-1.5 text-right">{sym}{Math.round(r.revpar)}</td>
-                    <td className="py-1.5 text-right">{r.los.toFixed(1)}n</td>
-                    <td className="py-1.5 text-right">{Math.round(r.bookingWindow)}d</td>
-                  </tr>
-                ))}
+                {tbl.rows.map((r) => {
+                  const o = ourForCategory(r.category);
+                  return (
+                    <tr key={r.category} className="border-t border-border/60">
+                      <td className="py-1.5 font-medium">{r.category}</td>
+                      <td className="py-1.5 text-right">{Math.round(r.occupancy)}%</td>
+                      <td className="py-1.5 text-right">{sym}{Math.round(r.adr)}</td>
+                      <td className="py-1.5 text-right">{sym}{Math.round(r.revpar)}</td>
+                      <td className="py-1.5 text-right">{r.los.toFixed(1)}n</td>
+                      <td className="py-1.5 text-right">{Math.round(r.bookingWindow)}d</td>
+                      {hasOurBed && <td className="py-1.5 text-right text-primary">{o ? o.count : "—"}</td>}
+                      {hasOurBed && <td className="py-1.5 text-right text-primary">{o ? `${sym}${Math.round(o.adr)}` : "—"}</td>}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </CardContent>
