@@ -32,6 +32,13 @@ import { SEASONALITY_SENSITIVITY } from "@/lib/config/pricing";
 export type { FactorResult } from "@/lib/pricing/rules";
 
 const DAY_MS = 86_400_000;
+// Lead time is a CALENDAR-day count in the hotel's timezone. Quoted-night dates
+// are midnight-UTC and `asOf` is a wall-clock instant, so a raw timestamp delta
+// must not be rounded — instead format both to the local (Asia/Jerusalem) date
+// and subtract whole days. (Formatter hoisted so it isn't rebuilt per night.)
+const HOTEL_DATE_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" });
+const hotelDayIndex = (d: Date): number =>
+  Math.floor(Date.parse(HOTEL_DATE_FMT.format(d) + "T00:00:00Z") / DAY_MS);
 
 /** Recommended-mode demand tiers per flavor (Min Stay Recommendation Engine). */
 const FLAVOR_TIERS: Record<
@@ -70,7 +77,12 @@ export interface DateQuote {
 }
 
 function leadDaysFrom(asOf: Date, date: Date): number {
-  return Math.max(0, Math.round((date.getTime() - asOf.getTime()) / DAY_MS));
+  // Whole calendar days between "today" and the quoted night, both in the hotel
+  // timezone. The old `Math.round((date - asOf)/DAY)` flipped the lead by ±1 day
+  // depending on the hour the pass ran (asOf carries a time-of-day; night dates
+  // are midnight-UTC), which silently shifted every lead-gated rule — last-minute
+  // discount tiers, the far-out min-stay ladder, min-price windows, CICO.
+  return Math.max(0, hotelDayIndex(date) - hotelDayIndex(asOf));
 }
 
 /**
