@@ -844,7 +844,12 @@ export function setBookedNights(unitId: string, windowDates: string[], sold: Set
         upsertOverride(unitId, date, { booked: true, available: 0 }, "minihotel");
         marked++;
       } else if (wasBooked.has(date)) {
-        upsertOverride(unitId, date, { booked: false }, "minihotel");
+        // Heal a cancellation: drop `booked` AND reset availability to unknown
+        // (null). Leaving the sold night's `available: 0` in place kept it reading
+        // as blocked — excluded from occupancy math and shown blocked — for months
+        // on far-out dates the ~120-day ARI window no longer refills. null lets the
+        // next in-window sync restore the true availability.
+        upsertOverride(unitId, date, { booked: false, available: null }, "minihotel");
       }
     }
   });
