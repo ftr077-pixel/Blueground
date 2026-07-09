@@ -498,7 +498,7 @@ export function MarketAnalyticsPanel() {
           <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
-          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, n === "ours" ? "Ours" : "Market"]} />
+          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, String(n)]} />
           <Line type="monotone" dataKey="occupancy" name="Market" stroke="#2563eb" strokeWidth={2} dot={false} isAnimationActive={false} />
           {hasOurMonthly && (
             <Line type="monotone" dataKey="ours" name="Ours" stroke="#ea580c" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
@@ -536,7 +536,7 @@ export function MarketAnalyticsPanel() {
           <CartesianGrid strokeDasharray="3 3" stroke={GRID} />
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={AXIS} />
           <YAxis unit="%" domain={[0, 100]} tick={{ fontSize: 10 }} stroke={AXIS} />
-          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, n === "ours" ? "Ours" : "Market"]} />
+          <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, String(n)]} />
           <Area type="monotone" dataKey="occupancy" name="Market" stroke="#2563eb" fill="#2563eb" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
           {hasOurFwd && (
             <Line type="monotone" dataKey="ours" name="Ours" stroke="#ea580c" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
@@ -632,7 +632,7 @@ export function MarketAnalyticsPanel() {
             <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
             <XAxis dataKey="label" tick={{ fontSize: 9 }} stroke={AXIS} interval={0} />
             <YAxis unit="%" tick={{ fontSize: 10 }} stroke={AXIS} />
-            <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, n === "ours" ? "Ours" : "Market"]} />
+            <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v, n) => [`${v}%`, String(n)]} />
             <Bar dataKey="share" name="Market" fill="#2563eb" radius={[3, 3, 0, 0]} isAnimationActive={false} />
             {hasOurLos && <Bar dataKey="ours" name="Ours" fill="#ea580c" radius={[3, 3, 0, 0]} isAnimationActive={false} />}
           </BarChart>
