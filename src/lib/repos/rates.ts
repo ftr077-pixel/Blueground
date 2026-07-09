@@ -97,6 +97,9 @@ export interface CalendarSummary {
   sold: number;
   open: number;
   closed: number;
+  /** Σ displayed nightly price over the window's open nights — what the unsold
+   *  inventory would still gross if every open night sold at its current rate. */
+  unsoldValue: number;
 }
 
 export interface Calendar {
@@ -732,6 +735,7 @@ export function getCalendar(from: string, days: number): Calendar {
   let sold = 0;
   let open = 0;
   let closedN = 0;
+  let unsoldValue = 0;
   const bookedPrices: number[] = [];
   for (const row of rows) {
     for (let i = 0; i < w; i++) {
@@ -741,7 +745,10 @@ export function getCalendar(from: string, days: number): Calendar {
       else if (c.booked) {
         sold++;
         if (c.price != null) bookedPrices.push(c.price);
-      } else if (c.available != null && c.available > 0) open++; // known-open; null = unsynced, skip
+      } else if (c.available != null && c.available > 0) {
+        open++; // known-open; null = unsynced, skip
+        if (c.price != null) unsoldValue += c.price;
+      }
     }
   }
   // On-the-books is REAL money only: net-of-VAT reservation revenue recognized
@@ -780,6 +787,7 @@ export function getCalendar(from: string, days: number): Calendar {
       sold,
       open,
       closed: closedN,
+      unsoldValue: Math.round(unsoldValue),
     },
   };
 }
