@@ -26,6 +26,16 @@ import { listMarketSnapshots } from "@/lib/repos/market";
 
 export const DEFAULT_MIN_NIGHTS = 3; // operator default (PriceLabs setup: 3/3 weekday/weekend)
 export const CURRENCY = "ILS";
+
+/**
+ * ⚠️ REMEMBER: the operator's flat 33% cut.
+ * Every "what would this gross FOR US" number derived from calendar prices —
+ * the Monthly-estimate column and the Unsold value (summary tile + the
+ * calendar's Day-totals row) — is NET of this cut: sticker price × 0.67.
+ * The nightly prices displayed on the calendar grid (and pushed to MiniHotel)
+ * are full sticker prices; only these derived revenue figures take the cut.
+ */
+export const OPERATOR_NET_FACTOR = 0.67; // = 1 − 33%
 const EPOCH = Date.UTC(2026, 0, 1); // stable origin for day indexing + per-night price jitter
 
 export interface RateCell {
@@ -97,8 +107,10 @@ export interface CalendarSummary {
   sold: number;
   open: number;
   closed: number;
-  /** Σ displayed nightly price over the window's open nights — what the unsold
-   *  inventory would still gross if every open night sold at its current rate. */
+  /** Σ displayed nightly price over the window's open nights × 0.67 — what the
+   *  unsold inventory would still gross FOR US if every open night sold at its
+   *  current rate, NET of the operator's 33% cut (same deduction as the
+   *  Monthly estimate; see OPERATOR_NET_FACTOR). */
   unsoldValue: number;
 }
 
@@ -577,7 +589,7 @@ export function getCalendar(from: string, days: number): Calendar {
       }
       sum += p;
     }
-    const total = Math.round(sum * 0.67); // the operator's flat 33% monthly cut
+    const total = Math.round(sum * OPERATOR_NET_FACTOR); // the operator's flat 33% monthly cut
     return { from: start, total, nightly: Math.round(total / 30) };
   };
 
@@ -787,7 +799,7 @@ export function getCalendar(from: string, days: number): Calendar {
       sold,
       open,
       closed: closedN,
-      unsoldValue: Math.round(unsoldValue),
+      unsoldValue: Math.round(unsoldValue * OPERATOR_NET_FACTOR), // NET of the 33% cut, like Monthly est.
     },
   };
 }

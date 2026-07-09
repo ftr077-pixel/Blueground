@@ -156,6 +156,12 @@ const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
 const fmtILSk = (n: number) =>
   n >= 100_000 ? `₪${Math.round(n / 1000)}k` : n >= 10_000 ? `₪${(n / 1000).toFixed(1)}k` : fmtILS(n);
 
+// ⚠️ REMEMBER: unsold value is NET of the operator's flat 33% cut — sticker
+// price × 0.67, the SAME deduction as the Monthly-estimate column. Must match
+// OPERATOR_NET_FACTOR in src/lib/repos/rates.ts (the server applies it to the
+// summary tile; this one is for the client-computed Day-totals row).
+const OPERATOR_NET_FACTOR = 0.67; // = 1 − 33%
+
 // Result of a Reverse-ARI push, as returned by /api/rates.
 type PushInfo = {
   ok: boolean;
@@ -391,9 +397,10 @@ export function RateCalendar() {
 
   // Per-day totals over the VISIBLE rows (the neighborhood filter applies):
   // utilization = sold ÷ (sold + open) and unsold value = Σ current price of the
-  // day's open nights — what the day would still gross if everything sold as
-  // priced. Same "known-open" rule as the server summary: nights with no synced
-  // availability are skipped rather than guessed.
+  // day's open nights × 0.67 — what the day would still gross FOR US if
+  // everything sold as priced, NET of the operator's 33% cut (like the Monthly
+  // estimate). Same "known-open" rule as the server summary: nights with no
+  // synced availability are skipped rather than guessed.
   const dayTotals = useMemo(() => {
     const dates = data?.dates ?? [];
     return dates.map((date, i) => {
@@ -414,7 +421,7 @@ export function RateCalendar() {
         sold,
         open,
         occ: sold + open > 0 ? sold / (sold + open) : null,
-        unsold: Math.round(unsold),
+        unsold: Math.round(unsold * OPERATOR_NET_FACTOR), // NET of the 33% cut
       };
     });
   }, [rows, data]);
@@ -673,9 +680,9 @@ export function RateCalendar() {
         />
         <StatTile
           icon={Coins}
-          label={`Unsold value · ${s.windowDays}d`}
+          label={`Unsold value · ${s.windowDays}d · net −33%`}
           value={s.open > 0 ? fmtILS(s.unsoldValue) : "—"}
-          hint="If every open night sells at its current price"
+          hint="If every open night sells at its current price, after the 33% cut"
         />
         <StatTile
           icon={CalendarDays}
@@ -1082,10 +1089,10 @@ export function RateCalendar() {
                   <th
                     colSpan={9}
                     className="sticky left-0 z-10 border-r border-border bg-card px-3 py-1.5 text-left align-middle font-medium text-muted-foreground"
-                    title="Per-day totals over the listings shown below (neighborhood filter applies). Top: utilization = sold ÷ (sold + open). Bottom: unsold value = sum of the open nights' current prices — what the day would still gross if every open night sold as priced. Nights not yet synced from MiniHotel are skipped."
+                    title="Per-day totals over the listings shown below (neighborhood filter applies). Top: utilization = sold ÷ (sold + open). Bottom: unsold value = sum of the open nights' current prices MINUS the flat 33% cut (×0.67, same deduction as the Monthly-estimate column) — what the day would still gross for us if every open night sold as priced. Nights not yet synced from MiniHotel are skipped."
                   >
                     Day totals
-                    <span className="ml-1.5 text-[9px] font-normal">util % · unsold ₪</span>
+                    <span className="ml-1.5 text-[9px] font-normal">util % · unsold ₪ net −33%</span>
                   </th>
                   {dayTotals.map((t) => {
                     const p = partsUTC(t.date);
@@ -1097,7 +1104,7 @@ export function RateCalendar() {
                         } ${p.day === 1 ? "border-l border-border" : ""}`}
                         title={`${t.date} · ${t.sold} sold · ${t.open} open${
                           t.occ != null ? ` · ${Math.round(t.occ * 100)}% utilized` : ""
-                        } · unsold ${fmtILS(t.unsold)}`}
+                        } · unsold ${fmtILS(t.unsold)} (net of the 33% cut)`}
                       >
                         <div className="text-[10px] font-medium tabular-nums text-foreground">
                           {t.occ != null ? `${Math.round(t.occ * 100)}%` : "—"}
