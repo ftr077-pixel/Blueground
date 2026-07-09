@@ -98,6 +98,12 @@ export interface OccupancyReport {
   totalBookings: number;
   current: OccMonth;
   byMonth: OccMonth[]; // chronological
+  /** The date range the snapshot actually observed. null = snapshot stored by a
+   *  build predating the window meta — the math falls back to FULL-month
+   *  denominators, which badly understates occupancy (a re-sync fixes it). */
+  window: { from: string; to: string } | null;
+  /** When the snapshot was pulled (the feed only knows bookings as of then). */
+  syncedAt: string | null;
 }
 
 export function occupancyByMonth(thisMonth?: string): OccupancyReport {
@@ -201,5 +207,8 @@ export function occupancyByMonth(thisMonth?: string): OccupancyReport {
   const current =
     byMonth.find((x) => x.month === ym) ??
     { month: ym, bookedNights: 0, availableNights: rooms * coveredDays(ym), occupancy: 0, bookings: 0 };
-  return { thisMonth: ym, rooms, totalBookings: total, current, byMonth };
+  const syncedAt =
+    (db.prepare("SELECT MAX(updated_at) AS ts FROM ari_booking").get() as { ts: string | null } | undefined)
+      ?.ts ?? null;
+  return { thisMonth: ym, rooms, totalBookings: total, current, byMonth, window, syncedAt };
 }
