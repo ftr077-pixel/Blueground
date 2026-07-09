@@ -9,6 +9,7 @@ import {
 import {
   Banknote,
   CalendarDays,
+  Coins,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -93,6 +94,7 @@ interface Calendar {
     sold: number;
     open: number;
     closed: number;
+    unsoldValue: number;
   };
 }
 
@@ -150,6 +152,9 @@ const btnGhost =
   "inline-flex items-center gap-1.5 rounded-md border border-border bg-card h-8 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-50";
 
 const fmtILS = (n: number) => "₪" + Math.round(n).toLocaleString("en-US");
+// Compact ₪ for the narrow day-total cells ("₪12.3k").
+const fmtILSk = (n: number) =>
+  n >= 100_000 ? `₪${Math.round(n / 1000)}k` : n >= 10_000 ? `₪${(n / 1000).toFixed(1)}k` : fmtILS(n);
 
 // Result of a Reverse-ARI push, as returned by /api/rates.
 type PushInfo = {
@@ -383,6 +388,36 @@ export function RateCalendar() {
         return d !== 0 ? d : byListing(a, b);
       });
   }, [data, hood, sort]);
+
+  // Per-day totals over the VISIBLE rows (the neighborhood filter applies):
+  // utilization = sold ÷ (sold + open) and unsold value = Σ current price of the
+  // day's open nights — what the day would still gross if everything sold as
+  // priced. Same "known-open" rule as the server summary: nights with no synced
+  // availability are skipped rather than guessed.
+  const dayTotals = useMemo(() => {
+    const dates = data?.dates ?? [];
+    return dates.map((date, i) => {
+      let sold = 0;
+      let open = 0;
+      let unsold = 0;
+      for (const r of rows) {
+        const c = r.cells[i];
+        if (!c || c.closed) continue;
+        if (c.booked) sold++;
+        else if (c.available != null && c.available > 0) {
+          open++;
+          if (c.price != null) unsold += c.price;
+        }
+      }
+      return {
+        date,
+        sold,
+        open,
+        occ: sold + open > 0 ? sold / (sold + open) : null,
+        unsold: Math.round(unsold),
+      };
+    });
+  }, [rows, data]);
 
   const selCell = useMemo(() => {
     if (!sel || !data) return null;
@@ -621,7 +656,7 @@ export function RateCalendar() {
       {error && <p className="text-[11px] text-[hsl(var(--danger))]">{error}</p>}
 
       {/* summary tiles */}
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <StatTile
           icon={Percent}
           label={`Occupancy · ${s.windowDays}d`}
@@ -635,6 +670,12 @@ export function RateCalendar() {
           label={`On-the-books · ${s.windowDays}d`}
           value={s.bookedRevenue > 0 ? fmtILS(s.bookedRevenue) : "—"}
           hint="Revenue from sold nights"
+        />
+        <StatTile
+          icon={Coins}
+          label={`Unsold value · ${s.windowDays}d`}
+          value={s.open > 0 ? fmtILS(s.unsoldValue) : "—"}
+          hint="If every open night sells at its current price"
         />
         <StatTile
           icon={CalendarDays}
@@ -1037,6 +1078,37 @@ export function RateCalendar() {
                 </tr>
               </thead>
               <tbody>
+                <tr className="border-t border-border">
+                  <th
+                    colSpan={9}
+                    className="sticky left-0 z-10 border-r border-border bg-card px-3 py-1.5 text-left align-middle font-medium text-muted-foreground"
+                    title="Per-day totals over the listings shown below (neighborhood filter applies). Top: utilization = sold ÷ (sold + open). Bottom: unsold value = sum of the open nights' current prices — what the day would still gross if every open night sold as priced. Nights not yet synced from MiniHotel are skipped."
+                  >
+                    Day totals
+                    <span className="ml-1.5 text-[9px] font-normal">util % · unsold ₪</span>
+                  </th>
+                  {dayTotals.map((t) => {
+                    const p = partsUTC(t.date);
+                    return (
+                      <td
+                        key={t.date}
+                        className={`w-14 px-1 py-1 text-center align-middle ${
+                          p.wd === 5 || p.wd === 6 ? "bg-muted/40" : ""
+                        } ${p.day === 1 ? "border-l border-border" : ""}`}
+                        title={`${t.date} · ${t.sold} sold · ${t.open} open${
+                          t.occ != null ? ` · ${Math.round(t.occ * 100)}% utilized` : ""
+                        } · unsold ${fmtILS(t.unsold)}`}
+                      >
+                        <div className="text-[10px] font-medium tabular-nums text-foreground">
+                          {t.occ != null ? `${Math.round(t.occ * 100)}%` : "—"}
+                        </div>
+                        <div className="text-[9px] tabular-nums text-muted-foreground">
+                          {t.open > 0 ? fmtILSk(t.unsold) : "—"}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
                 {rows.map((row) => {
                   const typical = typicalRate(row);
                   return (
