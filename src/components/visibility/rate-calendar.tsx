@@ -426,6 +426,43 @@ export function RateCalendar() {
     });
   }, [rows, data]);
 
+  // Unsold value rolled up per calendar month over the loaded window (same
+  // visible rows / neighborhood filter as the Day-totals row it sums). The
+  // first month starts at the window's From — with the default From (today)
+  // that reads "from today to the end of this month". A month the horizon cuts
+  // short is flagged so a low number isn't mistaken for a quiet month.
+  const monthTotals = useMemo(() => {
+    const acc = new Map<
+      string,
+      { unsold: number; sold: number; open: number; first: string; last: string }
+    >();
+    for (const t of dayTotals) {
+      const key = t.date.slice(0, 7); // YYYY-MM
+      const m = acc.get(key);
+      if (!m) acc.set(key, { unsold: t.unsold, sold: t.sold, open: t.open, first: t.date, last: t.date });
+      else {
+        m.unsold += t.unsold;
+        m.sold += t.sold;
+        m.open += t.open;
+        m.last = t.date;
+      }
+    }
+    return Array.from(acc.values()).map((m) => {
+      const p = partsUTC(m.first);
+      const lastDay = partsUTC(m.last).day;
+      const monthEnd = new Date(Date.UTC(p.year, p.mon + 1, 0)).getUTCDate();
+      return {
+        key: m.first.slice(0, 7),
+        label: `${MON[p.mon]} ${p.day}–${lastDay}`,
+        year: p.year,
+        unsold: m.unsold,
+        sold: m.sold,
+        open: m.open,
+        cutShort: lastDay < monthEnd, // the horizon ends before the month does
+      };
+    });
+  }, [dayTotals]);
+
   const selCell = useMemo(() => {
     if (!sel || !data) return null;
     const row = data.rows.find((r) => r.unit.id === sel.unitId);
@@ -948,6 +985,34 @@ export function RateCalendar() {
             The Min/Max columns are each apartment&rsquo;s price floor/ceiling: blank = auto (80%/120%
             of Base), a typed value pins the bound so Base edits no longer move it.
           </p>
+          {monthTotals.some((m) => m.open > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px]">
+              <span
+                className="text-muted-foreground"
+                title="The Day-totals row summed per calendar month, over the listings shown below (neighborhood filter applies). The first month runs from the window's From date — with From = today, that's today through month-end. Unsold value is NET of the 33% cut, same as everywhere on this page."
+              >
+                Unsold by month
+                <span className="ml-1 text-[9px]">net −33%</span>
+              </span>
+              {monthTotals.map((m) => (
+                <span
+                  key={m.key}
+                  className="inline-flex items-baseline gap-1.5 rounded-md border border-border bg-muted/30 px-2 py-0.5 tabular-nums"
+                  title={`${m.label}, ${m.year} · ${m.sold} sold · ${m.open} open night(s) · unsold ${fmtILS(m.unsold)} net of the 33% cut${
+                    m.cutShort
+                      ? " · the horizon ends before this month does — extend it (or step forward) to cover the full month"
+                      : ""
+                  }`}
+                >
+                  <span className="text-muted-foreground">{m.label}</span>
+                  <span className="font-medium text-foreground">
+                    {m.open > 0 ? fmtILS(m.unsold) : "—"}
+                  </span>
+                  {m.cutShort && <span className="text-[9px] text-muted-foreground">partial</span>}
+                </span>
+              ))}
+            </div>
+          )}
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
