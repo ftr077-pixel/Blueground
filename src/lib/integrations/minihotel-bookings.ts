@@ -4,7 +4,7 @@ import {
   miniHotelEndpoints,
   type MiniHotelConnection,
 } from "@/lib/repos/integrations";
-import { upsertBooking } from "@/lib/repos/bookings";
+import { purgeBookingShapeConflicts, upsertBooking } from "@/lib/repos/bookings";
 import {
   buildReservationsRequest,
   parseReservations,
@@ -102,6 +102,9 @@ export async function syncBookingsFromMiniHotel(opts: {
   const unmapped = new Set<string>();
   let mapped = 0;
   let stored = 0;
+  // A booking that changed shape (collapsed row ↔ per-room group rows) must not
+  // leave its old rows behind — that double-counts the order.
+  purgeBookingShapeConflicts(parsed.map((r) => r.minihotelId));
   for (const r of parsed) {
     const unitId = r.roomType ? byType.get(r.roomType.trim().toUpperCase()) ?? null : null;
     if (r.roomType && !unitId) unmapped.add(r.roomType);

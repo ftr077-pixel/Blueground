@@ -163,6 +163,17 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
   const byRoom = roomTypeToUnit();
   const now = new Date().toISOString();
 
+  // Group-reservation shape healing. Multi-room (group) bookings are stored as
+  // one row per room, id'd `<bookingId>:<memberSerial>`; older syncs collapsed
+  // them into a single row under the bare booking id. When a booking arrives in
+  // one shape, purge rows stored in the other (and stale members — a room can
+  // be dropped from a group), or revenue double-counts. substr() rather than
+  // LIKE: synthetic ids contain `_`, which LIKE treats as a wildcard.
+  const delBare = db.prepare("DELETE FROM reservation WHERE id = ?");
+  const delMembers = db.prepare(
+    "DELETE FROM reservation WHERE substr(id, 1, length(?) + 1) = ? || ':'",
+  );
+
   const upsert = db.prepare(
     `INSERT INTO reservation
        (id, unit_id, room_type, room_number, check_in, check_out, nights, revenue, gross, vat, vat_basis, currency, country, status, created_on, source, updated_at)
@@ -178,6 +189,18 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
   let recorded = 0;
   let skipped = 0;
   const tx = db.transaction((list: ReservationInput[]) => {
+    // Purge conflicting shapes once per booking, BEFORE any of its rows insert.
+    const purged = new Set<string>();
+    for (const r of list) {
+      if (!r.id) continue;
+      const id = String(r.id);
+      const sep = id.indexOf(":");
+      const base = sep > 0 ? id.slice(0, sep) : id;
+      if (purged.has(base)) continue;
+      purged.add(base);
+      if (sep > 0) delBare.run(base); // now a group — drop the old collapsed row
+      delMembers.run(base, base); // re-inserted below; also clears stale members
+    }
     for (const r of list) {
       const checkIn = (r.checkIn ?? "").slice(0, 10);
       const checkOut = (r.checkOut ?? "").slice(0, 10);
@@ -217,7 +240,9 @@ export function upsertReservations(rows: ReservationInput[]): { recorded: number
  * Flip already-stored reservations to a cancelled status (driven by the
  * Cancellations="YES" sweep). UPDATE-only on purpose: the cancellation feed can
  * ship rows without prices, and a cancelled booking we never stored has no
- * revenue to remove anyway. Returns how many rows actually changed status.
+ * revenue to remove anyway. The feed carries the bare booking id, so the match
+ * also covers `<id>:<member>` rows — cancelling a group booking must flip every
+ * room of it. Returns how many rows actually changed status.
  */
 export function markReservationsCancelled(
   rows: Array<{ id: string; status?: string | null }>,
@@ -226,7 +251,9 @@ export function markReservationsCancelled(
   const db = getDb();
   const now = new Date().toISOString();
   const upd = db.prepare(
-    "UPDATE reservation SET status = @status, updated_at = @now WHERE id = @id AND (status IS NULL OR status <> @status)",
+    `UPDATE reservation SET status = @status, updated_at = @now
+     WHERE (id = @id OR substr(id, 1, length(@id) + 1) = @id || ':')
+       AND (status IS NULL OR status <> @status)`,
   );
   let changed = 0;
   const tx = db.transaction((list: typeof rows) => {
@@ -443,6 +470,9 @@ export interface ReservationReportRow {
   /** Days from booking to check-in (booked-on → arrival). Null when bookedOn is
    *  missing. The lead time that makes last-minute pricing measurable. */
   leadDays: number | null;
+  /** Multi-room (group) bookings store one row per room (`<bookingId>:<member>`);
+   *  this is the shared booking id — rows with the same groupId are one order. */
+  groupId: string | null;
 }
 
 export interface MonthBucket {
@@ -507,6 +537,7 @@ export function reservationReport(thisMonth?: string): ReservationReport {
     const reason: "cancelled" | "test" | null = cancelled ? "cancelled" : isTest ? "test" : null;
     const counted = reason === null;
 
+    const sep = r.id.indexOf(":");
     out.push({
       id: r.id,
       status: r.status,
@@ -525,6 +556,7 @@ export function reservationReport(thisMonth?: string): ReservationReport {
       excludedReason: reason,
       bookedOn: r.created_on,
       leadDays: daysBetween(r.created_on, r.check_in),
+      groupId: sep > 0 ? r.id.slice(0, sep) : null,
     });
 
     if (cancelled) totals.cancelled++;

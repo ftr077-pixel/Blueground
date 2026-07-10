@@ -1368,12 +1368,35 @@ function parseReservationsJson(data: unknown): MiniReservation[] {
 
 const firstBlock = (re: RegExp, s: string): string => re.exec(s)?.[1] ?? "";
 
+// One <RoomStay> of a booking, with everything needed to stand alone as a row.
+interface ParsedRoomStay {
+  serial: string | null; // memberSerial — stable per-room id within the group
+  roomType?: string;
+  roomNumber?: string;
+  arrival: string | null; // per-room <StayDate> (group members can differ)
+  departure: string | null;
+  total: number | null; // per-room <Total> (IncludeRoomPrices)
+  totalAttrs: string;
+  status?: string; // per-room <Status> (group members cancel individually)
+}
+
 /**
  * Parse MiniHotel's GetReservationKey response (§3.3): one <Booking> per reservation,
  * with the whole-stay total in <ResGlobalInfo><Total AmountAfterTaxes>, dates in
- * <Timespan arrival departure> (dd/mm/yyyy), the room in the first <RoomStay>, and the
- * guest country in <PrimaryGuest><Country>. The total is tax-INCLUSIVE; VAT is derived
- * downstream from the country.
+ * <Timespan arrival departure> (dd/mm/yyyy), and the guest country in
+ * <PrimaryGuest><Country>. The total is tax-INCLUSIVE; VAT is derived downstream
+ * from the country.
+ *
+ * GROUP reservations (isGroupReservation="YES") arrive as ONE <Booking> with a
+ * <RoomStay memberSerial=…> per room — each with its own <StayDate>, <Status>
+ * and (with IncludeRoomPrices) its own <Total>, while the booking-level total
+ * ships EMPTY. Collapsing those into one row breaks every downstream number:
+ * revenue lands on one room type, room-nights collapse to one room's span (so
+ * ADR and the per-night monthly accrual inflate), and per-room date differences
+ * are lost. So multi-room bookings are EXPANDED to one row per room, id'd
+ * `<bookingId>:<memberSerial>`; when a room has no own total, it gets a
+ * nights-proportional share of the booking total. upsertReservations heals rows
+ * stored under the old collapsed id, so re-syncs stay idempotent.
  */
 function parseBookingsXml(xml: string): MiniReservation[] {
   const out: MiniReservation[] = [];
@@ -1395,57 +1418,117 @@ function parseBookingsXml(xml: string): MiniReservation[] {
     const ts = firstBlock(/<Timespan\b([^>]*?)\/?>/i, inner) || firstBlock(/<StayDate\b([^>]*?)\/?>/i, inner);
     const checkIn = normDate(attr(ts, "arrival"));
     const checkOut = normDate(attr(ts, "departure"));
-    // Whole-stay total: the booking-level <ResGlobalInfo> total when it carries
-    // an amount; otherwise the SUM of the per-<RoomStay> totals (multi-room
-    // group bookings put the money on each room and leave the global total
-    // empty — taking just the first <Total> would drop the other rooms' revenue).
     const globalScope = firstBlock(/<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i, inner);
     const globalTotal = globalScope ? firstBlock(/<Total\b([^>]*?)\/?>/i, globalScope) : "";
-    let gross = amountOf(globalTotal);
-    let totalAttrs = globalTotal;
-    if (gross == null) {
-      let sum = 0;
-      let found = false;
-      const rsRe = /<RoomStay\b[^>]*?(?:\/>|>([\s\S]*?)<\/RoomStay>)/gi;
-      let rs: RegExpExecArray | null;
-      while ((rs = rsRe.exec(inner))) {
-        const t = firstBlock(/<Total\b([^>]*?)\/?>/i, rs[1] ?? "");
-        const v = amountOf(t);
-        if (v != null) {
-          sum += v;
-          if (!found) totalAttrs = t;
-          found = true;
+    const globalGross = amountOf(globalTotal);
+
+    // Every <RoomStay>, kept whole (attributes + body) so per-room fields survive.
+    const stays: ParsedRoomStay[] = [];
+    const rsRe = /<RoomStay\b([^>]*?)(?:\/>|>([\s\S]*?)<\/RoomStay>)/gi;
+    let rs: RegExpExecArray | null;
+    while ((rs = rsRe.exec(inner))) {
+      const rsAttrs = rs[1] ?? "";
+      const body = rs[2] ?? "";
+      const sd = firstBlock(/<StayDate\b([^>]*?)\/?>/i, body) || firstBlock(/<Timespan\b([^>]*?)\/?>/i, body);
+      const t = firstBlock(/<Total\b([^>]*?)\/?>/i, body);
+      stays.push({
+        serial: attr(rsAttrs, "memberSerial"),
+        roomType: attr(rsAttrs, "roomTypeId") || attr(rsAttrs, "roomTypeID") || undefined,
+        roomNumber: attr(rsAttrs, "roomNumber") || undefined,
+        arrival: normDate(attr(sd, "arrival")),
+        departure: normDate(attr(sd, "departure")),
+        total: amountOf(t),
+        totalAttrs: t,
+        status:
+          firstBlock(/<Status\b[^>]*>([\s\S]*?)<\/Status>/i, body).trim() ||
+          attr(rsAttrs, "Status") ||
+          undefined,
+      });
+    }
+
+    const country = firstBlock(/<Country\b([^>]*?)\/?>/i, inner);
+    const shared = {
+      country: attr(country, "iso2") || attr(country, "iso3") || attr(country, "CountryName") || undefined,
+      vatFlag: attr(country, "Vat") || attr(head, "Vat") || undefined,
+      status: attr(head, "Status") || undefined,
+      // The real booking date is right here on the head — keep it (we used to drop
+      // it, which forced the booking curves onto the sync-time proxy).
+      createdOn: normDate(attr(head, "createDateTime")) ?? undefined,
+    };
+    const baseId = attr(head, "Minihotel_reservation_id") || attr(head, "Portal_reservation_id");
+
+    if (stays.length > 1) {
+      // ---- multi-room (group): one row per room ------------------------------
+      const nightsOf = (s: ParsedRoomStay): number => {
+        const a = s.arrival ?? checkIn;
+        const b = s.departure ?? checkOut;
+        if (!a || !b) return 0;
+        const n = Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 86400000);
+        return n > 0 ? n : 0;
+      };
+      // Rooms without their own <Total> split what's left of the booking total
+      // (usually all of it — priced feeds put ALL money per room, unpriced ones
+      // only on the booking) in proportion to their nights.
+      const known = stays.reduce((s, r) => s + (r.total ?? 0), 0);
+      const missing = stays.filter((r) => r.total == null);
+      const missingNights = missing.reduce((s, r) => s + nightsOf(r), 0);
+      const leftover = globalGross != null ? Math.max(0, globalGross - known) : null;
+      const memberSeen = new Set<string>();
+      for (let i = 0; i < stays.length; i++) {
+        const r = stays[i];
+        const a = r.arrival ?? checkIn;
+        const b = r.departure ?? checkOut;
+        let gross = r.total;
+        if (gross == null && leftover != null && missingNights > 0) {
+          gross = (leftover * nightsOf(r)) / missingNights;
         }
+        if (!a || !b || gross == null) continue; // no dates / no money — same drop rule as before
+        let member = r.serial || r.roomNumber || String(i + 1);
+        while (memberSeen.has(member)) member += `-${i + 1}`;
+        memberSeen.add(member);
+        out.push({
+          id: baseId
+            ? `${baseId}:${member}`
+            : syntheticId(seen, [a, b, r.roomNumber, gross]),
+          checkIn: a,
+          checkOut: b,
+          gross,
+          roomType: r.roomType,
+          roomNumber: r.roomNumber,
+          currency: attr(r.totalAttrs, "CurrencyCode") || attr(globalTotal, "CurrencyCode") || undefined,
+          ...shared,
+          status: r.status || shared.status,
+        });
       }
-      if (found) gross = sum;
+      continue;
+    }
+
+    // ---- single room: the original whole-booking row -------------------------
+    // Total precedence: booking-level total, else the room's own, else the first
+    // <Total> anywhere (non-standard shapes).
+    let gross = globalGross;
+    let totalAttrs = globalTotal;
+    if (gross == null && stays[0]?.total != null) {
+      gross = stays[0].total;
+      totalAttrs = stays[0].totalAttrs;
     }
     if (gross == null) {
-      // Last resort (non-standard shapes): the first <Total> anywhere.
       const t = firstBlock(/<Total\b([^>]*?)\/?>/i, inner);
       gross = amountOf(t);
       totalAttrs = t;
     }
     if (!checkIn || !checkOut || gross == null) continue;
-    const stay = firstBlock(/<RoomStay\b([^>]*?)\/?>/i, inner);
-    const country = firstBlock(/<Country\b([^>]*?)\/?>/i, inner);
-    const roomNumber = attr(stay, "roomNumber") || undefined;
+    const roomNumber = stays[0]?.roomNumber;
     out.push({
-      id:
-        attr(head, "Minihotel_reservation_id") ||
-        attr(head, "Portal_reservation_id") ||
-        syntheticId(seen, [checkIn, checkOut, roomNumber, gross]),
+      id: baseId || syntheticId(seen, [checkIn, checkOut, roomNumber, gross]),
       checkIn,
       checkOut,
       gross,
-      roomType: attr(stay, "roomTypeId") || attr(stay, "roomTypeID") || undefined,
+      roomType: stays[0]?.roomType,
       roomNumber,
-      country: attr(country, "iso2") || attr(country, "iso3") || attr(country, "CountryName") || undefined,
-      vatFlag: attr(country, "Vat") || attr(head, "Vat") || undefined,
       currency: attr(totalAttrs, "CurrencyCode") || attr(globalTotal, "CurrencyCode") || undefined,
-      status: attr(head, "Status") || undefined,
-      // The real booking date is right here on the head — keep it (we used to drop
-      // it, which forced the booking curves onto the sync-time proxy).
-      createdOn: normDate(attr(head, "createDateTime")) ?? undefined,
+      ...shared,
+      status: stays[0]?.status || shared.status,
     });
   }
   return out;

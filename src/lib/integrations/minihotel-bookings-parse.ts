@@ -69,7 +69,17 @@ export function buildReservationsRequest(conn: MiniHotelConnection, from: string
   );
 }
 
-/** Parse a GetReservationKey <Bookings> response into flat reservations. */
+/**
+ * Parse a GetReservationKey <Bookings> response into flat reservations.
+ *
+ * Multi-room (group) bookings — one <Booking> with several <RoomStay
+ * memberSerial=…> rows, each with its own <StayDate>/<Total>/<GuestCount>,
+ * while the booking-level <Total> ships EMPTY — are expanded to one
+ * reservation per room, id'd `<bookingId>:<memberSerial>`. A room without its
+ * own total gets a nights-proportional share of the booking total. Collapsing
+ * a group into one row would drop all but the first room's nights and (since
+ * the global total is empty) its money entirely.
+ */
 export function parseReservations(xml: string): ParsedReservation[] {
   const out: ParsedReservation[] = [];
   const bRe = /<Booking\b([^>]*)>([\s\S]*?)<\/Booking>/gi;
@@ -80,10 +90,6 @@ export function parseReservations(xml: string): ParsedReservation[] {
     const minihotelId = attr(head, "Minihotel_reservation_id");
     if (!minihotelId) continue;
 
-    // First room stay's type (vacation rentals are typically single-room).
-    const roomStay = /<RoomStay\b([^>]*)\/?>/i.exec(body);
-    const roomType = roomStay ? attr(roomStay[1], "roomTypeId") ?? attr(roomStay[1], "roomTypeID") : null;
-
     // Prefer the ResGlobalInfo totals/dates; fall back to the first occurrence.
     const rgi = /<ResGlobalInfo\b[^>]*>([\s\S]*?)<\/ResGlobalInfo>/i.exec(body);
     const scope = rgi ? rgi[1] : body;
@@ -91,21 +97,92 @@ export function parseReservations(xml: string): ParsedReservation[] {
     const total = /<Total\b([^>]*)\/?>/i.exec(scope) ?? /<Total\b([^>]*)\/?>/i.exec(body);
     const guests = /<GuestCount\b([^>]*)\/?>/i.exec(scope) ?? /<GuestCount\b([^>]*)\/?>/i.exec(body);
 
-    const adult = guests ? numAttr(guests[1], "adult") ?? 0 : 0;
-    const child = guests ? numAttr(guests[1], "child") ?? 0 : 0;
-
-    out.push({
-      minihotelId,
+    const shared = {
       portalId: attr(head, "Portal_reservation_id"),
       source: attr(head, "source"),
       status: attr(head, "Status"),
       createdOn: toIso(attr(head, "createDateTime")),
-      arrival: span ? toIso(attr(span[1], "arrival")) : null,
-      departure: span ? toIso(attr(span[1], "departure")) : null,
-      roomType,
+    };
+    const arrival = span ? toIso(attr(span[1], "arrival")) : null;
+    const departure = span ? toIso(attr(span[1], "departure")) : null;
+    // Number("") is 0 — an empty AmountAfterTaxes (group bookings) must be null.
+    const globalTotal = total ? numAttr(total[1], "AmountAfterTaxes") : null;
+    const currency = total ? attr(total[1], "CurrencyCode") : null;
+
+    // Every <RoomStay> with its per-room fields (group members can differ).
+    const stays: Array<{
+      serial: string | null;
+      roomType: string | null;
+      arrival: string | null;
+      departure: string | null;
+      total: number | null;
+      currency: string | null;
+      guests: number | null;
+    }> = [];
+    const rsRe = /<RoomStay\b([^>]*?)(?:\/>|>([\s\S]*?)<\/RoomStay>)/gi;
+    let rs: RegExpExecArray | null;
+    while ((rs = rsRe.exec(body))) {
+      const attrs = rs[1] ?? "";
+      const inner = rs[2] ?? "";
+      const sd = /<StayDate\b([^>]*)\/?>/i.exec(inner) ?? /<Timespan\b([^>]*)\/?>/i.exec(inner);
+      const t = /<Total\b([^>]*)\/?>/i.exec(inner);
+      const g = /<GuestCount\b([^>]*)\/?>/i.exec(inner);
+      const adult = g ? numAttr(g[1], "adult") ?? 0 : 0;
+      const child = g ? numAttr(g[1], "child") ?? 0 : 0;
+      stays.push({
+        serial: attr(attrs, "memberSerial"),
+        roomType: attr(attrs, "roomTypeId") ?? attr(attrs, "roomTypeID"),
+        arrival: sd ? toIso(attr(sd[1], "arrival")) : null,
+        departure: sd ? toIso(attr(sd[1], "departure")) : null,
+        total: t ? numAttr(t[1], "AmountAfterTaxes") : null,
+        currency: t ? attr(t[1], "CurrencyCode") : null,
+        guests: adult + child || null,
+      });
+    }
+
+    if (stays.length > 1) {
+      // ---- multi-room (group): one reservation per room ----------------------
+      const nightsOf = (s: (typeof stays)[number]): number =>
+        Math.max(0, daysBetween(s.arrival ?? arrival, s.departure ?? departure) ?? 0);
+      const known = stays.reduce((s, r) => s + (r.total ?? 0), 0);
+      const missingNights = stays.filter((r) => r.total == null).reduce((s, r) => s + nightsOf(r), 0);
+      const leftover = globalTotal != null ? Math.max(0, globalTotal - known) : null;
+      const memberSeen = new Set<string>();
+      for (let i = 0; i < stays.length; i++) {
+        const r = stays[i];
+        let roomTotal = r.total;
+        if (roomTotal == null && leftover != null && missingNights > 0) {
+          roomTotal = (leftover * nightsOf(r)) / missingNights;
+        }
+        let member = r.serial || String(i + 1);
+        while (memberSeen.has(member)) member += `-${i + 1}`;
+        memberSeen.add(member);
+        out.push({
+          minihotelId: `${minihotelId}:${member}`,
+          ...shared,
+          arrival: r.arrival ?? arrival,
+          departure: r.departure ?? departure,
+          roomType: r.roomType,
+          guests: r.guests,
+          total: roomTotal,
+          currency: r.currency ?? currency,
+        });
+      }
+      continue;
+    }
+
+    // ---- single room: the original whole-booking row -------------------------
+    const adult = guests ? numAttr(guests[1], "adult") ?? 0 : 0;
+    const child = guests ? numAttr(guests[1], "child") ?? 0 : 0;
+    out.push({
+      minihotelId,
+      ...shared,
+      arrival,
+      departure,
+      roomType: stays[0]?.roomType ?? null,
       guests: adult + child || null,
-      total: total ? numAttr(total[1], "AmountAfterTaxes") : null,
-      currency: total ? attr(total[1], "CurrencyCode") : null,
+      total: globalTotal ?? stays[0]?.total ?? null,
+      currency: currency ?? stays[0]?.currency ?? null,
     });
   }
   return out;
