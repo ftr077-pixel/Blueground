@@ -58,6 +58,35 @@ function rowToBooking(r: BookingSql): Booking {
   };
 }
 
+/**
+ * Purge rows stored in the OTHER shape before upserting a batch. Multi-room
+ * (group) bookings store one row per room (`<bookingId>:<member>`); older syncs
+ * collapsed them under the bare booking id. When a booking arrives as members,
+ * drop the bare row (and stale members); when it arrives bare, drop members —
+ * otherwise the same order counts twice. substr() rather than LIKE because ids
+ * can contain `_`, which LIKE treats as a wildcard.
+ */
+export function purgeBookingShapeConflicts(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getDb();
+  const delBare = db.prepare("DELETE FROM bookings WHERE id = ?");
+  const delMembers = db.prepare(
+    "DELETE FROM bookings WHERE substr(id, 1, length(?) + 1) = ? || ':'",
+  );
+  const purged = new Set<string>();
+  const tx = db.transaction((list: string[]) => {
+    for (const id of list) {
+      const sep = id.indexOf(":");
+      const base = sep > 0 ? id.slice(0, sep) : id;
+      if (purged.has(base)) continue;
+      purged.add(base);
+      if (sep > 0) delBare.run(base);
+      delMembers.run(base, base);
+    }
+  });
+  tx(ids);
+}
+
 export function upsertBooking(b: Booking): void {
   const db = getDb();
   db.prepare(
