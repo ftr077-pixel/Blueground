@@ -1724,8 +1724,8 @@ const RES_HORIZON_DAYS = 120;
 // imported at all, silently dropping all of its revenue from the P&L and the
 // pacing curves. A second, deeper arrival window patches exactly that tail.
 // Kept as a separate request because one giant window blows MiniHotel's 20s
-// request timeout; each chunk here stays the same size as the main pull.
-const RES_DEEP_LOOKBACK_DAYS = 540; // arrivals up to ~18 months back
+// request timeout; this chunk is smaller than the main pull.
+const RES_DEEP_LOOKBACK_DAYS = 365; // arrivals up to 12 months back
 
 export async function syncReservationsFromMiniHotel(opts: {
   from?: string;
