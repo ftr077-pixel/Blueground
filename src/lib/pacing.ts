@@ -25,10 +25,13 @@ import { getExcludedRoomCodes } from "@/lib/repos/integrations";
  *     Last-year lines are reservations-only: the synthetic calendar baseline is
  *     not real history and would only draw misleading zeros.
  *
- * Booking curves ("days till completion") are rebuilt from bookings.created_on:
- * for each stay month, every booking is an event at dtc = (month end − booking
- * date), and the curve is the running total of revenue / occupancy / ADR /
- * RevPAR over those events — no historical snapshots needed.
+ * Booking curves ("days till completion") are rebuilt from booking-creation
+ * dates: for each stay month, every booking is an event at dtc = (month end −
+ * booking date), and the curve is the running total of revenue / occupancy /
+ * ADR / RevPAR over those events — no historical snapshots needed. Events come
+ * from the reservation table first (complete, auto-synced, VAT-net revenue —
+ * the same basis as every other chart); the bookings table only patches in
+ * orders created before the reservation sync's coverage.
  */
 
 export type Aggregation = "daily" | "weekly" | "monthly";
@@ -393,40 +396,24 @@ function loadStayEvents(): {
 } {
   const db = getDb();
   const events: StayEvent[] = [];
-  const brows = db
-    .prepare("SELECT created_on, arrival, departure, nights, total, nightly, status FROM bookings")
-    .all() as Array<{
-    created_on: string | null;
-    arrival: string | null;
-    departure: string | null;
-    nights: number | null;
-    total: number | null;
-    nightly: number | null;
-    status: string | null;
-  }>;
-  for (const b of brows) {
-    if (b.status && /^(cl|bl)$/i.test(b.status)) continue;
-    const created = (b.created_on ?? "").slice(0, 10);
-    const arr = (b.arrival ?? "").slice(0, 10);
-    const dep = (b.departure ?? "").slice(0, 10);
-    if (!DATE_RE.test(created) || !DATE_RE.test(arr) || !DATE_RE.test(dep)) continue;
-    const nights = b.nights && b.nights > 0 ? b.nights : daysBetween(arr, dep);
-    if (nights <= 0) continue;
-    const perNight = b.nightly ?? (b.total != null && b.total > 0 ? b.total / nights : null);
-    events.push({ created, from: arr, to: dep, perNight });
-  }
-  if (events.length > 0) return { events, source: "bookings", approx: false };
-
-  // Fallback to the reservation table. It now carries the real booking-creation
-  // date (created_on = MiniHotel's createDateTime, captured on sync); rows synced
-  // before we started keeping it have only updated_at (first-sync time), which is
-  // the same for a bulk import and collapses the curve to one step per month.
   const excluded = getExcludedRoomCodes();
+
+  // Reservations are the PRIMARY source. The reservation sync re-pulls a wide
+  // arrival window automatically (every ~6h), carries the VAT-net revenue every
+  // other chart on this tab reports, and now keeps the real booking-creation
+  // date (created_on = MiniHotel's createDateTime). The bookings table, by
+  // contrast, is filled by the operator-triggered booking-outcomes sync over a
+  // CREATE-date window (default: the last 30 days) — treating it as the whole
+  // truth silently dropped every booking created outside the synced windows and
+  // under-reported month revenue. Rows synced before created_on existed fall
+  // back to updated_at (first-sync time), which is the same for a bulk import
+  // and collapses the curve to one step per month.
   const rrows = db
     .prepare(
-      "SELECT room_type, room_number, check_in, check_out, nights, revenue, status, created_on, updated_at FROM reservation",
+      "SELECT id, room_type, room_number, check_in, check_out, nights, revenue, status, created_on, updated_at FROM reservation",
     )
     .all() as Array<{
+    id: string;
     room_type: string | null;
     room_number: string | null;
     check_in: string;
@@ -437,8 +424,19 @@ function loadStayEvents(): {
     created_on: string | null;
     updated_at: string | null;
   }>;
+  // Base booking ids the reservation table knows about (group rows are stored
+  // as `<bookingId>:<member>`). A known order must never be re-counted from the
+  // bookings table — even a cancelled one, since the reservation side is the
+  // fresher authority on status.
+  const baseOf = (id: string) => {
+    const sep = id.indexOf(":");
+    return sep > 0 ? id.slice(0, sep) : id;
+  };
+  const covered = new Set<string>();
   let realCreated = 0;
+  let resEvents = 0;
   for (const r of rrows) {
+    covered.add(baseOf(r.id));
     if (r.status && CANCELLED_RE.test(r.status)) continue;
     if (isExcludedRoom(r.room_type, r.room_number, excluded)) continue;
     // Prefer the real creation date; fall back to the sync-time proxy only when
@@ -450,6 +448,7 @@ function loadStayEvents(): {
     const nights = r.nights > 0 ? r.nights : daysBetween(r.check_in, r.check_out);
     if (nights <= 0) continue;
     if (hasReal) realCreated++;
+    resEvents++;
     events.push({
       created,
       from: r.check_in,
@@ -457,12 +456,47 @@ function loadStayEvents(): {
       perNight: r.revenue > 0 ? r.revenue / nights : null,
     });
   }
+
+  // The bookings table only FILLS IN orders the reservation window never
+  // reached (stays older than its lookback). Its totals are gross (tax
+  // inclusive), so it is a coverage patch, never a replacement.
+  const brows = db
+    .prepare(
+      "SELECT id, room_type, created_on, arrival, departure, nights, total, nightly, status FROM bookings",
+    )
+    .all() as Array<{
+    id: string;
+    room_type: string | null;
+    created_on: string | null;
+    arrival: string | null;
+    departure: string | null;
+    nights: number | null;
+    total: number | null;
+    nightly: number | null;
+    status: string | null;
+  }>;
+  let bookEvents = 0;
+  for (const b of brows) {
+    if (covered.has(baseOf(b.id))) continue;
+    if (b.status && /^(cl|bl)$/i.test(b.status)) continue;
+    if (isExcludedRoom(b.room_type, null, excluded)) continue;
+    const created = (b.created_on ?? "").slice(0, 10);
+    const arr = (b.arrival ?? "").slice(0, 10);
+    const dep = (b.departure ?? "").slice(0, 10);
+    if (!DATE_RE.test(created) || !DATE_RE.test(arr) || !DATE_RE.test(dep)) continue;
+    const nights = b.nights && b.nights > 0 ? b.nights : daysBetween(arr, dep);
+    if (nights <= 0) continue;
+    const perNight = b.nightly ?? (b.total != null && b.total > 0 ? b.total / nights : null);
+    bookEvents++;
+    events.push({ created, from: arr, to: dep, perNight });
+  }
+
   // Only flag the curves "approximate" while NO real creation date is available
   // yet (pre-sync). Once the reservation sync backfills created_on, they're exact.
   return {
     events,
-    source: events.length > 0 ? "reservations" : null,
-    approx: events.length > 0 && realCreated === 0,
+    source: resEvents > 0 ? "reservations" : bookEvents > 0 ? "bookings" : null,
+    approx: resEvents > 0 && realCreated === 0,
   };
 }
 
