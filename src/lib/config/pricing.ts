@@ -201,7 +201,17 @@ export const PORTFOLIO_OBA_PRESETS: Record<"short" | "medium" | "long", Portfoli
 export interface PricingRulesConfig {
   currentRateLeadDays: number;
   curveHorizonDays: number;
-  seasonality: { enabled: boolean; sensitivity: SeasonalitySensitivity; monthlyIndex: number[] };
+  seasonality: {
+    enabled: boolean;
+    sensitivity: SeasonalitySensitivity;
+    /** Fallback market curve — multiplier per calendar month (Jan..Dec), ~1.0. */
+    monthlyIndex: number[];
+    /** Operator seasonality parameter per calendar month (Jan..Dec), ~1.0.
+     *  null = automatic (live market index, else monthlyIndex). A set month
+     *  WINS over market data so the configured value always moves prices;
+     *  sensitivity still scales the swing. Clamped to 0.5..2 at read time. */
+    monthlyOverride: Array<number | null>;
+  };
   /** Demand Factor Sensitivity reuses the same six presets: scales how hard
    *  date-specific demand (events/holidays) moves prices, before the cap.
    *  (PriceLabs Hotel Weights / Hotel Compsets are not applicable — we have no
@@ -489,6 +499,8 @@ export const PRICING_RULES: PricingRulesConfig = {
     enabled: true,
     sensitivity: "recommended",
     monthlyIndex: [0.92, 0.93, 0.98, 1.05, 1.08, 1.06, 1.1, 1.12, 1.07, 1.02, 0.95, 1.0],
+    /** Per-month operator parameter; null = automatic (market, else monthlyIndex). */
+    monthlyOverride: [null, null, null, null, null, null, null, null, null, null, null, null],
   },
   /** Date-specific demand (events, holidays, neighborhood heat). */
   demandEvents: {

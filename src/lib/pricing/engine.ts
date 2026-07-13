@@ -581,6 +581,7 @@ export function activeRuleSummary(
   gatePct: number = PRICING_AGENT.humanGatePct,
 ) {
   const sens = SEASONALITY_SENSITIVITY[cfg.seasonality.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended;
+  const customMonths = (cfg.seasonality.monthlyOverride ?? []).filter((v) => v != null).length;
   const adjNote = cfg.adjacent.mode === "percent"
     ? `${(cfg.adjacent.value * 100).toFixed(0)}%`
     : `₪${cfg.adjacent.value}`;
@@ -589,7 +590,7 @@ export function activeRuleSummary(
     : `₪${cfg.pricingOffset.value}`;
   return [
     { key: "base", label: "Base rate anchor", enabled: true, note: "per-unit base × factors" },
-    { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: `monthly market curve (${sens.label})` },
+    { key: "seasonality", label: "Seasonality", enabled: cfg.seasonality.enabled, note: `monthly market curve (${sens.label})${customMonths ? `, ${customMonths} custom month(s)` : ""}` },
     { key: "demand", label: "Demand / events", enabled: cfg.demandEvents.enabled, note: `±${(cfg.demandEvents.cap * 100).toFixed(0)}% cap (${(SEASONALITY_SENSITIVITY[cfg.demandEvents.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended).label})` },
     { key: "pacing", label: "Booking pace", enabled: cfg.pacing.enabled, note: `±${(cfg.pacing.cap * 100).toFixed(0)}% cap` },
     { key: "occupancy", label: "Occupancy (OBA)", enabled: cfg.occupancy.enabled, note: cfg.occupancy.profile === "marketDriven" ? "market-driven ≤60d (−20%..+15%)" : cfg.occupancy.profile === "custom" ? `custom${cfg.occupancy.customName ? ` "${cfg.occupancy.customName}"` : ""} — ${cfg.occupancy.windows.length} windows` : `${cfg.occupancy.profile} profile — ${cfg.occupancy.windows.length} windows` },

@@ -41,6 +41,7 @@ const FLAVORS = [
   { value: "aggressive", label: "Aggressive" },
 ];
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 interface OrphanRow {
   fromGap: string;
@@ -79,6 +80,10 @@ interface MsFarOutRow {
 interface Form {
   seasonalityOn: boolean;
   seasonalitySens: string;
+  /** Per-month % vs base (Jan..Dec); "" = automatic (market curve). */
+  seasonalityMonths: string[];
+  /** The fallback monthly curve as % — placeholder text for blank months. */
+  seasonalityCurvePct: string[];
   demandOn: boolean;
   demandSens: string;
   demandCapPct: string;
@@ -203,7 +208,12 @@ interface Form {
 
 interface EffectiveConfig {
   currentRateLeadDays: number;
-  seasonality: { enabled: boolean; sensitivity: string };
+  seasonality: {
+    enabled: boolean;
+    sensitivity: string;
+    monthlyIndex: number[];
+    monthlyOverride: Array<number | null>;
+  };
   demandEvents: { enabled: boolean; sensitivity: string; cap: number };
   safetyMinPrice: { enabled: boolean; pctOfLastYear: number };
   pacing: { enabled: boolean; sensitivity: number; cap: number };
@@ -418,7 +428,11 @@ const sourceText = (s: string | null): string =>
 // toggle row so the two read the same.
 const onOff = (b: boolean) => (b ? "On" : "Off");
 const EFFECTIVE_ROWS: Array<{ key: string; label: string; summary: (m: EffectiveConfig) => string }> = [
-  { key: "seasonality", label: "Seasonality", summary: (m) => (m.seasonality.enabled ? `On · ${m.seasonality.sensitivity}` : "Off") },
+  { key: "seasonality", label: "Seasonality", summary: (m) => {
+    if (!m.seasonality.enabled) return "Off";
+    const n = (m.seasonality.monthlyOverride ?? []).filter((v) => v != null).length;
+    return `On · ${m.seasonality.sensitivity}${n ? ` · ${n} custom mo` : ""}`;
+  } },
   { key: "demandEvents", label: "Demand / events", summary: (m) => (m.demandEvents.enabled ? `On · ${m.demandEvents.sensitivity}` : "Off") },
   { key: "pacing", label: "Booking pace", summary: (m) => onOff(m.pacing.enabled) },
   { key: "occupancy", label: "Occupancy bands", summary: (m) => (m.occupancy.enabled ? `On · ${m.occupancy.profile}` : "Off") },
@@ -472,6 +486,11 @@ function toForm(e: EffectiveConfig): Form {
   return {
     seasonalityOn: e.seasonality.enabled,
     seasonalitySens: e.seasonality.sensitivity || "recommended",
+    seasonalityMonths: MONTHS.map((_, i) => {
+      const v = e.seasonality.monthlyOverride?.[i];
+      return v == null ? "" : pct(v - 1);
+    }),
+    seasonalityCurvePct: MONTHS.map((_, i) => pct((e.seasonality.monthlyIndex?.[i] ?? 1) - 1)),
     demandOn: e.demandEvents.enabled,
     demandSens: e.demandEvents.sensitivity || "recommended",
     demandCapPct: pct(e.demandEvents.cap),
@@ -833,7 +852,11 @@ export function EngineRulesCard() {
     return {
       currentRateLeadDays: int(f.currentRateLeadDays),
       humanGatePct: parseFloat(f.humanGatePct) || 15,
-      seasonality: { enabled: f.seasonalityOn, sensitivity: f.seasonalitySens },
+      seasonality: {
+        enabled: f.seasonalityOn,
+        sensitivity: f.seasonalitySens,
+        monthlyOverride: f.seasonalityMonths.map((s) => (s.trim() === "" ? null : 1 + frac(s))),
+      },
       demandEvents: { enabled: f.demandOn, sensitivity: f.demandSens, cap: frac(f.demandCapPct) },
       safetyMinPrice: { enabled: f.smpOn, pctOfLastYear: frac(f.smpPct) },
       pacing: { enabled: f.pacingOn, sensitivity: frac(f.pacingSensPct), cap: frac(f.pacingCapPct) },
@@ -1480,6 +1503,30 @@ export function EngineRulesCard() {
           PMS-side discount there. &quot;Freeze unavailable prices&quot; keeps the last synced
           rate on booked/blocked nights (no cancel-and-rebook-cheaper).
         </p>
+
+        <div className={sectionBox}>
+          <span className={sectionHead}>
+            Seasonality by month — a % vs base parameter for each calendar month, applied
+            through the seasonality factor (sensitivity still scales the swing). Blank =
+            automatic (live market curve, else the built-in monthly curve, shown as the
+            placeholder); a set month overrides market data. −50%..+100%.
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {MONTHS.map((mo, i) => (
+              <label key={mo} className="flex flex-col gap-1">
+                {mo}
+                <input
+                  className={`${input} w-14`}
+                  placeholder={f.seasonalityCurvePct[i]}
+                  value={f.seasonalityMonths[i]}
+                  onChange={(e) =>
+                    set("seasonalityMonths", f.seasonalityMonths.map((x, j) => (j === i ? e.target.value : x)))
+                  }
+                />
+              </label>
+            ))}
+          </div>
+        </div>
 
         <div className={sectionBox}>
           <span className={sectionHead}>
