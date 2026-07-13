@@ -49,7 +49,12 @@ export function scopeStoreKey(scope: RuleScope): string {
 /** Partial, nested subset of PricingRulesConfig plus the agent's human gate. */
 export interface RuleOverrides {
   currentRateLeadDays?: number;
-  seasonality?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity };
+  seasonality?: {
+    enabled?: boolean;
+    sensitivity?: SeasonalitySensitivity;
+    /** Per-month (Jan..Dec) multiplier ~1.0; null = automatic (market curve). */
+    monthlyOverride?: Array<number | null>;
+  };
   demandEvents?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity; cap?: number };
   pacing?: { enabled?: boolean; sensitivity?: number; cap?: number };
   occupancy?: {
@@ -321,6 +326,11 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     o.seasonality?.sensitivity && o.seasonality.sensitivity in SEASONALITY_SENSITIVITY
       ? o.seasonality.sensitivity
       : d.seasonality.sensitivity;
+  const rawMonthly = o.seasonality?.monthlyOverride;
+  const monthlyOverride = Array.from({ length: 12 }, (_, i) => {
+    const v = Array.isArray(rawMonthly) ? rawMonthly[i] : null;
+    return typeof v === "number" && Number.isFinite(v) ? clampNum(v, 0.5, 2, 1) : null;
+  });
 
   const adjacent = { ...d.adjacent, ...o.adjacent };
   adjacent.daysBefore = clampInt(adjacent.daysBefore, 0, 30, d.adjacent.daysBefore);
@@ -673,7 +683,7 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   return {
     currentRateLeadDays: o.currentRateLeadDays ?? d.currentRateLeadDays,
     curveHorizonDays: d.curveHorizonDays,
-    seasonality: { ...d.seasonality, ...o.seasonality, sensitivity: sens },
+    seasonality: { ...d.seasonality, ...o.seasonality, sensitivity: sens, monthlyOverride },
     demandEvents: { ...d.demandEvents, ...o.demandEvents, sensitivity: demandSens },
     pacing: { ...d.pacing, ...o.pacing },
     occupancy,

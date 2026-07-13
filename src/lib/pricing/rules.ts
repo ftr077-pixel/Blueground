@@ -39,7 +39,11 @@ export function seasonalityRule(date: Date, m: MarketProviders, cfg: Rules): Fac
   const sens =
     SEASONALITY_SENSITIVITY[cfg.seasonality.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended;
   if (sens.amplitude === 0) return null; // "No Seasonality"
-  const idx = m.seasonalityIndex(date) ?? cfg.seasonality.monthlyIndex[date.getUTCMonth()];
+  const month = date.getUTCMonth();
+  // An operator-set month wins over the live market curve — a configured
+  // seasonality parameter must always move prices, not be shadowed by data.
+  const override = cfg.seasonality.monthlyOverride?.[month];
+  const idx = override ?? m.seasonalityIndex(date) ?? cfg.seasonality.monthlyIndex[month];
   const factor = 1 + (idx - 1) * sens.amplitude;
   if (factor === 1) return null;
   const sensTxt =
@@ -48,7 +52,7 @@ export function seasonalityRule(date: Date, m: MarketProviders, cfg: Rules): Fac
     key: "seasonality",
     label: "Seasonality",
     factor,
-    detail: `${MONTHS[date.getUTCMonth()]} season ${pct(factor)}${sensTxt}`,
+    detail: `${MONTHS[month]} season ${pct(factor)}${override != null ? " (custom)" : ""}${sensTxt}`,
   };
 }
 
