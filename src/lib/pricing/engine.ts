@@ -581,7 +581,9 @@ export function activeRuleSummary(
   gatePct: number = PRICING_AGENT.humanGatePct,
 ) {
   const sens = SEASONALITY_SENSITIVITY[cfg.seasonality.sensitivity] ?? SEASONALITY_SENSITIVITY.recommended;
-  const customMonths = (cfg.seasonality.monthlyOverride ?? []).filter((v) => v != null).length;
+  const customMonths = (cfg.seasonality.monthlyOverride ?? []).filter(
+    (v, i) => v != null && cfg.seasonality.monthlyOverrideOn?.[i] !== false,
+  ).length;
   const adjNote = cfg.adjacent.mode === "percent"
     ? `${(cfg.adjacent.value * 100).toFixed(0)}%`
     : `₪${cfg.adjacent.value}`;

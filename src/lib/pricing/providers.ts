@@ -351,3 +351,27 @@ export function snapshotProviders(): MarketProviders {
 export function marketProviders(): MarketProviders {
   return listMarketSnapshots().length > 0 ? snapshotProviders() : mockProviders();
 }
+
+/**
+ * The live market seasonality collapsed to calendar months (Jan..Dec): the mean
+ * seasonalityIndex over each month's dates within the coming year, null where
+ * the market carries no forward signal (the engine then falls back to the
+ * built-in monthly curve). This is exactly what a month with no operator
+ * override prices on — surfaced so the rules UI can SHOW the automatic value
+ * instead of only the hard-coded fallback.
+ */
+export function liveMonthlySeasonality(): Array<number | null> {
+  const p = marketProviders();
+  const sum = Array(12).fill(0) as number[];
+  const n = Array(12).fill(0) as number[];
+  const start = Date.now();
+  for (let i = 0; i < 365; i++) {
+    const date = new Date(start + i * 86_400_000);
+    const idx = p.seasonalityIndex(date);
+    if (idx != null) {
+      sum[date.getUTCMonth()] += idx;
+      n[date.getUTCMonth()]++;
+    }
+  }
+  return sum.map((s, i) => (n[i] > 0 ? s / n[i] : null));
+}

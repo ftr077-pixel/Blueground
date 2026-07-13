@@ -42,7 +42,9 @@ export function seasonalityRule(date: Date, m: MarketProviders, cfg: Rules): Fac
   const month = date.getUTCMonth();
   // An operator-set month wins over the live market curve — a configured
   // seasonality parameter must always move prices, not be shadowed by data.
-  const override = cfg.seasonality.monthlyOverride?.[month];
+  // A month whose switch is off keeps its stored value but prices automatically.
+  const overrideOn = cfg.seasonality.monthlyOverrideOn?.[month] !== false;
+  const override = overrideOn ? cfg.seasonality.monthlyOverride?.[month] : null;
   const idx = override ?? m.seasonalityIndex(date) ?? cfg.seasonality.monthlyIndex[month];
   const factor = 1 + (idx - 1) * sens.amplitude;
   if (factor === 1) return null;

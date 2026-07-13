@@ -211,6 +211,10 @@ export interface PricingRulesConfig {
      *  WINS over market data so the configured value always moves prices;
      *  sensitivity still scales the swing. Clamped to 0.5..2 at read time. */
     monthlyOverride: Array<number | null>;
+    /** Per-month override switch (Jan..Dec). false = the stored monthlyOverride
+     *  value is KEPT but not applied — the month prices automatically again, so
+     *  the operator can flip an override off and back on without retyping it. */
+    monthlyOverrideOn: boolean[];
   };
   /** Demand Factor Sensitivity reuses the same six presets: scales how hard
    *  date-specific demand (events/holidays) moves prices, before the cap.
@@ -501,6 +505,8 @@ export const PRICING_RULES: PricingRulesConfig = {
     monthlyIndex: [0.92, 0.93, 0.98, 1.05, 1.08, 1.06, 1.1, 1.12, 1.07, 1.02, 0.95, 1.0],
     /** Per-month operator parameter; null = automatic (market, else monthlyIndex). */
     monthlyOverride: [null, null, null, null, null, null, null, null, null, null, null, null],
+    /** Per-month switch — false parks the override without deleting it. */
+    monthlyOverrideOn: [true, true, true, true, true, true, true, true, true, true, true, true],
   },
   /** Date-specific demand (events, holidays, neighborhood heat). */
   demandEvents: {
