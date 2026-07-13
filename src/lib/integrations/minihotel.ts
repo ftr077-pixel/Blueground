@@ -1639,6 +1639,9 @@ export interface ReservationSyncResult {
   cancelledSwept?: number;
   /** The sweep is best-effort — its failure is reported here, never thrown. */
   sweepError?: string;
+  /** The long-stay tail pull (arrivals older than the standard lookback) is
+   *  best-effort too — its failure is reported here, never thrown. */
+  deepError?: string;
   message?: string;
 }
 
@@ -1713,8 +1716,16 @@ export function parseCancelledIds(xml: string): Array<{ id: string; status: stri
 // whatever price was first captured. Every sync therefore re-pulls all arrivals
 // from RES_LOOKBACK_DAYS back through RES_HORIZON_DAYS forward and overwrites
 // each stored row with MiniHotel's current price/dates/status.
-const RES_LOOKBACK_DAYS = 210; // covers the longest in-house stay + late corrections to closed months
+const RES_LOOKBACK_DAYS = 210; // covers most in-house stays + late corrections to closed months
 const RES_HORIZON_DAYS = 120;
+// Long-stay tail. The pull filters by ARRIVAL date, so a guest who checked in
+// before the standard lookback (stays can run 6+ months) falls out of every
+// sync — and on a database younger than their arrival the reservation is never
+// imported at all, silently dropping all of its revenue from the P&L and the
+// pacing curves. A second, deeper arrival window patches exactly that tail.
+// Kept as a separate request because one giant window blows MiniHotel's 20s
+// request timeout; each chunk here stays the same size as the main pull.
+const RES_DEEP_LOOKBACK_DAYS = 540; // arrivals up to ~18 months back
 
 export async function syncReservationsFromMiniHotel(opts: {
   from?: string;
@@ -1750,7 +1761,27 @@ export async function syncReservationsFromMiniHotel(opts: {
     payload = await fetchReservations(conn, from, to);
   }
 
-  const parsed = parseReservations(payload);
+  // Long-stay tail: on a default (auto) sync, also re-read arrivals older than
+  // the standard lookback so months still occupied by long stays keep their
+  // revenue. Best-effort — a failed tail pull must not sink the main one. An
+  // explicit `from` means the caller asked for a specific window; honor it as-is.
+  let deepPayload: string | null = null;
+  let deepError: string | undefined;
+  let deepFrom: string | undefined;
+  if (!opts.payload && !opts.from) {
+    deepFrom = plusDays(todayLocal(), -RES_DEEP_LOOKBACK_DAYS);
+    const deepTo = plusDays(todayLocal(), -(RES_LOOKBACK_DAYS + 1));
+    try {
+      deepPayload = await fetchReservations(conn, deepFrom, deepTo);
+    } catch (e) {
+      deepError = e instanceof Error ? e.message : "long-stay lookback pull failed";
+    }
+  }
+
+  const parsed = [
+    ...parseReservations(payload),
+    ...(deepPayload ? parseReservations(deepPayload) : []),
+  ];
   const { recorded, skipped } = upsertReservations(
     parsed.map((r) => ({
       id: r.id,
@@ -1790,7 +1821,7 @@ export async function syncReservationsFromMiniHotel(opts: {
   const stats = reservationStats();
   return {
     ok: true,
-    from,
+    from: deepPayload && deepFrom ? deepFrom : from,
     to,
     parsed: parsed.length,
     recorded,
@@ -1802,6 +1833,7 @@ export async function syncReservationsFromMiniHotel(opts: {
     vat: stats.vat,
     cancelledSwept,
     sweepError,
+    deepError,
   };
 }
 
