@@ -82,6 +82,8 @@ interface Form {
   seasonalitySens: string;
   /** Per-month % vs base (Jan..Dec); "" = automatic (market curve). */
   seasonalityMonths: string[];
+  /** Per-month override switch — off keeps the typed value but prices automatically. */
+  seasonalityOverrideOn: boolean[];
   /** The fallback monthly curve as % — placeholder text for blank months. */
   seasonalityCurvePct: string[];
   demandOn: boolean;
@@ -213,6 +215,7 @@ interface EffectiveConfig {
     sensitivity: string;
     monthlyIndex: number[];
     monthlyOverride: Array<number | null>;
+    monthlyOverrideOn?: boolean[];
   };
   demandEvents: { enabled: boolean; sensitivity: string; cap: number };
   safetyMinPrice: { enabled: boolean; pctOfLastYear: number };
@@ -321,6 +324,9 @@ interface EffectiveConfig {
 interface RulesResp {
   effective: EffectiveConfig;
   groups: string[];
+  /** Live market seasonality per calendar month (multiplier ~1.0), null where
+   *  the synced market has no forward data for that month. */
+  liveSeasonality?: Array<number | null>;
   /** Listing scope only: the merged account→group→sub-group→listing config the
    *  engine actually prices on, plus which scope supplies each customization. */
   merged?: EffectiveConfig;
@@ -430,7 +436,9 @@ const onOff = (b: boolean) => (b ? "On" : "Off");
 const EFFECTIVE_ROWS: Array<{ key: string; label: string; summary: (m: EffectiveConfig) => string }> = [
   { key: "seasonality", label: "Seasonality", summary: (m) => {
     if (!m.seasonality.enabled) return "Off";
-    const n = (m.seasonality.monthlyOverride ?? []).filter((v) => v != null).length;
+    const n = (m.seasonality.monthlyOverride ?? []).filter(
+      (v, i) => v != null && m.seasonality.monthlyOverrideOn?.[i] !== false,
+    ).length;
     return `On · ${m.seasonality.sensitivity}${n ? ` · ${n} custom mo` : ""}`;
   } },
   { key: "demandEvents", label: "Demand / events", summary: (m) => (m.demandEvents.enabled ? `On · ${m.demandEvents.sensitivity}` : "Off") },
@@ -490,6 +498,7 @@ function toForm(e: EffectiveConfig): Form {
       const v = e.seasonality.monthlyOverride?.[i];
       return v == null ? "" : pct(v - 1);
     }),
+    seasonalityOverrideOn: MONTHS.map((_, i) => e.seasonality.monthlyOverrideOn?.[i] !== false),
     seasonalityCurvePct: MONTHS.map((_, i) => pct((e.seasonality.monthlyIndex?.[i] ?? 1) - 1)),
     demandOn: e.demandEvents.enabled,
     demandSens: e.demandEvents.sensitivity || "recommended",
@@ -636,6 +645,8 @@ export function EngineRulesCard() {
   // Listing scope only: the true inherited config + per-section source attribution.
   const [merged, setMerged] = useState<EffectiveConfig | null>(null);
   const [sources, setSources] = useState<Record<string, string | null> | null>(null);
+  // Live market seasonality per month (multiplier), null = no forward market data.
+  const [liveSeason, setLiveSeason] = useState<Array<number | null>>([]);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -713,6 +724,7 @@ export function EngineRulesCard() {
     setF(toForm(b.effective));
     setMerged(b.merged ?? null);
     setSources(b.sources ?? null);
+    setLiveSeason(b.liveSeasonality ?? []);
   }, []);
 
   const loadGroups = useCallback(async () => {
@@ -855,7 +867,10 @@ export function EngineRulesCard() {
       seasonality: {
         enabled: f.seasonalityOn,
         sensitivity: f.seasonalitySens,
+        // The typed value is stored even for switched-off months (parked, not
+        // applied) so re-enabling the override doesn't mean retyping it.
         monthlyOverride: f.seasonalityMonths.map((s) => (s.trim() === "" ? null : 1 + frac(s))),
+        monthlyOverrideOn: f.seasonalityOverrideOn,
       },
       demandEvents: { enabled: f.demandOn, sensitivity: f.demandSens, cap: frac(f.demandCapPct) },
       safetyMinPrice: { enabled: f.smpOn, pctOfLastYear: frac(f.smpPct) },
@@ -1507,24 +1522,59 @@ export function EngineRulesCard() {
         <div className={sectionBox}>
           <span className={sectionHead}>
             Seasonality by month — a % vs base parameter for each calendar month, applied
-            through the seasonality factor (sensitivity still scales the swing). Blank =
-            automatic (live market curve, else the built-in monthly curve, shown as the
-            placeholder); a set month overrides market data. −50%..+100%.
+            through the seasonality factor (sensitivity still scales the swing). The line
+            under each month shows what automatic pricing uses right now: the live market
+            curve (&quot;live&quot;), or the built-in fallback (&quot;curve&quot;) where the
+            market has no forward data. Tick a month to override it with your own value
+            (−50%..+100%); untick to go back to automatic — the typed value is kept for
+            the next time.
           </span>
           <div className="flex flex-wrap gap-2">
-            {MONTHS.map((mo, i) => (
-              <label key={mo} className="flex flex-col gap-1">
-                {mo}
-                <input
-                  className={`${input} w-14`}
-                  placeholder={f.seasonalityCurvePct[i]}
-                  value={f.seasonalityMonths[i]}
-                  onChange={(e) =>
-                    set("seasonalityMonths", f.seasonalityMonths.map((x, j) => (j === i ? e.target.value : x)))
-                  }
-                />
-              </label>
-            ))}
+            {MONTHS.map((mo, i) => {
+              const on = f.seasonalityOverrideOn[i];
+              const live = liveSeason[i];
+              const autoPct = live != null ? pct(live - 1) : f.seasonalityCurvePct[i];
+              const signed = autoPct.startsWith("-") ? autoPct : `+${autoPct}`;
+              const overriding = on && f.seasonalityMonths[i].trim() !== "";
+              return (
+                <label key={mo} className="flex flex-col gap-1">
+                  <span className="flex items-center gap-1.5">
+                    {mo}
+                    <input
+                      type="checkbox"
+                      className="h-3 w-3 accent-[hsl(var(--primary))]"
+                      title="Override this month (untick = automatic)"
+                      checked={on}
+                      onChange={(e) =>
+                        set(
+                          "seasonalityOverrideOn",
+                          f.seasonalityOverrideOn.map((x, j) => (j === i ? e.target.checked : x)),
+                        )
+                      }
+                    />
+                  </span>
+                  <input
+                    className={`${input} w-14 ${on ? "" : "opacity-50"}`}
+                    disabled={!on}
+                    placeholder={autoPct}
+                    value={f.seasonalityMonths[i]}
+                    onChange={(e) =>
+                      set("seasonalityMonths", f.seasonalityMonths.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                  />
+                  <span
+                    className={`text-[10px] ${overriding ? "text-muted-foreground/60" : "font-medium text-primary"}`}
+                    title={
+                      live != null
+                        ? "Live market seasonality — applied while not overridden"
+                        : "Built-in fallback curve — no forward market data for this month"
+                    }
+                  >
+                    {live != null ? `live ${signed}%` : `curve ${signed}%`}
+                  </span>
+                </label>
+              );
+            })}
           </div>
         </div>
 

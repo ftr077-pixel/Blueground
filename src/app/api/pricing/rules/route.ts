@@ -15,6 +15,7 @@ import {
 } from "@/lib/pricing/rules-config";
 import { listGroupNames } from "@/lib/repos/groups";
 import { listUnits } from "@/lib/repos/units";
+import { liveMonthlySeasonality } from "@/lib/pricing/providers";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,10 @@ function payload(scope: RuleScope) {
         ? { ...effectiveRules(), humanGatePct: effectiveHumanGatePct() }
         : { ...rulesWithOverrides(overrides), humanGatePct: effectiveHumanGatePct() },
     groups: listGroupNames(),
+    // What "automatic" currently resolves to per calendar month: the live
+    // market curve where the synced snapshot has forward data, null elsewhere
+    // (the UI then shows the built-in fallback curve for those months).
+    liveSeasonality: liveMonthlySeasonality(),
   };
   // For a listing scope, also surface the TRUE config it actually prices on:
   // the full account → group → sub-group → listing merge, with per-section

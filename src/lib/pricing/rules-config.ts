@@ -54,6 +54,8 @@ export interface RuleOverrides {
     sensitivity?: SeasonalitySensitivity;
     /** Per-month (Jan..Dec) multiplier ~1.0; null = automatic (market curve). */
     monthlyOverride?: Array<number | null>;
+    /** Per-month switch; false parks the override (kept, not applied). */
+    monthlyOverrideOn?: boolean[];
   };
   demandEvents?: { enabled?: boolean; sensitivity?: SeasonalitySensitivity; cap?: number };
   pacing?: { enabled?: boolean; sensitivity?: number; cap?: number };
@@ -331,6 +333,12 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
     const v = Array.isArray(rawMonthly) ? rawMonthly[i] : null;
     return typeof v === "number" && Number.isFinite(v) ? clampNum(v, 0.5, 2, 1) : null;
   });
+  // Anything but an explicit false counts as ON — configs saved before the
+  // switch existed keep applying their stored overrides unchanged.
+  const rawMonthlyOn = o.seasonality?.monthlyOverrideOn;
+  const monthlyOverrideOn = Array.from({ length: 12 }, (_, i) =>
+    Array.isArray(rawMonthlyOn) ? rawMonthlyOn[i] !== false : true,
+  );
 
   const adjacent = { ...d.adjacent, ...o.adjacent };
   adjacent.daysBefore = clampInt(adjacent.daysBefore, 0, 30, d.adjacent.daysBefore);
@@ -683,7 +691,13 @@ export function rulesWithOverrides(o: RuleOverrides): PricingRulesConfig {
   return {
     currentRateLeadDays: o.currentRateLeadDays ?? d.currentRateLeadDays,
     curveHorizonDays: d.curveHorizonDays,
-    seasonality: { ...d.seasonality, ...o.seasonality, sensitivity: sens, monthlyOverride },
+    seasonality: {
+      ...d.seasonality,
+      ...o.seasonality,
+      sensitivity: sens,
+      monthlyOverride,
+      monthlyOverrideOn,
+    },
     demandEvents: { ...d.demandEvents, ...o.demandEvents, sensitivity: demandSens },
     pacing: { ...d.pacing, ...o.pacing },
     occupancy,
