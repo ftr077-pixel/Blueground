@@ -1,0 +1,47 @@
+# Какой пайплайн на каком направлении.
+#   he_en: cascade | seamless      (клиент → сотрудник)
+#   en_he: cascade                 (сотрудник → клиент; у Seamless нет he-выхода)
+pipelines:
+  he_en: cascade
+  en_he: cascade
+
+asr:
+  hebrew:
+    model: ivrit-ai/whisper-large-v3-turbo-ct2   # faster-whisper совместимый
+    compute_type: int8_float16
+    language: he
+  english:
+    model: small.en
+    compute_type: int8
+    language: en
+
+mt:
+  # Локальный vLLM, адрес в .env
+  temperature: 0.2
+  max_tokens: 512
+  system_prompt: >
+    You are a professional simultaneous interpreter on a customer-support
+    phone call. Translate the user's message from {src} to {dst}.
+    Output ONLY the translation. Keep it natural and conversational.
+    Never add explanations, never answer questions yourself.
+
+tts:
+  hebrew:
+    model: facebook/mms-tts-heb        # 16 kHz на выходе
+  english:
+    voice: af_heart                    # Kokoro voice id, 24 kHz
+
+seamless:
+  model: facebook/seamless-m4t-v2-large
+  # TODO: переключить на SeamlessStreaming-агент (см. pipelines/seamless.py)
+
+vad:
+  threshold: 0.5
+  min_silence_ms: 500        # пауза, после которой реплика считается законченной
+  min_speech_ms: 250         # короче — игнорируем (щелчки, дыхание)
+  max_utterance_s: 30        # принудительная отсечка
+
+audio:
+  twilio_rate: 8000          # μ-law, фиксировано Twilio
+  pipeline_rate: 16000       # рабочая частота ASR/VAD
+  operator_rate: 16000       # PCM16 в браузер и из браузера

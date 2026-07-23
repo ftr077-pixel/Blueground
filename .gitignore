@@ -16,6 +16,9 @@ __pycache__/
 .venv/
 scraper/.venv/
 
+# voicebridge (Twilio creds live here, never commit)
+voicebridge/.env
+
 # PriceLabs PDF drop folder (operator's downloaded reports, not source)
 scraper/pricelabs-inbox/
 
