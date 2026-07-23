@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceBridge — Operator</title>
+<style>
+  :root {
+    --bg: #101418; --panel: #171d23; --line: #232c34;
+    --text: #d9e1e8; --dim: #6d7a86;
+    --client: #d9a24a; --operator: #5aa3d9; --live: #4ac28a; --err: #d95a5a;
+    --mono: "SF Mono", ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 18px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+  #status {
+    font: 12px var(--mono); color: var(--dim);
+    padding: 3px 10px; border: 1px solid var(--line); border-radius: 20px;
+  }
+  #status.live { color: var(--live); border-color: var(--live); }
+  button {
+    margin-left: auto; padding: 8px 18px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text);
+    font: 600 14px system-ui; cursor: pointer;
+  }
+  button:hover { border-color: var(--dim); }
+  button.on { background: var(--live); border-color: var(--live); color: #08110c; }
+  button:focus-visible { outline: 2px solid var(--operator); outline-offset: 2px; }
+  #log {
+    flex: 1; overflow-y: auto; padding: 18px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .turn {
+    max-width: 680px; padding: 10px 14px; border-radius: 8px;
+    background: var(--panel); border-left: 3px solid var(--dim);
+  }
+  .turn.client   { border-left-color: var(--client); }
+  .turn.operator { border-left-color: var(--operator); align-self: flex-end;
+                   border-left: none; border-right: 3px solid var(--operator); }
+  .turn .who { font: 11px var(--mono); color: var(--dim); text-transform: uppercase; }
+  .turn .src { direction: rtl; text-align: right; color: var(--dim); font-size: 14px; }
+  .turn.operator .src { direction: ltr; text-align: left; }
+  .turn .dst { margin-top: 2px; }
+  footer { padding: 8px 18px; border-top: 1px solid var(--line);
+           font: 12px var(--mono); color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>VoiceBridge</h1>
+  <span id="status">disconnected</span>
+  <button id="btn">Start shift</button>
+</header>
+<div id="log"></div>
+<footer id="meter">mic: —</footer>
+
+<script>
+const RATE = 16000;
+let ws, audioCtx, workletNode, playQueueTime = 0, running = false;
+
+const $ = id => document.getElementById(id);
+const setStatus = (t, live) => { $("status").textContent = t;
+                                 $("status").classList.toggle("live", !!live); };
+
+// ---- Мик → PCM16 @16k → WS -------------------------------------------------
+const WORKLET = `
+class Cap extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (ch) this.port.postMessage(ch.slice(0));
+    return true;
+  }
+}
+registerProcessor("cap", Cap);`;
+
+async function startAudio() {
+  audioCtx = new AudioContext({ sampleRate: RATE });
+  const mic = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+  });
+  await audioCtx.audioWorklet.addModule(
+    URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
+  workletNode = new AudioWorkletNode(audioCtx, "cap");
+  audioCtx.createMediaStreamSource(mic).connect(workletNode);
+
+  workletNode.port.onmessage = e => {
+    const f32 = e.data;
+    // индикатор уровня
+    let peak = 0; for (const v of f32) peak = Math.max(peak, Math.abs(v));
+    $("meter").textContent = "mic: " + "▮".repeat(Math.min(20, peak * 40 | 0)).padEnd(20, "▯");
+    if (!ws || ws.readyState !== 1) return;
+    const i16 = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++)
+      i16[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
+    ws.send(i16.buffer);
+  };
+}
+
+// ---- WS: перевод (binary) + транскрипт (json) ------------------------------
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/operator/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => setStatus("waiting for call", true);
+  ws.onclose = () => { setStatus("disconnected"); if (running) setTimeout(connect, 2000); };
+  ws.onmessage = e => {
+    if (typeof e.data === "string") return handleJson(JSON.parse(e.data));
+    playPcm16(e.data);
+  };
+}
+
+function playPcm16(buf) {
+  const i16 = new Int16Array(buf);
+  const f32 = Float32Array.from(i16, v => v / 32768);
+  const b = audioCtx.createBuffer(1, f32.length, RATE);
+  b.copyToChannel(f32, 0);
+  const src = audioCtx.createBufferSource();
+  src.buffer = b; src.connect(audioCtx.destination);
+  playQueueTime = Math.max(playQueueTime, audioCtx.currentTime) ;
+  src.start(playQueueTime);
+  playQueueTime += b.duration;
+}
+
+function handleJson(m) {
+  if (m.type === "status") {
+    if (m.status === "call_connected") setStatus("● on call", true);
+    if (m.status === "ended") setStatus("waiting for call", true);
+    return;
+  }
+  if (m.type === "transcript") {
+    const d = document.createElement("div");
+    d.className = "turn " + m.from;
+    d.innerHTML =
+      `<div class="who">${m.from === "client" ? "Client · HE" : "You · EN"}</div>` +
+      (m.source_text ? `<div class="src">${esc(m.source_text)}</div>` : "") +
+      `<div class="dst">${esc(m.translated_text)}</div>`;
+    $("log").appendChild(d);
+    $("log").scrollTop = $("log").scrollHeight;
+  }
+}
+const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// ---- Кнопка ---------------------------------------------------------------
+$("btn").onclick = async () => {
+  if (!running) {
+    running = true;
+    $("btn").textContent = "End shift"; $("btn").classList.add("on");
+    await startAudio(); connect();
+  } else {
+    running = false;
+    $("btn").textContent = "Start shift"; $("btn").classList.remove("on");
+    ws?.close(); audioCtx?.close(); setStatus("disconnected");
+  }
+};
+</script>
+</body>
+</html>
