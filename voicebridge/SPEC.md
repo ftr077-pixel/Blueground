@@ -3,6 +3,14 @@
 Status: v1.0, authoritative. If code and this document disagree, this document wins until it is amended.
 Owner: Denis. Implementer: Claude Code.
 
+> **Amendment log**
+>
+> - **A1 (2026-07-27, approved by Denis):** ADR-008 reversed — all ML inference is self-hosted on our AWS GPU server; vendor inference APIs are out of scope for v1. Read §0, §1.3 and §2's vendor references through this amendment. Telephony stays Twilio (ADR-001): PSTN termination cannot be self-hosted.
+> - **A2 (2026-07-27):** ADR-003's model lineup replaced with the self-hosted set — see the amendment inside ADR-003.
+> - **A3 (2026-07-27):** ADR-002's hot-path resampler is an in-repo half-band FIR. soxr's streaming API was measured unusable for 20 ms frames: ~100 ms of startup silence, 26–66 ms steady-state hold, and its low-latency mode is 17.7 dB SNR.
+> - **A4 (2026-07-27):** §6.4 `synthesize` returns a `Synthesis{handle, frames}` — the spec'd signature gave `cancel()` no way to obtain its handle.
+> - **A5 (2026-07-27):** §11 dependencies: +`httpx` (HTTP client for self-hosted inference endpoints); −`soxr`. Stdlib `audioop` pins Python to 3.12 until a replacement is named.
+
 ---
 
 ## 0. TL;DR for the implementer
@@ -160,6 +168,14 @@ Upsampling 8 kHz telephony audio to 16 kHz does not create information that was 
 
 **Implementation.** Use `soxr` (via `soxr` Python bindings) for resampling, not naive linear interpolation. Use `audioop` for mu-law codec only.
 
+**Amendment A3 (2026-07-27).** soxr is out of the hot path: measured on 20 ms
+chunks its stream API emits nothing for the first ~100 ms and holds 26–66 ms
+at steady state (quality-dependent), and its low-latency mode is 17.7 dB SNR.
+The only in-pipeline conversion is exactly 2:1 (8 kHz ↔ 16 kHz), implemented
+as an in-repo 63-tap half-band windowed-sinc FIR: 1.9 ms group delay,
+>50 dB telephony-band SNR, both pinned by tests in `tests/unit/test_audio.py`.
+TTS is requested at 16 kHz directly so no other rate exists internally.
+
 ### ADR-003 — Hybrid model routing: different models for different jobs
 
 This is the section Denis specifically wants explained, so it is explicit.
@@ -188,6 +204,22 @@ Why this split, rather than just using one model? Because audio and text have di
 - Cache synthesised audio for fixed phrases (greetings, hold messages, "one moment please"). Key the cache on `(text, voice_id, language)`.
 
 **Rejected.** A single-vendor stack (e.g. all-Google or all-Azure). Simpler to bill and integrate, meaningfully worse on the axis that matters at each stage, and it couples all three swap decisions together.
+
+**Amendment A2 (2026-07-27).** The per-stage lineup is replaced by the
+self-hosted set under A1; the heterogeneous-by-stage principle stands.
+
+- **ASR:** faster-whisper (CTranslate2) with a streaming chunker, served on
+  the GPU host. Candidate weights: whisper-large-v3 and the ivrit.ai
+  Hebrew fine-tunes — chosen per language by benchmark on the §8.2 fixtures,
+  never by published numbers. Streaming latency comes from our chunker, so
+  its parameters are tuned with the segmenter's (ADR-004 discipline applies).
+- **MT:** both tiers on vLLM (OpenAI-compatible). Fast tier: an instruct
+  model in the 7–9B class. Quality tier: a larger model on the same server,
+  still async-only. Same `Translator` client for both.
+- **TTS:** Piper as primary (CPU-capable, low time-to-first-audio), served
+  with streaming output and mid-utterance cancellation implemented in our
+  serving loop — the ADR-003 cancellation requirement is unchanged and
+  non-negotiable.
 
 ### ADR-004 — Segmentation: hybrid VAD + ASR endpointing + stability window
 
@@ -245,6 +277,17 @@ We do **not** attempt per-utterance language detection after lock. We do, howeve
 **Why.** Our compute is I/O-bound WebSocket relaying. Adding GPU nodes means GPU capacity planning, model serving, warm-up latency, and a second scaling axis — all before we know whether the product works. Vendor APIs cost more per minute and buy us a much shorter path to knowing.
 
 **Revisit trigger.** When monthly ASR+TTS spend exceeds the fully-loaded cost of a GPU fleet plus the engineer to run it, or when a customer's data residency requirements forbid sending audio to third-party APIs. Both are real futures. Neither is now.
+
+**Amendment A1 (2026-07-27, approved by Denis).** Reversed. All ML inference
+runs on our own AWS GPU server; vendor inference APIs are not used in v1.
+The §6 interfaces are unchanged and remain the only integration surface — the
+pipeline cannot tell the difference. Serving: vLLM (OpenAI-compatible HTTP)
+for MT; ASR and TTS are served by in-repo services on the GPU host speaking
+WS protocols defined alongside their clients in `/app/providers`. Silero VAD
+stays a local CPU model in the gateway. The revisit trigger now runs in
+reverse: if GPU cost or serving operations exceed equivalent vendor spend, or
+self-hosted Hebrew ASR quality on the §8.2 corpus is unusable, reconsider
+vendor APIs per stage.
 
 ### ADR-009 — Deployment region
 
@@ -337,9 +380,17 @@ class Translator(Protocol):
 ### 6.4 TTSProvider
 
 ```python
+# Amended per A4: synthesize returns a Synthesis carrying the handle that
+# cancel() needs — the original signature returned a bare iterator and left
+# the handle unobtainable.
+@dataclass
+class Synthesis:
+    handle: SynthesisHandle
+    frames: AsyncIterator[AudioFrame]
+    """Must yield the first chunk before synthesis completes."""
+
 class TTSProvider(Protocol):
-    async def synthesize(self, text: str, voice: VoiceSpec) -> AsyncIterator[AudioFrame]:
-        """Stream audio chunks. Must yield the first chunk before synthesis completes."""
+    def synthesize(self, text: str, voice: VoiceSpec) -> Synthesis: ...
     async def cancel(self, handle: SynthesisHandle) -> None:
         """Abort in-flight synthesis. Must complete in <50 ms."""
 ```
@@ -471,6 +522,7 @@ CLAUDE.md           working rules for the implementer
 
 - **Python 3.12**, `asyncio` throughout. Chosen because every vendor has a mature Python SDK and Denis's existing stack is FastAPI. The gateway is I/O-bound; the GIL is not the constraint. If profiling later shows frame handling is CPU-bound, move only that hot loop, not the service.
 - **FastAPI** for control plane, raw `websockets` for media (do not route media through FastAPI's WebSocket layer — unnecessary overhead in the hot path).
+- **httpx** for HTTP calls to the self-hosted inference endpoints (added per A5).
 - **Pydantic v2** for all boundary types.
 - **Redis** for session state and pub/sub. **Postgres** for durable records. **SQLAlchemy 2.x** async.
 - **uv** for dependency management, **ruff** for lint and format, **pytest** + `pytest-asyncio`.
