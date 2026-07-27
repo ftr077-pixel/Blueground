@@ -118,6 +118,7 @@ class DictTranslator(Translator):
         self._table = table
         self._latency_ms = latency_ms
         self.calls: list[tuple[str, str, str, Tier]] = []
+        self.contexts: list[list[Turn]] = []
 
     async def translate(
         self,
@@ -129,6 +130,7 @@ class DictTranslator(Translator):
         tier: Tier,
     ) -> Translation:
         self.calls.append((text, source, target, tier))
+        self.contexts.append(list(context))
         await asyncio.sleep(self._latency_ms / 1000.0)
         return Translation(text=self._table.get(text, f"[{target}] {text}"), tier=tier)
 
