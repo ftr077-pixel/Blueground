@@ -1,48 +1,89 @@
-"""Streaming ASR client for our own serving protocol (ADR-003 amendment A2).
+"""Deepgram streaming ASR client (ADR-003).
 
-The GPU host runs the matching server — faster-whisper behind this same
-protocol — so the client carries no model assumptions at all. Wire protocol,
-JSON text frames except audio:
+Wire protocol, as used here:
 
-    client -> server:
-        {"type": "open", "language": "he", "sample_rate": 16000, "keyterms": []}
-        <binary>                                # raw PCM16LE mono, 16 kHz
-        {"type": "ping", "ts": <monotonic ms>}
-        {"type": "close"}
-    server -> client:
-        {"type": "ready"}
-        {"type": "result", "text": "...", "final": false, "confidence": 0.93,
-         "words": [{"text": "...", "start_ms": 0, "end_ms": 120,
-                    "confidence": 0.91}]}
-        {"type": "pong", "ts": <echoed>}
-        {"type": "error", "detail": "..."}
+    client -> vendor:  raw PCM16LE mono binary frames
+                       {"type": "KeepAlive"}     heartbeat
+                       {"type": "CloseStream"}   graceful end
+    vendor -> client:  {"type": "Results", "is_final": bool,
+                        "channel": {"alternatives": [{"transcript": "...",
+                                    "confidence": 0.9, "words": [...]}]}}
+                       {"type": "Metadata" | "SpeechStarted" | ...}
+
+The connection is opened by an injected dialer (``dial``), so URL construction
+and credentials live in configuration and the client stays testable offline.
 
 Heartbeat + reconnect are mandatory for every streaming vendor connection
 (CLAUDE.md): a silently dead socket blocks ``recv`` forever, so the heartbeat
-is the component that notices (pong timeout), closes the corpse to unblock
-the reader, redials, and re-opens with the same parameters. Partials lost
-across the gap are absorbed by the segmenter's timeout and VAD triggers.
+is the component that notices — it closes the corpse to unblock the reader,
+redials, and resumes. Partials lost across the gap are absorbed by the
+segmenter's timeout and VAD triggers, and the stream carries no server-side
+state that would need replaying.
 """
 
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+import os
+import urllib.parse
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from app.audio.frames import AudioFrame, require_internal
+from app.audio.frames import INTERNAL_SAMPLE_RATE, AudioFrame, require_internal
 from app.observability.events import monotonic_ms
 from app.providers.base import ASROptions, ASRResult, Word
 from app.transport import MessageStream
 
 Dialer = Callable[[], Awaitable[MessageStream]]
 
+DEFAULT_ENDPOINT = "wss://api.deepgram.com/v1/listen"
+
 
 class AsrStreamError(ConnectionError):
     pass
 
 
-class WsAsrClient:
+@dataclass(frozen=True, slots=True)
+class DeepgramConfig:
+    api_key: str
+    model: str = "nova-3"
+    endpoint: str = DEFAULT_ENDPOINT
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "DeepgramConfig":
+        e = os.environ if env is None else env
+        api_key = e.get("DEEPGRAM_API_KEY")
+        if not api_key:
+            raise RuntimeError("DEEPGRAM_API_KEY must be set")
+        return cls(
+            api_key=api_key,
+            model=e.get("DEEPGRAM_MODEL", "nova-3"),
+            endpoint=e.get("DEEPGRAM_ENDPOINT", DEFAULT_ENDPOINT),
+        )
+
+    def stream_url(self, language: str, opts: ASROptions) -> str:
+        query = {
+            "model": self.model,
+            "language": language,
+            "encoding": "linear16",
+            "sample_rate": str(opts.sample_rate),
+            "channels": "1",
+            "interim_results": "true",
+            "punctuate": "true",
+            # Vendor endpointing is ADR-004's trigger 1; our segmenter owns
+            # the rest of the decision.
+            "endpointing": "300",
+        }
+        if opts.keyterms:
+            query["keyterm"] = " ".join(opts.keyterms)
+        return f"{self.endpoint}?{urllib.parse.urlencode(query)}"
+
+    def auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Token {self.api_key}"}
+
+
+class DeepgramASR:
     def __init__(
         self,
         dial: Dialer,
@@ -59,8 +100,6 @@ class WsAsrClient:
         self._redial_base_delay_s = redial_base_delay_s
         self._queue: asyncio.Queue[ASRResult | None] = asyncio.Queue()
         self._ws: MessageStream | None = None
-        self._language = ""
-        self._opts = ASROptions()
         self._generation = 0
         self._redial_lock = asyncio.Lock()
         self._closing = False
@@ -72,9 +111,9 @@ class WsAsrClient:
     # --- ASRProvider --------------------------------------------------------
 
     async def open(self, language: str, opts: ASROptions) -> None:
-        self._language = language
-        self._opts = opts
-        self._ws = await self._dial_and_handshake()
+        if opts.sample_rate != INTERNAL_SAMPLE_RATE:
+            raise ValueError(f"expected {INTERNAL_SAMPLE_RATE} Hz, got {opts.sample_rate}")
+        self._ws = await self._dial_with_retries()
         self._last_rx_ms = monotonic_ms()
         self._reader_task = asyncio.create_task(self._reader())
         self._heartbeat_task = asyncio.create_task(self._heartbeat())
@@ -100,7 +139,7 @@ class WsAsrClient:
         ws = self._ws
         if ws is not None:
             with contextlib.suppress(OSError, ConnectionError):
-                await ws.send(json.dumps({"type": "close"}))
+                await ws.send(json.dumps({"type": "CloseStream"}))
             with contextlib.suppress(OSError, ConnectionError):
                 await ws.close()
         if self._reader_task is not None:
@@ -128,32 +167,11 @@ class WsAsrClient:
                 return
             yield item
 
-    async def _dial_and_handshake(self) -> MessageStream:
+    async def _dial_with_retries(self) -> MessageStream:
         delay = self._redial_base_delay_s
         for attempt in range(self._max_redials + 1):
             try:
-                ws = await self._dial()
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "open",
-                            "language": self._language,
-                            "sample_rate": self._opts.sample_rate,
-                            "keyterms": list(self._opts.keyterms),
-                        }
-                    )
-                )
-                while True:
-                    raw = await ws.recv()
-                    if raw is None:
-                        raise AsrStreamError("asr server closed during handshake")
-                    if isinstance(raw, bytes):
-                        continue
-                    message = json.loads(raw)
-                    if message.get("type") == "ready":
-                        return ws
-                    if message.get("type") == "error":
-                        raise AsrStreamError(str(message.get("detail")))
+                return await self._dial()
             except (OSError, ConnectionError) as exc:
                 if attempt >= self._max_redials:
                     raise AsrStreamError(f"asr dial failed after {attempt + 1} attempts") from exc
@@ -171,7 +189,7 @@ class WsAsrClient:
                 # Unblocks a reader stuck in recv() on the dead socket.
                 with contextlib.suppress(OSError, ConnectionError):
                     await old.close()
-            self._ws = await self._dial_and_handshake()
+            self._ws = await self._dial_with_retries()
             self._generation += 1
             self._last_rx_ms = monotonic_ms()
 
@@ -196,12 +214,14 @@ class WsAsrClient:
                 continue
             message = json.loads(raw)
             kind = message.get("type")
-            if kind == "result":
-                self._queue.put_nowait(self._parse_result(message))
-            elif kind == "error":
-                self._error = AsrStreamError(str(message.get("detail")))
+            if kind == "Results":
+                result = self._parse_results(message)
+                if result is not None:
+                    self._queue.put_nowait(result)
+            elif kind == "Error":
+                self._error = AsrStreamError(str(message.get("description") or message))
                 break
-            # pong and unknown messages only refresh _last_rx_ms
+            # Metadata, SpeechStarted and unknown types only refresh the clock
         self._queue.put_nowait(None)
 
     async def _heartbeat(self) -> None:
@@ -214,25 +234,35 @@ class WsAsrClient:
             if ws is None:
                 continue
             with contextlib.suppress(OSError, ConnectionError):
-                await ws.send(json.dumps({"type": "ping", "ts": monotonic_ms()}))
+                await ws.send(json.dumps({"type": "KeepAlive"}))
             if monotonic_ms() - self._last_rx_ms > self._heartbeat_timeout_s * 1000.0:
                 with contextlib.suppress(AsrStreamError):
                     await self._reconnect(generation)
 
-    def _parse_result(self, message: Any) -> ASRResult:
+    def _parse_results(self, message: Any) -> ASRResult | None:
+        alternatives = message.get("channel", {}).get("alternatives") or []
+        if not alternatives:
+            return None
+        best = alternatives[0]
+        text = str(best.get("transcript") or "")
+        if not text:
+            # Empty interim results arrive during silence and carry nothing
+            # the segmenter can use.
+            return None
         words = tuple(
             Word(
-                text=str(word["text"]),
-                start_ms=float(word["start_ms"]),
-                end_ms=float(word["end_ms"]),
+                text=str(word.get("punctuated_word") or word["word"]),
+                start_ms=float(word["start"]) * 1000.0,
+                end_ms=float(word["end"]) * 1000.0,
                 confidence=None if word.get("confidence") is None else float(word["confidence"]),
             )
-            for word in message.get("words") or ()
+            for word in best.get("words") or ()
         )
+        confidence = best.get("confidence")
         return ASRResult(
-            text=str(message["text"]),
-            is_final=bool(message["final"]),
-            confidence=None if message.get("confidence") is None else float(message["confidence"]),
+            text=text,
+            is_final=bool(message.get("is_final")),
+            confidence=None if confidence is None else float(confidence),
             words=words,
             received_at=monotonic_ms(),
         )

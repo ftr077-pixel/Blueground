@@ -1,4 +1,4 @@
-"""VllmTranslator tests over httpx.MockTransport — request shape, tier
+"""OpenAITranslator tests over httpx.MockTransport — request shape, tier
 routing, glossary/context injection, and failure propagation, all offline."""
 
 import json
@@ -7,20 +7,21 @@ import httpx
 import pytest
 
 from app.providers.base import Glossary, GlossaryEntry, Turn
-from app.providers.mt.vllm import VllmConfig, VllmTranslator
+from app.providers.mt.openai_chat import OpenAIConfig, OpenAITranslator
 
-CONFIG = VllmConfig(
-    base_url="http://gpu-host:8000",
+CONFIG = OpenAIConfig(
+    api_key="test-key",
     fast_model="fast-model",
     quality_model="quality-model",
+    base_url="https://api.example.test",
 )
 
 
 def make_translator(
     handler: "httpx.MockTransport | None" = None,
     reply: str = "Hello",
-    config: VllmConfig = CONFIG,
-) -> tuple[VllmTranslator, list[httpx.Request]]:
+    config: OpenAIConfig = CONFIG,
+) -> tuple[OpenAITranslator, list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
     def default_handler(request: httpx.Request) -> httpx.Response:
@@ -29,7 +30,7 @@ def make_translator(
 
     transport = handler or httpx.MockTransport(default_handler)
     client = httpx.AsyncClient(transport=transport)
-    return VllmTranslator(config, client=client), seen
+    return OpenAITranslator(config, client=client), seen
 
 
 async def test_fast_tier_posts_openai_shape_and_strips_reply() -> None:
@@ -78,9 +79,9 @@ async def test_server_error_raises_for_orchestrator_error_path() -> None:
         await translator.translate("שלום", "he", "en", [], None, "fast")
 
 
-def test_config_from_env_requires_url_and_model() -> None:
-    with pytest.raises(RuntimeError, match="VLLM_BASE_URL"):
-        VllmConfig.from_env({})
-    config = VllmConfig.from_env({"VLLM_BASE_URL": "http://gpu:8000/", "VLLM_MODEL_FAST": "m1"})
-    assert config.base_url == "http://gpu:8000"
+def test_config_from_env_requires_a_key_and_defaults_the_rest() -> None:
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        OpenAIConfig.from_env({})
+    config = OpenAIConfig.from_env({"OPENAI_API_KEY": "k", "MT_MODEL_FAST": "m1"})
+    assert config.base_url == "https://api.openai.com"
     assert config.quality_model == "m1"

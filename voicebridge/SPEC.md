@@ -5,11 +5,12 @@ Owner: Denis. Implementer: Claude Code.
 
 > **Amendment log**
 >
-> - **A1 (2026-07-27, approved by Denis):** ADR-008 reversed — all ML inference is self-hosted on our AWS GPU server; vendor inference APIs are out of scope for v1. Read §0, §1.3 and §2's vendor references through this amendment. Telephony stays Twilio (ADR-001): PSTN termination cannot be self-hosted.
-> - **A2 (2026-07-27):** ADR-003's model lineup replaced with the self-hosted set — see the amendment inside ADR-003.
+> - **A1 (2026-07-27) — WITHDRAWN by A6.** Had reversed ADR-008 to self-hosted inference.
+> - **A2 (2026-07-27) — WITHDRAWN by A6.** Had replaced ADR-003's lineup with self-hosted models.
+> - **A6 (2026-07-27, decided by Denis):** A1 and A2 withdrawn. ADR-008 and ADR-003 stand as originally written: all ML inference is a vendor API call, no GPU, no self-hosted models in v1. The revisit triggers in those ADRs are unchanged — self-hosting returns when spend or data residency demands it, and the §6 interfaces are what make that swap cheap.
 > - **A3 (2026-07-27):** ADR-002's hot-path resampler is an in-repo half-band FIR. soxr's streaming API was measured unusable for 20 ms frames: ~100 ms of startup silence, 26–66 ms steady-state hold, and its low-latency mode is 17.7 dB SNR.
 > - **A4 (2026-07-27):** §6.4 `synthesize` returns a `Synthesis{handle, frames}` — the spec'd signature gave `cancel()` no way to obtain its handle.
-> - **A5 (2026-07-27):** §11 dependencies: +`httpx` (HTTP client for self-hosted inference endpoints); −`soxr`. Stdlib `audioop` pins Python to 3.12 until a replacement is named.
+> - **A5 (2026-07-27):** §11 dependencies: +`httpx` (HTTP client for vendor REST endpoints); −`soxr`. Stdlib `audioop` pins Python to 3.12 until a replacement is named.
 
 ---
 
@@ -205,21 +206,11 @@ Why this split, rather than just using one model? Because audio and text have di
 
 **Rejected.** A single-vendor stack (e.g. all-Google or all-Azure). Simpler to bill and integrate, meaningfully worse on the axis that matters at each stage, and it couples all three swap decisions together.
 
-**Amendment A2 (2026-07-27).** The per-stage lineup is replaced by the
-self-hosted set under A1; the heterogeneous-by-stage principle stands.
-
-- **ASR:** faster-whisper (CTranslate2) with a streaming chunker, served on
-  the GPU host. Candidate weights: whisper-large-v3 and the ivrit.ai
-  Hebrew fine-tunes — chosen per language by benchmark on the §8.2 fixtures,
-  never by published numbers. Streaming latency comes from our chunker, so
-  its parameters are tuned with the segmenter's (ADR-004 discipline applies).
-- **MT:** both tiers on vLLM (OpenAI-compatible). Fast tier: an instruct
-  model in the 7–9B class. Quality tier: a larger model on the same server,
-  still async-only. Same `Translator` client for both.
-- **TTS:** Piper as primary (CPU-capable, low time-to-first-audio), served
-  with streaming output and mid-utterance cancellation implemented in our
-  serving loop — the ADR-003 cancellation requirement is unchanged and
-  non-negotiable.
+**Amendment A2 — WITHDRAWN by A6 (2026-07-27).** A2 had replaced the lineup
+above with faster-whisper / vLLM / Piper on a self-hosted GPU. Withdrawn
+together with A1; the vendor lineup in this ADR stands. The language pair in
+flight is Hebrew ↔ English, so the ASR split that matters is Deepgram for
+English and Speechmatics (or Gladia) for Hebrew, decided on §8.2 fixtures.
 
 ### ADR-004 — Segmentation: hybrid VAD + ASR endpointing + stability window
 
@@ -278,16 +269,11 @@ We do **not** attempt per-utterance language detection after lock. We do, howeve
 
 **Revisit trigger.** When monthly ASR+TTS spend exceeds the fully-loaded cost of a GPU fleet plus the engineer to run it, or when a customer's data residency requirements forbid sending audio to third-party APIs. Both are real futures. Neither is now.
 
-**Amendment A1 (2026-07-27, approved by Denis).** Reversed. All ML inference
-runs on our own AWS GPU server; vendor inference APIs are not used in v1.
-The §6 interfaces are unchanged and remain the only integration surface — the
-pipeline cannot tell the difference. Serving: vLLM (OpenAI-compatible HTTP)
-for MT; ASR and TTS are served by in-repo services on the GPU host speaking
-WS protocols defined alongside their clients in `/app/providers`. Silero VAD
-stays a local CPU model in the gateway. The revisit trigger now runs in
-reverse: if GPU cost or serving operations exceed equivalent vendor spend, or
-self-hosted Hebrew ASR quality on the §8.2 corpus is unusable, reconsider
-vendor APIs per stage.
+**Amendment A1 — WITHDRAWN by A6 (2026-07-27).** A1 had reversed this ADR to
+self-hosted inference. Withdrawn on Denis's decision: the vendor-API path
+reaches the M0 gate without provisioning GPUs or writing model serving, and
+the M0 gate exists to measure Hebrew ASR quality (§13.1) — the project's
+largest risk — as early as possible. This ADR stands as written above.
 
 ### ADR-009 — Deployment region
 
@@ -522,7 +508,7 @@ CLAUDE.md           working rules for the implementer
 
 - **Python 3.12**, `asyncio` throughout. Chosen because every vendor has a mature Python SDK and Denis's existing stack is FastAPI. The gateway is I/O-bound; the GIL is not the constraint. If profiling later shows frame handling is CPU-bound, move only that hot loop, not the service.
 - **FastAPI** for control plane, raw `websockets` for media (do not route media through FastAPI's WebSocket layer — unnecessary overhead in the hot path).
-- **httpx** for HTTP calls to the self-hosted inference endpoints (added per A5).
+- **httpx** for HTTP calls to vendor REST endpoints (added per A5).
 - **Pydantic v2** for all boundary types.
 - **Redis** for session state and pub/sub. **Postgres** for durable records. **SQLAlchemy 2.x** async.
 - **uv** for dependency management, **ruff** for lint and format, **pytest** + `pytest-asyncio`.
