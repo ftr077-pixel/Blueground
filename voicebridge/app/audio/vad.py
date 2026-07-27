@@ -35,8 +35,8 @@ class SileroVad:
     _WINDOW_SAMPLES = 512  # Silero's required chunk size at 16 kHz
 
     def __init__(self, threshold: float = 0.5) -> None:
-        import torch  # noqa: PLC0415 — heavy optional import, deferred on purpose
-        from silero_vad import load_silero_vad  # noqa: PLC0415
+        import torch
+        from silero_vad import load_silero_vad
 
         self._torch = torch
         self._model = load_silero_vad()
@@ -46,7 +46,7 @@ class SileroVad:
         self._silence_ms = 0.0
 
     def process(self, frame: AudioFrame) -> VadFrameResult:
-        from app.audio.frames import require_internal  # noqa: PLC0415
+        from app.audio.frames import require_internal
 
         require_internal(frame)
         self._buffer += frame.pcm

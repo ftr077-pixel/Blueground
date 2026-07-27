@@ -20,7 +20,6 @@ from app.providers.base import (
     VoiceSpec,
 )
 from app.telephony.base import CallContext, CallLegs
-
 from tests.support.fakes import (
     DictTranslator,
     EnergyVad,

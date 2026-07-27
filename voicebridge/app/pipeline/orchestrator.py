@@ -178,9 +178,7 @@ class SessionOrchestrator:
         # quiet mid-utterance, so they cannot ride on result arrival alone.
         while True:
             try:
-                await asyncio.wait_for(
-                    self._stop_ticker.wait(), self._tick_interval_ms / 1000.0
-                )
+                await asyncio.wait_for(self._stop_ticker.wait(), self._tick_interval_ms / 1000.0)
                 return
             except TimeoutError:
                 pass
@@ -208,7 +206,7 @@ class SessionOrchestrator:
                 return
             try:
                 await self._handle_commit(p, commit)
-            except Exception as exc:  # noqa: BLE001 — a vendor failure must not kill the call
+            except Exception as exc:
                 self._events.emit(
                     "error",
                     direction=p.direction,
@@ -218,9 +216,7 @@ class SessionOrchestrator:
                 )
 
     async def _handle_commit(self, p: DirectionPipeline, commit: Commit) -> None:
-        self._events.emit(
-            "mt_started", direction=p.direction, correlation_id=commit.correlation_id
-        )
+        self._events.emit("mt_started", direction=p.direction, correlation_id=commit.correlation_id)
         translation = await self._translator.translate(
             commit.text,
             p.source_lang,

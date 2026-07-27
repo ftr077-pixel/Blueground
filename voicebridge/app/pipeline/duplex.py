@@ -127,7 +127,8 @@ class DuplexController:
     async def on_vad_offset(self, side: Side) -> None:
         self._human_speaking[side] = False
         for direction in DIRECTIONS:
-            if source_side(direction) == side and self._state[direction] is DirectionState.LISTENING:
+            listening = self._state[direction] is DirectionState.LISTENING
+            if source_side(direction) == side and listening:
                 self._state[direction] = DirectionState.IDLE
             if target_side(direction) == side:
                 self._wake[direction].set()

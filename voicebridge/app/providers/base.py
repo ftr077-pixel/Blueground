@@ -1,4 +1,4 @@
-"""Vendor-facing contracts (SPEC.md §6.2–§6.4).
+"""Vendor-facing contracts (SPEC.md §6.2-§6.4).
 
 Vendor SDK types must never leak past implementations of these protocols.
 

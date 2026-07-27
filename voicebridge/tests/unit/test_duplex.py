@@ -4,6 +4,7 @@ human, stale-drop, and ordering. Real asyncio, fake TTS and sinks."""
 import asyncio
 import functools
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.config import DuplexConfig
@@ -11,7 +12,6 @@ from app.observability.events import EventBus, EventRecorder, monotonic_ms
 from app.pipeline.duplex import DirectionState, DuplexController, Utterance
 from app.providers.base import VoiceSpec
 from app.types import Direction
-
 from tests.support.fakes import FakeTTS, marker_of, tts_marker, wait_until
 
 VOICE = VoiceSpec(voice_id="test", language="en")
@@ -26,7 +26,7 @@ class Harness:
 
 
 def make_harness(
-    *, max_queue_ms: float = 3000.0, clock: object = None
+    *, max_queue_ms: float = 3000.0, clock: Callable[[], float] | None = None
 ) -> Harness:
     recorder = EventRecorder()
     bus = EventBus("session-test", (recorder,))
@@ -47,7 +47,7 @@ def make_harness(
         events=bus,
         send_frame=send,
         flush=flush,
-        clock=clock if callable(clock) else monotonic_ms,  # type: ignore[arg-type]
+        clock=clock if clock is not None else monotonic_ms,
     )
     harness = Harness(recorder=recorder, controller=controller)
     harness.sent = harness_sent

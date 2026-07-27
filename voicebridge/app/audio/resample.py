@@ -18,5 +18,5 @@ class StreamResampler:
 
     def process(self, pcm: bytes, last: bool = False) -> bytes:
         samples = np.frombuffer(pcm, dtype=np.int16)
-        out: np.ndarray = self._stream.resample_chunk(samples, last=last)  # type: ignore[type-arg]
-        return out.astype(np.int16).tobytes()
+        out = self._stream.resample_chunk(samples, last=last)
+        return bytes(out.astype(np.int16).tobytes())

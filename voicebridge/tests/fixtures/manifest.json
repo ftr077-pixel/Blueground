@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "comment": "SPEC.md §8.2 — manifest only; audio lives in S3, never in git. Populated at M1 corpus collection.",
+  "s3_prefix": null,
+  "fixtures": []
+}

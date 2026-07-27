@@ -2,7 +2,7 @@
 streams and an injected clock, so every trigger is exercised without I/O."""
 
 from app.config import SegmenterConfig
-from app.pipeline.languages import ENGLISH, HEBREW
+from app.pipeline.languages import ENGLISH, HEBREW, LanguageRules
 from app.pipeline.segmenter import CommitTrigger, Segmenter
 from app.providers.base import ASRResult
 
@@ -19,9 +19,8 @@ def final(text: str, at: float) -> ASRResult:
     return ASRResult(text=text, is_final=True, confidence=None, words=(), received_at=at)
 
 
-def make(rules: object = ENGLISH) -> Segmenter:
-    assert rules is ENGLISH or rules is HEBREW
-    return Segmenter(CFG, rules)  # type: ignore[arg-type]
+def make(rules: LanguageRules = ENGLISH) -> Segmenter:
+    return Segmenter(CFG, rules)
 
 
 class TestAsrFinalTrigger:

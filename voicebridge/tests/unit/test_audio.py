@@ -8,7 +8,6 @@ import pytest
 from app.audio.codecs import mulaw_decode, mulaw_encode
 from app.audio.frames import AudioFormatError, AudioFrame, require_internal
 from app.audio.resample import StreamResampler
-
 from tests.support.fakes import EnergyVad, silence_frame, speech_frame
 
 
@@ -59,9 +58,9 @@ class TestStreamResampler:
         chunked = b"".join(
             stream.process(signal[i : i + 320]) for i in range(0, len(signal), 320)
         ) + stream.process(b"", last=True)
-        one_shot = soxr.resample(
-            np.frombuffer(signal, dtype=np.int16), 8000, 16000
-        ).astype(np.int16)
+        one_shot = soxr.resample(np.frombuffer(signal, dtype=np.int16), 8000, 16000).astype(
+            np.int16
+        )
         chunked_arr = np.frombuffer(chunked, dtype=np.int16)
         assert abs(len(chunked_arr) - len(one_shot)) <= 16
         n = min(len(chunked_arr), len(one_shot))
