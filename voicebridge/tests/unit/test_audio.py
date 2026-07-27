@@ -46,25 +46,64 @@ class TestStreamResampler:
         total_out += len(resampler.process(b"", last=True)) // 2
         assert 5 * 160 * 2 * 0.95 <= total_out <= 5 * 160 * 2 * 1.05
 
-    def test_chunked_stream_matches_one_shot_resample(self) -> None:
+    def test_chunked_stream_matches_single_pass(self) -> None:
         # Statefulness is the point: 20 ms chunks through the stream must
-        # produce the same signal as resampling the whole buffer at once.
-        # A per-chunk stateless resample would show seam artifacts here.
+        # produce the same signal as one pass over the whole buffer. A
+        # stateless per-chunk filter would show seam artifacts here.
         import numpy as np
-        import soxr
 
         signal = sine_pcm(1600, 8000, 440.0, amplitude=9000)
         stream = StreamResampler(8000, 16000)
         chunked = b"".join(
             stream.process(signal[i : i + 320]) for i in range(0, len(signal), 320)
         ) + stream.process(b"", last=True)
-        one_shot = soxr.resample(np.frombuffer(signal, dtype=np.int16), 8000, 16000).astype(
-            np.int16
-        )
-        chunked_arr = np.frombuffer(chunked, dtype=np.int16)
-        assert abs(len(chunked_arr) - len(one_shot)) <= 16
-        n = min(len(chunked_arr), len(one_shot))
-        assert int(np.abs(chunked_arr[:n].astype(np.int32) - one_shot[:n]).max()) < 100
+        single = StreamResampler(8000, 16000).process(signal, last=True)
+        a = np.frombuffer(chunked, dtype=np.int16).astype(np.int32)
+        b = np.frombuffer(single, dtype=np.int16).astype(np.int32)
+        assert len(a) == len(b)
+        assert int(np.abs(a - b).max()) <= 1
+
+    def test_realtime_latency_is_bounded(self) -> None:
+        # The soxr stream API was rejected for emitting nothing for ~100 ms
+        # (see module docstring); this pins the replacement's behavior.
+        resampler = StreamResampler(8000, 16000)
+        fed = 0
+        got = 0
+        for _ in range(10):  # 200 ms of audio in 20 ms chunks
+            chunk = sine_pcm(160, 8000, 440.0, amplitude=8000)
+            fed += 160
+            got += len(resampler.process(chunk)) // 2
+        deficit_ms = (fed * 2 - got) / 32.0
+        assert deficit_ms < 4.0, f"held {deficit_ms:.1f} ms"
+
+    def test_telephony_band_snr_after_upsampling(self) -> None:
+        import math as m
+
+        import numpy as np
+
+        def multitone(rate: int, samples: int) -> "np.ndarray[tuple[int], np.dtype[np.float64]]":
+            n = np.arange(samples)
+            tones = (
+                2000 * np.sin(2 * m.pi * 300 * n / rate)
+                + 1500 * np.sin(2 * m.pi * 1200 * n / rate)
+                + 800 * np.sin(2 * m.pi * 3300 * n / rate)
+            )
+            return np.asarray(tones, dtype=np.float64)
+
+        source = multitone(8000, 8000).astype(np.int16)
+        out = StreamResampler(8000, 16000).process(source.tobytes(), last=True)
+        got = np.frombuffer(out, dtype=np.int16).astype(np.float64)
+        ideal = multitone(16000, len(got) + 31)
+        delay = 31  # (TAPS - 1) / 2 at 16 kHz
+        got_mid = got[delay + 200 : -200]
+        ideal_mid = ideal[200 : 200 + len(got_mid)]
+        noise = got_mid - ideal_mid
+        snr_db = 10 * m.log10(float(np.mean(ideal_mid**2) / np.mean(noise**2)))
+        assert snr_db > 50.0, f"SNR {snr_db:.1f} dB"
+
+    def test_rejects_unsupported_ratios(self) -> None:
+        with pytest.raises(ValueError, match="8 kHz"):
+            StreamResampler(22050, 16000)
 
 
 class TestFrameAssertions:
