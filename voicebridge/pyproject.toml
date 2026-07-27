@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",
     "numpy>=1.26",
-    "soxr>=0.4",
 ]
 
 [dependency-groups]
@@ -34,7 +33,7 @@ python_version = "3.12"
 files = ["app", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["soxr", "torch", "silero_vad"]
+module = ["torch", "silero_vad"]
 ignore_missing_imports = true
 
 [tool.ruff]
