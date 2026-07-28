@@ -29,7 +29,7 @@ if [[ -z "$TOKEN" || -z "$DOMAIN" ]]; then
 
       NGROK_AUTHTOKEN=...        dashboard.ngrok.com -> Your Authtoken
       NGROK_DOMAIN=...           dashboard.ngrok.com -> Domains -> Create Domain
-                                 (looks like  something-static.ngrok-free.app)
+                                 (looks like  some-words.ngrok-free.dev)
 
 MSG
   exit 1
@@ -46,6 +46,11 @@ if ! command -v ngrok >/dev/null 2>&1; then
 fi
 NGROK="$(command -v ngrok)"
 
+# Accept the domain with or without a scheme; ngrok wants the full URL.
+DOMAIN="${DOMAIN#https://}"
+DOMAIN="${DOMAIN#http://}"
+DOMAIN="${DOMAIN%/}"
+
 echo "[2/4] registering the token"
 "$NGROK" config add-authtoken "$TOKEN" >/dev/null
 
@@ -58,7 +63,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$NGROK http 8080 --url=$DOMAIN --log=stdout
+ExecStart=$NGROK http 8080 --url=https://$DOMAIN --log=stdout
 Restart=always
 RestartSec=5
 
