@@ -1,4 +1,4 @@
-.PHONY: setup check-env run tunnel test lint
+.PHONY: setup check-env preflight run tunnel test lint
 
 # uv installs to ~/.local/bin, which is not on PATH until the shell is
 # restarted — look there too so `make run` works in the same session that
@@ -23,6 +23,9 @@ setup:
 # exit code call scripts/check_env.py directly.
 check-env:
 	@python3 scripts/check_env.py || true
+
+preflight:
+	@"$(UV)" run python scripts/preflight.py || true
 
 run:
 	@test -x "$(UV)" || { echo "uv is missing — run 'make setup' first"; exit 1; }
