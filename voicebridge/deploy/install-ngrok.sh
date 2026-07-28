@@ -88,6 +88,13 @@ if curl -fsS --max-time 15 "https://$DOMAIN/health" | grep -q "^ok"; then
 
 DONE
 else
-  echo "  the address did not answer yet — check: journalctl -u ngrok -n 30" >&2
+  # Print the reason here rather than making the operator go find it: ngrok
+  # states the cause as an ERR_NGROK_xxxx code in its own log.
+  echo
+  echo "  $DOMAIN did not answer. ngrok said:" >&2
+  echo >&2
+  journalctl -u ngrok -n 25 --no-pager >&2 || true
+  echo >&2
+  echo "  service state: $(systemctl is-active ngrok)" >&2
   exit 1
 fi
