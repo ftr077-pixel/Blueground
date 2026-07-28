@@ -41,6 +41,7 @@ class Segmenter:
         self._seen_at: list[float] = []
         self._partial_count: list[int] = []
         self._committed = 0
+        self._committed_tokens: list[str] = []
 
     # --- events ------------------------------------------------------------
 
@@ -63,9 +64,7 @@ class Segmenter:
     # --- trigger 1: ASR endpoint -------------------------------------------
 
     def _commit_final(self, tokens: list[str], now_ms: float) -> Commit | None:
-        # Alignment with committed text is by token count, not content: if the
-        # final revised words we already committed, those revisions are lost to
-        # the audio channel by design (ADR-005).
+        self._align(tokens)
         remainder = tokens[self._committed :]
         self._reset_utterance()
         if not remainder:
@@ -87,9 +86,31 @@ class Segmenter:
         self._tokens = tokens
         self._seen_at = seen_at
         self._partial_count = partial_count
-        # A hypothesis can shrink below what we already committed; the
-        # committed pointer never moves backwards (ADR-005).
-        self._committed = min(self._committed, len(tokens))
+        self._align(tokens)
+
+    def _align(self, tokens: list[str]) -> None:
+        """Re-anchor the committed pointer against a new hypothesis.
+
+        The pointer is a position, but what it means is "these exact words have
+        already been spoken". Measured on a live call: when the ASR ends one
+        utterance and starts the next, the new hypothesis re-uses the same
+        positions for entirely different words, and a bare index let that text
+        through as though it had been committed — one Hebrew sentence was
+        translated four times in overlapping pieces.
+        """
+        committed = self._committed_tokens
+        if tokens[: len(committed)] == committed:
+            self._committed = len(committed)
+            return
+        if committed[: len(tokens)] == tokens:
+            # A revision that shrank back inside committed text. The pointer
+            # cannot run past the hypothesis, but the words stay committed
+            # (ADR-005) and are re-anchored when the hypothesis grows back.
+            self._committed = len(tokens)
+            return
+        # Nothing in common: a new utterance re-using the old positions.
+        self._committed_tokens = []
+        self._committed = 0
 
     def _try_stability(self, now_ms: float) -> Commit | None:
         stable_len = self._committed
@@ -131,6 +152,7 @@ class Segmenter:
         text = " ".join(self._tokens[self._committed : end])
         if not text:
             return None
+        self._committed_tokens = self._tokens[:end]
         self._committed = end
         return self._make_commit(text, trigger, now_ms)
 
@@ -148,3 +170,4 @@ class Segmenter:
         self._seen_at = []
         self._partial_count = []
         self._committed = 0
+        self._committed_tokens = []

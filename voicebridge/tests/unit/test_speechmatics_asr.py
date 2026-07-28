@@ -228,7 +228,7 @@ class TestProtocol:
         dialer = FakeDialer()
         client = SpeechmaticsASR(
             dialer,
-            SpeechmaticsConfig(api_key="k", utterance_end_silence_s=0.05),
+            SpeechmaticsConfig(api_key="k", utterance_end_silence_s=0.05, max_delay_s=0.05),
             heartbeat_interval_s=0.05,
             heartbeat_timeout_s=30.0,
             max_redials=0,
@@ -348,3 +348,48 @@ class TestStreamLeaks:
         await client.close()
         await client.close()
         assert dialer.sockets[0].closed
+
+
+class TestUtteranceBoundaries:
+    """Measured on a live call: sentences were cut into pieces and each piece
+    translated on its own, then the pieces overlapped. Both come from the
+    local utterance-end fallback firing between the chunks of one sentence."""
+
+    def test_the_settle_timeout_outlasts_the_vendors_chunk_cadence(self) -> None:
+        config = SpeechmaticsConfig(api_key="k", max_delay_s=3.0, utterance_end_silence_s=0.6)
+        # A finalised chunk may legitimately be max_delay behind the speech,
+        # so anything shorter cuts a sentence at every chunk boundary.
+        assert config.settle_timeout_ms > config.max_delay_s * 1000.0
+
+    async def test_a_partial_only_utterance_still_reports_its_end(self) -> None:
+        """The segmenter learns an utterance ended only from is_final. If the
+        vendor ends one before finalising any chunk, staying silent leaves the
+        segmenter anchored to the previous sentence and it re-emits text it
+        already committed."""
+        dialer = FakeDialer()
+        client = SpeechmaticsASR(
+            dialer,
+            SpeechmaticsConfig(api_key="k", utterance_end_silence_s=0.05, max_delay_s=0.05),
+            heartbeat_interval_s=0.05,
+            heartbeat_timeout_s=30.0,
+            max_redials=0,
+            redial_base_delay_s=0.01,
+        )
+        await client.open("he", ASROptions())
+        dialer.sockets[0].push(transcript_message("שלום חבר", is_final=False))
+        results = await collect(client, 2, timeout_s=3.0)
+        assert results[0].is_final is False
+        assert results[-1].is_final is True
+        assert results[-1].text == "שלום חבר"
+        await client.close()
+
+    async def test_end_of_utterance_reports_a_partial_only_utterance(self) -> None:
+        dialer = FakeDialer()
+        client = make_client(dialer)
+        await client.open("he", ASROptions())
+        dialer.sockets[0].push(transcript_message("רק חלקי", is_final=False))
+        dialer.sockets[0].push(json.dumps({"message": "EndOfUtterance"}))
+        results = await collect(client, 2)
+        assert results[-1].is_final is True
+        assert results[-1].text == "רק חלקי"
+        await client.close()

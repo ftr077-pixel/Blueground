@@ -161,14 +161,29 @@ class TestVadSilenceTrigger:
 class TestCommitFinality:
     """ADR-005: committed text is never re-emitted, even when the ASR revises it."""
 
-    def test_final_that_revises_committed_words_only_emits_the_tail(self) -> None:
+    def test_final_that_keeps_committed_words_only_emits_the_tail(self) -> None:
+        seg = make()
+        seg.on_asr_result(partial("hello there,", 0.0), 0.0)
+        seg.on_asr_result(partial("hello there, how", 100.0), 100.0)
+        assert seg.poll(500.0) is not None
+        commit = seg.on_asr_result(final("hello there, how are you", 900.0), 900.0)
+        assert commit is not None
+        assert commit.text == "how are you"
+
+    def test_a_final_that_contradicts_committed_words_is_a_new_utterance(self) -> None:
+        """The deliberate trade-off in _align: a hypothesis that no longer
+        starts with the committed words is treated as the next utterance, so
+        an in-place revision of committed words is re-emitted rather than
+        dropped. Measured on a live call, an unannounced utterance boundary is
+        the common case and cost four translations of one sentence; a vendor
+        contradicting words it already finalised has not been observed."""
         seg = make()
         seg.on_asr_result(partial("hello there,", 0.0), 0.0)
         seg.on_asr_result(partial("hello there, how", 100.0), 100.0)
         assert seg.poll(500.0) is not None
         commit = seg.on_asr_result(final("hi there, how are you", 900.0), 900.0)
         assert commit is not None
-        assert commit.text == "how are you"
+        assert commit.text == "hi there, how are you"
 
     def test_correlation_ids_are_unique(self) -> None:
         seg = make()
@@ -195,3 +210,56 @@ class TestConfigurability:
         assert cfg.max_uncommitted_ms == 9000.0
         assert cfg.vad_silence_ms == 250.0
         assert cfg.min_stable_partials == 2
+
+
+class TestCommittedTextIsNeverReEmitted:
+    """Measured on a live call: one Hebrew sentence produced four overlapping
+    commits and the caller heard the same words translated four times.
+
+    The committed pointer was a bare index into the current hypothesis. When
+    the ASR ends one utterance and starts the next, the hypothesis restarts
+    from a short prefix and that index silently points into the *new* text, so
+    everything after it was committed a second time."""
+
+    def test_a_restarted_hypothesis_does_not_re_emit_committed_text(self) -> None:
+        seg = make(HEBREW)
+        seg.on_asr_result(partial("אני הגעתי לדירה ואין פה מפתח.", 0.0), 0.0)
+        seg.on_asr_result(partial("אני הגעתי לדירה ואין פה מפתח.", 100.0), 100.0)
+        first = seg.poll(500.0)
+        assert first is not None
+        assert first.text == "אני הגעתי לדירה ואין פה מפתח."
+
+        # The ASR closes that utterance and starts a new one from scratch.
+        seg.on_asr_result(partial("אני", 600.0), 600.0)
+        seg.on_asr_result(partial("אני לא מבין מה לעשות.", 700.0), 700.0)
+        seg.on_asr_result(partial("אני לא מבין מה לעשות.", 800.0), 800.0)
+        second = seg.poll(1200.0)
+        assert second is not None
+        assert second.text == "אני לא מבין מה לעשות."
+
+    def test_a_final_after_a_partial_commit_emits_only_the_remainder(self) -> None:
+        seg = make()
+        seg.on_asr_result(partial("i arrived at the flat,", 0.0), 0.0)
+        seg.on_asr_result(partial("i arrived at the flat, and", 100.0), 100.0)
+        first = seg.poll(500.0)
+        assert first is not None
+        assert first.text == "i arrived at the flat,"
+        commit = seg.on_asr_result(
+            final("i arrived at the flat, and there is no key", 900.0), 900.0
+        )
+        assert commit is not None
+        assert commit.text == "and there is no key"
+
+    def test_a_shrinking_revision_still_never_repeats(self) -> None:
+        seg = make()
+        seg.on_asr_result(partial("one two three,", 0.0), 0.0)
+        seg.on_asr_result(partial("one two three,", 100.0), 100.0)
+        first = seg.poll(500.0)
+        assert first is not None and first.text == "one two three,"
+        # The hypothesis collapses to a shorter revision of the same prefix.
+        seg.on_asr_result(partial("one two", 600.0), 600.0)
+        seg.on_asr_result(partial("one two three, four five.", 700.0), 700.0)
+        seg.on_asr_result(partial("one two three, four five.", 800.0), 800.0)
+        second = seg.poll(1200.0)
+        assert second is not None
+        assert second.text == "four five."

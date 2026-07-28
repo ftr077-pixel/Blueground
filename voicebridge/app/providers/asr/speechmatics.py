@@ -101,6 +101,19 @@ class SpeechmaticsConfig:
             utterance_end_silence_s=float(e.get("SPEECHMATICS_UTTERANCE_END_S", "0.6")),
         )
 
+    @property
+    def settle_timeout_ms(self) -> float:
+        """Local fallback for a missing EndOfUtterance.
+
+        A finalised chunk may legitimately be ``max_delay`` behind the speech,
+        so a fallback shorter than that fires *between* the chunks of one
+        sentence instead of at its end. Measured on a live call at 0.6 s
+        against a 3.0 s max_delay: sentences were cut into pieces, each piece
+        was translated on its own, and the restarted hypothesis then made the
+        segmenter re-emit text it had already committed.
+        """
+        return (self.max_delay_s + self.utterance_end_silence_s) * 1000.0
+
     def auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
@@ -161,7 +174,8 @@ class SpeechmaticsASR:
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._finalised: list[str] = []
-        self._last_chunk_ms = 0.0
+        self._running_text = ""
+        self._last_transcript_ms = 0.0
 
     # --- ASRProvider --------------------------------------------------------
 
@@ -321,9 +335,8 @@ class SpeechmaticsASR:
             await asyncio.sleep(tick)
             if self._closing:
                 return
-            if self._finalised and monotonic_ms() - self._last_chunk_ms > (
-                self._config.utterance_end_silence_s * 1000.0
-            ):
+            settled = monotonic_ms() - self._last_transcript_ms > self._config.settle_timeout_ms
+            if (self._finalised or self._running_text) and settled:
                 self._close_utterance()
             if self._ws is None:
                 continue
@@ -337,20 +350,33 @@ class SpeechmaticsASR:
         if result is None:
             return
         self._finalised.append(result.text)
-        self._last_chunk_ms = monotonic_ms()
-        self._queue.put_nowait(self._running(result, is_final=False))
+        self._emit_running(self._running(result, is_final=False))
 
     def _on_partial(self, message: Any) -> None:
         result = self._parse_transcript(message, is_final=False)
         if result is None:
             return
-        self._queue.put_nowait(self._running(result, is_final=False, tail=result.text))
+        self._emit_running(self._running(result, is_final=False, tail=result.text))
+
+    def _emit_running(self, result: ASRResult) -> None:
+        # Only a *change* refreshes the settle clock: a vendor that repeats the
+        # same hypothesis while nobody is speaking must not hold the utterance
+        # open for the length of the call.
+        if result.text != self._running_text:
+            self._running_text = result.text
+            self._last_transcript_ms = monotonic_ms()
+        self._queue.put_nowait(result)
 
     def _close_utterance(self) -> None:
-        if not self._finalised:
-            return
-        text = " ".join(self._finalised)
+        # An utterance that ended before any chunk was finalised still has to
+        # be announced: is_final is the only way the segmenter learns that the
+        # next hypothesis is a new sentence, and without it the segmenter stays
+        # anchored to the previous one and re-emits text it already committed.
+        text = " ".join(self._finalised) if self._finalised else self._running_text
         self._finalised = []
+        self._running_text = ""
+        if not text:
+            return
         self._queue.put_nowait(
             ASRResult(
                 text=text,
