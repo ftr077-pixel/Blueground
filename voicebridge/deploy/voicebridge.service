@@ -1,0 +1,19 @@
+[Unit]
+Description=VoiceBridge call translation gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/blueground/voicebridge
+ExecStart=/root/.local/bin/uv run uvicorn app.api.main:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=3
+# Reading .env is the server's own job (app/api/main.py), so the unit stays
+# free of secrets and this file is safe to commit.
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
