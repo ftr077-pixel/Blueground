@@ -20,10 +20,18 @@ dead socket (CLAUDE.md). Recovery is redial + re-StartRecognition; the vendor
 keeps no state we need to replay, and partials lost across the gap are
 absorbed by the segmenter's timeout and VAD triggers.
 
-Verified against the live API on 2026-07-28 via ``make preflight``: the
-StartRecognition handshake is accepted for Hebrew. Transcript parsing and
-reconnect behaviour are still only exercised against a fake — confirm those
-on the first real call.
+``AddTranscript`` carries only the words finalised since the previous one,
+not the whole utterance — measured on a live call, "אני רוצה להזמין חדר"
+arrived as four separate finals. The §6.2 contract the segmenter is written
+against says a final is a completed utterance, so this client accumulates the
+chunks and reports the running text; ``is_final`` is set only when the
+utterance genuinely ends. Without that, the segmenter commits the sentence
+once from its stability window and then again word by word, and the caller
+hears the translation twice.
+
+Verified against the live API on 2026-07-28: the StartRecognition handshake
+is accepted for Hebrew and transcripts arrive as described above. Reconnect
+behaviour is still only exercised against a fake.
 """
 
 import asyncio
@@ -53,6 +61,10 @@ class SpeechmaticsConfig:
     api_key: str
     endpoint: str = DEFAULT_ENDPOINT
     operating_point: str = "enhanced"
+    utterance_end_silence_s: float = 0.6
+    """Silence that ends an utterance. Sent to the vendor when it supports
+    EndOfUtterance, and used as the local fallback timeout either way."""
+
     max_delay_s: float = 3.0
     """How long the vendor may wait before finalising a chunk.
 
@@ -76,6 +88,7 @@ class SpeechmaticsConfig:
             endpoint=e.get("SPEECHMATICS_ENDPOINT", DEFAULT_ENDPOINT),
             operating_point=e.get("SPEECHMATICS_OPERATING_POINT", "enhanced"),
             max_delay_s=float(e.get("SPEECHMATICS_MAX_DELAY_S", "3.0")),
+            utterance_end_silence_s=float(e.get("SPEECHMATICS_UTTERANCE_END_S", "0.6")),
         )
 
     def auth_headers(self) -> dict[str, str]:
@@ -91,6 +104,9 @@ class SpeechmaticsConfig:
         if opts.keyterms:
             config["additional_vocab"] = [{"content": term} for term in opts.keyterms]
         return {
+            "conversation_config": {
+                "end_of_utterance_silence_trigger": self.utterance_end_silence_s
+            },
             "message": "StartRecognition",
             "audio_format": {
                 "type": "raw",
@@ -130,6 +146,8 @@ class SpeechmaticsASR:
         self._last_rx_ms = 0.0
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._finalised: list[str] = []
+        self._last_chunk_ms = 0.0
 
     # --- ASRProvider --------------------------------------------------------
 
@@ -254,10 +272,12 @@ class SpeechmaticsASR:
                 continue
             message = json.loads(raw)
             kind = message.get("message")
-            if kind in ("AddTranscript", "AddPartialTranscript"):
-                result = self._parse_transcript(message, is_final=kind == "AddTranscript")
-                if result is not None:
-                    self._queue.put_nowait(result)
+            if kind == "AddTranscript":
+                self._on_chunk(message)
+            elif kind == "AddPartialTranscript":
+                self._on_partial(message)
+            elif kind == "EndOfUtterance":
+                self._close_utterance()
             elif kind == "Error":
                 self._error = AsrStreamError(str(message.get("reason") or message.get("type")))
                 break
@@ -265,15 +285,63 @@ class SpeechmaticsASR:
         self._queue.put_nowait(None)
 
     async def _heartbeat(self) -> None:
+        # Also the utterance-end fallback: if the vendor does not send
+        # EndOfUtterance, a settled buffer must still close, or the running
+        # text grows for the length of the call.
+        tick = min(self._heartbeat_interval_s, self._config.utterance_end_silence_s / 2)
         while not self._closing:
-            await asyncio.sleep(self._heartbeat_interval_s)
+            await asyncio.sleep(tick)
             if self._closing:
                 return
+            if self._finalised and monotonic_ms() - self._last_chunk_ms > (
+                self._config.utterance_end_silence_s * 1000.0
+            ):
+                self._close_utterance()
             if self._ws is None:
                 continue
             if monotonic_ms() - self._last_rx_ms > self._heartbeat_timeout_s * 1000.0:
                 with contextlib.suppress(AsrStreamError):
                     await self._reconnect(self._generation)
+
+    def _on_chunk(self, message: Any) -> None:
+        """A finalised fragment, not a finished utterance."""
+        result = self._parse_transcript(message, is_final=False)
+        if result is None:
+            return
+        self._finalised.append(result.text)
+        self._last_chunk_ms = monotonic_ms()
+        self._queue.put_nowait(self._running(result, is_final=False))
+
+    def _on_partial(self, message: Any) -> None:
+        result = self._parse_transcript(message, is_final=False)
+        if result is None:
+            return
+        self._queue.put_nowait(self._running(result, is_final=False, tail=result.text))
+
+    def _close_utterance(self) -> None:
+        if not self._finalised:
+            return
+        text = " ".join(self._finalised)
+        self._finalised = []
+        self._queue.put_nowait(
+            ASRResult(
+                text=text,
+                is_final=True,
+                confidence=None,
+                words=(),
+                received_at=monotonic_ms(),
+            )
+        )
+
+    def _running(self, result: ASRResult, is_final: bool, tail: str = "") -> ASRResult:
+        parts = [*self._finalised, tail] if tail else list(self._finalised)
+        return ASRResult(
+            text=" ".join(part for part in parts if part),
+            is_final=is_final,
+            confidence=result.confidence,
+            words=result.words,
+            received_at=result.received_at,
+        )
 
     def _parse_transcript(self, message: Any, is_final: bool) -> ASRResult | None:
         metadata = message.get("metadata") or {}

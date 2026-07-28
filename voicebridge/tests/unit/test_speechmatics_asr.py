@@ -137,6 +137,7 @@ class TestConfig:
         assert config["language"] == "he"
         assert config["enable_partials"] is True
         assert config["additional_vocab"] == [{"content": "Blueground"}]
+        assert message["conversation_config"] == {"end_of_utterance_silence_trigger": 0.6}
 
     def test_auth_header_and_env(self) -> None:
         assert CONFIG.auth_headers() == {"Authorization": "Bearer k"}
@@ -150,7 +151,7 @@ class TestConfig:
 
 
 class TestProtocol:
-    async def test_handshake_then_hebrew_partial_and_final(self) -> None:
+    async def test_partials_and_chunks_report_the_running_utterance(self) -> None:
         dialer = FakeDialer()
         client = make_client(dialer)
         await client.open("he", ASROptions())
@@ -160,11 +161,60 @@ class TestProtocol:
         dialer.sockets[0].push(transcript_message("שלום חבר", is_final=True))
         results = await collect(client, 2)
         assert [r.text for r in results] == ["שלום", "שלום חבר"]
-        assert [r.is_final for r in results] == [False, True]
-        assert results[1].confidence == pytest.approx(0.9)
-        # Punctuation entries are not words.
-        assert [w.text for w in results[1].words] == ["שלום", "חבר"]
-        assert results[1].words[1].start_ms == pytest.approx(300.0)
+        # A finalised chunk is not the end of an utterance.
+        assert [r.is_final for r in results] == [False, False]
+        await client.close()
+
+    async def test_incremental_chunks_accumulate_instead_of_repeating(self) -> None:
+        # Measured on a live call: "אני רוצה להזמין חדר" arrives as four
+        # separate finals. Reporting each on its own made the segmenter
+        # commit the sentence twice and the caller heard it twice.
+        dialer = FakeDialer()
+        client = make_client(dialer)
+        await client.open("he", ASROptions())
+        for word in ("אני", "רוצה", "להזמין", "חדר"):
+            dialer.sockets[0].push(transcript_message(word, is_final=True))
+        results = await collect(client, 4)
+        assert [r.text for r in results] == [
+            "אני",
+            "אני רוצה",
+            "אני רוצה להזמין",
+            "אני רוצה להזמין חדר",
+        ]
+        assert not any(r.is_final for r in results)
+        await client.close()
+
+    async def test_end_of_utterance_finalises_the_accumulated_text(self) -> None:
+        dialer = FakeDialer()
+        client = make_client(dialer)
+        await client.open("he", ASROptions())
+        dialer.sockets[0].push(transcript_message("אני", is_final=True))
+        dialer.sockets[0].push(transcript_message("רוצה", is_final=True))
+        dialer.sockets[0].push(json.dumps({"message": "EndOfUtterance"}))
+        results = await collect(client, 3)
+        assert results[-1].text == "אני רוצה"
+        assert results[-1].is_final is True
+        # The next utterance starts empty rather than repeating the last one.
+        dialer.sockets[0].push(transcript_message("שלום", is_final=True))
+        more = await collect(client, 1)
+        assert more[0].text == "שלום"
+        await client.close()
+
+    async def test_a_settled_buffer_closes_without_end_of_utterance(self) -> None:
+        dialer = FakeDialer()
+        client = SpeechmaticsASR(
+            dialer,
+            SpeechmaticsConfig(api_key="k", utterance_end_silence_s=0.05),
+            heartbeat_interval_s=0.05,
+            heartbeat_timeout_s=30.0,
+            max_redials=0,
+            redial_base_delay_s=0.01,
+        )
+        await client.open("he", ASROptions())
+        dialer.sockets[0].push(transcript_message("שלום", is_final=True))
+        results = await collect(client, 2, timeout_s=3.0)
+        assert results[-1].is_final is True
+        assert results[-1].text == "שלום"
         await client.close()
 
     async def test_empty_transcript_is_dropped(self) -> None:
