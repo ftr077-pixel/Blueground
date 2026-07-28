@@ -36,7 +36,10 @@ class CallTrace:
     events: list[Event] = field(default_factory=list)
 
     def emit(self, event: Event) -> None:
-        if event.name == "call_started":
+        # Reset on the session ID, not on ``call_started``: a call that dies
+        # during setup never reaches that event, and its errors must not be
+        # filed under the previous call.
+        if event.session_id != self.session_id:
             self.session_id = event.session_id
             self.events = []
         if len(self.events) < MAX_EVENTS:

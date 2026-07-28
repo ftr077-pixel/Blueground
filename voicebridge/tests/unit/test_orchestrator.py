@@ -6,12 +6,15 @@ reaching any ASR input."""
 import asyncio
 from dataclasses import dataclass
 
+import pytest
+
 from app.config import DuplexConfig, SegmenterConfig
 from app.observability.events import EventBus, EventRecorder
 from app.pipeline.languages import ENGLISH, HEBREW
 from app.pipeline.orchestrator import DirectionPipeline, SessionOrchestrator
 from app.pipeline.segmenter import Segmenter
 from app.providers.base import (
+    ASROptions,
     ASRResult,
     Glossary,
     Tier,
@@ -274,3 +277,49 @@ async def test_translator_failure_emits_error_and_call_survives() -> None:
 
     assert s.recorder.named("error")[0].payload["stage"] == "mt_tts"
     assert s.recorder.events[-1].name == "call_ended"
+
+
+class RefusingASR(ScriptedASR):
+    """A vendor that rejects the stream at open, the way Speechmatics answers
+    a call once the account's concurrent-stream limit is reached."""
+
+    async def open(self, language: str, opts: ASROptions) -> None:
+        raise ConnectionError("Concurrent Quota Exceeded")
+
+
+async def test_a_call_that_cannot_start_still_closes_the_streams_it_opened() -> None:
+    """Every stream left open holds a slot in the vendor's concurrency limit,
+    so a call that dies at open must not leak the streams that did open —
+    otherwise one failure makes every later call fail too."""
+    s = await build_session(caller_script=[], operator_script=[], table={})
+    refusing = RefusingASR([])
+    s.orchestrator._pipelines = (
+        s.orchestrator._pipelines[0],
+        DirectionPipeline(
+            direction="b2a",
+            source_lang="en",
+            target_lang="he",
+            asr=refusing,
+            vad=EnergyVad(),
+            segmenter=Segmenter(SEG_CFG, ENGLISH),
+            tts=s.tts_b2a,
+            voice=VoiceSpec(voice_id="he-neutral", language="he"),
+        ),
+    )
+    with pytest.raises(ConnectionError, match="Concurrent Quota Exceeded"):
+        await s.orchestrator.run()
+    assert s.caller_asr.closed
+    assert s.recorder.named("call_ended") == []
+
+
+async def test_a_call_that_dies_mid_stream_closes_the_streams() -> None:
+    s = await build_session(caller_script=[], operator_script=[], table={})
+
+    async def explode() -> None:
+        raise RuntimeError("telephony leg died")
+
+    s.orchestrator._pump_audio = lambda p: explode()  # type: ignore[method-assign]
+    with pytest.raises(BaseExceptionGroup):
+        await s.orchestrator.run()
+    assert s.caller_asr.closed
+    assert s.operator_asr.closed

@@ -34,6 +34,7 @@ from app.observability.events import EventBus, JsonLinesSink
 from app.observability.trace import CallTrace
 from app.telephony.base import CallContext
 from app.telephony.twilio import TwilioAdapter
+from app.transport import MessageStream
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONSOLE_PAGE = REPO_ROOT / "app" / "console" / "index.html"
@@ -148,7 +149,7 @@ async def twilio_socket(ws: WebSocket) -> None:
             await caller.close()
 
 
-async def _run_call(caller: ServerSocket, operator: WaitingOperator) -> None:
+async def _run_call(caller: MessageStream, operator: WaitingOperator) -> None:
     session_id = uuid.uuid4().hex
     feed = OperatorFeed()
     trace = app.state.trace
@@ -161,13 +162,22 @@ async def _run_call(caller: ServerSocket, operator: WaitingOperator) -> None:
         operator_language=OPERATOR_LANGUAGE,
     )
     legs = await adapter.accept_call(context)
-    session = await build_session(adapter, legs, context, events)
+    try:
+        session = await build_session(adapter, legs, context, events)
+    except Exception as exc:
+        # A vendor refusing the session (bad key, quota, unknown voice) must
+        # leave a trace, or /debug/last-call shows an empty call and the reason
+        # lives only in the journal.
+        events.emit("error", stage="session_setup", detail=repr(exc))
+        log.exception("call %s could not start", session_id, exc_info=exc)
+        return
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(_pump_feed(feed, operator))
             tg.create_task(_run_and_stop_feed(session.orchestrator.run(), feed))
     except* Exception as group:
         for error in group.exceptions:
+            events.emit("error", stage="call", detail=repr(error))
             log.exception("call %s failed", session_id, exc_info=error)
     finally:
         await session.aclose()

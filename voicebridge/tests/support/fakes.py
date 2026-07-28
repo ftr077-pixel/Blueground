@@ -152,6 +152,7 @@ class ScriptedASR:
         self._task: asyncio.Task[None] | None = None
         self.pushed_frames: list[AudioFrame] = []
         self.language: str | None = None
+        self.closed = False
 
     async def open(self, language: str, opts: ASROptions) -> None:
         self.language = language
@@ -183,6 +184,7 @@ class ScriptedASR:
             yield item
 
     async def close(self) -> None:
+        self.closed = True
         if self._task is not None:
             await self._task
             self._task = None

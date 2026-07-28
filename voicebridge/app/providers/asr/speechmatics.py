@@ -32,6 +32,10 @@ hears the translation twice.
 Verified against the live API on 2026-07-28: the StartRecognition handshake
 is accepted for Hebrew and transcripts arrive as described above. Reconnect
 behaviour is still only exercised against a fake.
+
+The handshake is schema-checked strictly and the whole message is rejected
+over one misplaced field, so every addition to it goes through preflight
+against the live API before it goes near a call.
 """
 
 import asyncio
@@ -54,6 +58,12 @@ DEFAULT_ENDPOINT = "wss://eu2.rt.speechmatics.com/v2"
 
 class AsrStreamError(ConnectionError):
     pass
+
+
+class AsrRejected(AsrStreamError):
+    """The vendor answered the handshake with an error. Distinct from a
+    transport failure because redialling cannot change the answer — and each
+    redial holds another stream against the account's concurrency limit."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +101,19 @@ class SpeechmaticsConfig:
             utterance_end_silence_s=float(e.get("SPEECHMATICS_UTTERANCE_END_S", "0.6")),
         )
 
+    @property
+    def settle_timeout_ms(self) -> float:
+        """Local fallback for a missing EndOfUtterance.
+
+        A finalised chunk may legitimately be ``max_delay`` behind the speech,
+        so a fallback shorter than that fires *between* the chunks of one
+        sentence instead of at its end. Measured on a live call at 0.6 s
+        against a 3.0 s max_delay: sentences were cut into pieces, each piece
+        was translated on its own, and the restarted hypothesis then made the
+        segmenter re-emit text it had already committed.
+        """
+        return (self.max_delay_s + self.utterance_end_silence_s) * 1000.0
+
     def auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
@@ -100,13 +123,17 @@ class SpeechmaticsConfig:
             "operating_point": self.operating_point,
             "enable_partials": True,
             "max_delay": self.max_delay_s,
+            # Nested here, not at the top level of StartRecognition: the vendor
+            # rejects the whole handshake with "Additional property
+            # conversation_config is not allowed" if it sits beside
+            # transcription_config.
+            "conversation_config": {
+                "end_of_utterance_silence_trigger": self.utterance_end_silence_s
+            },
         }
         if opts.keyterms:
             config["additional_vocab"] = [{"content": term} for term in opts.keyterms]
         return {
-            "conversation_config": {
-                "end_of_utterance_silence_trigger": self.utterance_end_silence_s
-            },
             "message": "StartRecognition",
             "audio_format": {
                 "type": "raw",
@@ -147,7 +174,8 @@ class SpeechmaticsASR:
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._finalised: list[str] = []
-        self._last_chunk_ms = 0.0
+        self._running_text = ""
+        self._last_transcript_ms = 0.0
 
     # --- ASRProvider --------------------------------------------------------
 
@@ -175,6 +203,8 @@ class SpeechmaticsASR:
         return self._results()
 
     async def close(self) -> None:
+        if self._closing:
+            return
         self._closing = True
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
@@ -214,6 +244,11 @@ class SpeechmaticsASR:
     async def _dial_and_start(self) -> MessageStream:
         delay = self._redial_base_delay_s
         for attempt in range(self._max_redials + 1):
+            # Every path out of the handshake except success must close this
+            # socket. A half-open stream is not free: it counts against the
+            # account's concurrent-stream limit until the vendor times it out,
+            # so a leak here makes the *next* call fail as well.
+            ws: MessageStream | None = None
             try:
                 ws = await self._dial()
                 await ws.send(json.dumps(self._config.start_message(self._language, self._opts)))
@@ -227,14 +262,21 @@ class SpeechmaticsASR:
                     kind = message.get("message")
                     if kind == "RecognitionStarted":
                         self._seq_no = 0
-                        return ws
+                        started, ws = ws, None  # ownership passes to the caller
+                        return started
                     if kind == "Error":
-                        raise AsrStreamError(str(message.get("reason") or message.get("type")))
+                        raise AsrRejected(str(message.get("reason") or message.get("type")))
+            except AsrRejected:
+                raise
             except (OSError, ConnectionError) as exc:
                 if attempt >= self._max_redials:
                     raise AsrStreamError(f"asr dial failed after {attempt + 1} attempts") from exc
                 await asyncio.sleep(delay)
                 delay *= 2
+            finally:
+                if ws is not None:
+                    with contextlib.suppress(OSError, ConnectionError):
+                        await ws.close()
         raise AsrStreamError("unreachable")
 
     async def _reconnect(self, seen_generation: int) -> None:
@@ -293,9 +335,8 @@ class SpeechmaticsASR:
             await asyncio.sleep(tick)
             if self._closing:
                 return
-            if self._finalised and monotonic_ms() - self._last_chunk_ms > (
-                self._config.utterance_end_silence_s * 1000.0
-            ):
+            settled = monotonic_ms() - self._last_transcript_ms > self._config.settle_timeout_ms
+            if (self._finalised or self._running_text) and settled:
                 self._close_utterance()
             if self._ws is None:
                 continue
@@ -309,20 +350,33 @@ class SpeechmaticsASR:
         if result is None:
             return
         self._finalised.append(result.text)
-        self._last_chunk_ms = monotonic_ms()
-        self._queue.put_nowait(self._running(result, is_final=False))
+        self._emit_running(self._running(result, is_final=False))
 
     def _on_partial(self, message: Any) -> None:
         result = self._parse_transcript(message, is_final=False)
         if result is None:
             return
-        self._queue.put_nowait(self._running(result, is_final=False, tail=result.text))
+        self._emit_running(self._running(result, is_final=False, tail=result.text))
+
+    def _emit_running(self, result: ASRResult) -> None:
+        # Only a *change* refreshes the settle clock: a vendor that repeats the
+        # same hypothesis while nobody is speaking must not hold the utterance
+        # open for the length of the call.
+        if result.text != self._running_text:
+            self._running_text = result.text
+            self._last_transcript_ms = monotonic_ms()
+        self._queue.put_nowait(result)
 
     def _close_utterance(self) -> None:
-        if not self._finalised:
-            return
-        text = " ".join(self._finalised)
+        # An utterance that ended before any chunk was finalised still has to
+        # be announced: is_final is the only way the segmenter learns that the
+        # next hypothesis is a new sentence, and without it the segmenter stays
+        # anchored to the previous one and re-emits text it already committed.
+        text = " ".join(self._finalised) if self._finalised else self._running_text
         self._finalised = []
+        self._running_text = ""
+        if not text:
+            return
         self._queue.put_nowait(
             ASRResult(
                 text=text,

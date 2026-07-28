@@ -65,9 +65,28 @@ class TestSummary:
         trace, bus = record()
         bus.emit("call_started")
         bus.emit("segment_committed", direction="a2b", correlation_id="old", text="old")
+        # A new call means a new session ID, which is what resets the trace.
+        second = EventBus("s2", (trace,))
+        second.emit("call_started")
+        second.emit("segment_committed", direction="a2b", correlation_id="new", text="new")
+        summary = trace.summary()
+        assert summary["session_id"] == "s2"
+        assert [t["source"] for t in summary["turns"]] == ["new"]
+
+    def test_a_call_that_dies_before_call_started_still_reports_its_error(self) -> None:
+        """Setup failures (bad key, quota, unknown voice) arrive before
+        ``call_started``; they must replace the previous call, not append to it."""
+        trace, bus = record()
         bus.emit("call_started")
-        bus.emit("segment_committed", direction="a2b", correlation_id="new", text="new")
-        assert [t["source"] for t in trace.summary()["turns"]] == ["new"]
+        bus.emit("segment_committed", direction="a2b", correlation_id="old", text="old")
+        failed = EventBus("s2", (trace,))
+        failed.emit("error", stage="session_setup", detail="RuntimeError('quota')")
+        summary = trace.summary()
+        assert summary["session_id"] == "s2"
+        assert summary["turns"] == []
+        assert summary["errors"] == [
+            {"stage": "session_setup", "detail": "RuntimeError('quota')", "name": "error"}
+        ]
 
     def test_empty_trace_does_not_explode(self) -> None:
         trace = CallTrace()
