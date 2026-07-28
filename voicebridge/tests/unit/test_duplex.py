@@ -4,17 +4,22 @@ human, stale-drop, and ordering. Real asyncio, fake TTS and sinks."""
 import asyncio
 import functools
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
+from app.audio.frames import AudioFrame
 from app.config import DuplexConfig
 from app.observability.events import EventBus, EventRecorder, monotonic_ms
 from app.pipeline.duplex import DirectionState, DuplexController, Utterance
-from app.providers.base import VoiceSpec
+from app.providers.base import Synthesis, SynthesisHandle, VoiceSpec
 from app.types import Direction
 from tests.support.fakes import FakeTTS, marker_of, tts_marker, wait_until
 
 VOICE = VoiceSpec(voice_id="test", language="en")
+
+
+async def _noop() -> None:
+    return None
 
 
 @dataclass
@@ -175,3 +180,33 @@ async def test_barge_in_without_active_playback_is_not_an_event() -> None:
         h.controller.close()
     assert h.recorder.named("barge_in") == []
     assert h.recorder.named("tts_cancelled") == []
+
+
+async def test_a_failed_synthesis_does_not_stop_the_queue() -> None:
+    """A vendor rejecting one utterance must not end the call: the error is
+    reported and the next utterance still plays."""
+    h = make_harness()
+    tts = FakeTTS(frame_count=2, ttfa_ms=1.0, frame_interval_ms=1.0)
+
+    async def exploding() -> AsyncIterator[AudioFrame]:
+        raise RuntimeError("Invalid language for model")
+        yield  # pragma: no cover
+
+    broken = Utterance(
+        correlation_id="bad",
+        text="boom",
+        synthesis=Synthesis(handle=SynthesisHandle(id="bad"), frames=exploding()),
+        cancel=_noop,
+    )
+    async with asyncio.TaskGroup() as tg:
+        h.controller.start(tg)
+        await h.controller.submit("a2b", broken)
+        await h.controller.submit("a2b", utterance(tts, "after the failure"))
+        await wait_until(lambda: len(h.sent) == 2)
+        h.controller.close()
+
+    errors = h.recorder.named("error")
+    assert len(errors) == 1
+    assert errors[0].payload["stage"] == "tts_playback"
+    assert all(m == tts_marker("after the failure") for _, m in h.sent)
+    assert h.controller.state("a2b") is DirectionState.IDLE

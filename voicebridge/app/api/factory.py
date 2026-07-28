@@ -58,20 +58,21 @@ def _hebrew_asr(env: Mapping[str, str] | None) -> SpeechmaticsASR:
     return SpeechmaticsASR(functools.partial(dial, config.endpoint, config.auth_headers()), config)
 
 
-def _english_asr(env: Mapping[str, str] | None) -> ASRProvider:
-    """Deepgram when its key is configured, Speechmatics otherwise.
+def _english_asr(env: Mapping[str, str] | None) -> ASRProvider | None:
+    """Deepgram for the operator side, or nothing.
 
-    ADR-003 prefers Deepgram for English on partial-result cadence, but the
-    per-language choice is config-driven by design — and a missing optional
-    key must never take a call down.
+    Measured on a live call: pointing both directions at Speechmatics opens
+    two concurrent streams and a starter plan allows one, so every call died
+    with 'Concurrent Quota Exceeded'. Without a second vendor the honest
+    behaviour is M0's half-duplex (SPEC §9) rather than a call that cannot
+    start. ADR-003 wanted Deepgram here anyway.
     """
     e = os.environ if env is None else env
-    if e.get("DEEPGRAM_API_KEY"):
-        config = DeepgramConfig.from_env(env)
-        url = config.stream_url(OPERATOR_LANGUAGE, ASROptions())
-        return DeepgramASR(functools.partial(dial, url, config.auth_headers()))
-    sm = SpeechmaticsConfig.from_env(env)
-    return SpeechmaticsASR(functools.partial(dial, sm.endpoint, sm.auth_headers()), sm)
+    if not e.get("DEEPGRAM_API_KEY"):
+        return None
+    config = DeepgramConfig.from_env(env)
+    url = config.stream_url(OPERATOR_LANGUAGE, ASROptions())
+    return DeepgramASR(functools.partial(dial, url, config.auth_headers()))
 
 
 async def build_session(
@@ -89,7 +90,8 @@ async def build_session(
     translator = OpenAITranslator(OpenAIConfig.from_env(env))
     segmenter_config = SegmenterConfig.from_env(env)
 
-    pipelines = (
+    english_asr = _english_asr(env)
+    pipelines = [
         DirectionPipeline(
             direction="a2b",
             source_lang=CALLER_LANGUAGE,
@@ -99,18 +101,21 @@ async def build_session(
             segmenter=Segmenter(segmenter_config, HEBREW),
             tts=tts,
             voice=VoiceSpec(voice_id=voices.english_voice_id, language=OPERATOR_LANGUAGE),
-        ),
-        DirectionPipeline(
-            direction="b2a",
-            source_lang=OPERATOR_LANGUAGE,
-            target_lang=CALLER_LANGUAGE,
-            asr=_english_asr(env),
-            vad=EnergyVad(),
-            segmenter=Segmenter(segmenter_config, ENGLISH),
-            tts=tts,
-            voice=VoiceSpec(voice_id=voices.hebrew_voice_id, language=CALLER_LANGUAGE),
-        ),
-    )
+        )
+    ]
+    if english_asr is not None:
+        pipelines.append(
+            DirectionPipeline(
+                direction="b2a",
+                source_lang=OPERATOR_LANGUAGE,
+                target_lang=CALLER_LANGUAGE,
+                asr=english_asr,
+                vad=EnergyVad(),
+                segmenter=Segmenter(segmenter_config, ENGLISH),
+                tts=tts,
+                voice=VoiceSpec(voice_id=voices.hebrew_voice_id, language=CALLER_LANGUAGE),
+            )
+        )
     orchestrator = SessionOrchestrator(
         session_id=context.session_id,
         adapter=adapter,

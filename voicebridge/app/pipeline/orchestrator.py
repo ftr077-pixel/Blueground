@@ -12,8 +12,10 @@ at the byte level.
 """
 
 import asyncio
+import contextlib
 import functools
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.audio.frames import AudioFrame, require_internal
@@ -54,7 +56,7 @@ class SessionOrchestrator:
         session_id: str,
         adapter: TelephonyAdapter,
         legs: CallLegs,
-        pipelines: tuple[DirectionPipeline, DirectionPipeline],
+        pipelines: Sequence[DirectionPipeline],
         translator: Translator,
         events: EventBus,
         segmenter_config: SegmenterConfig,
@@ -114,7 +116,15 @@ class SessionOrchestrator:
             consumers = [tg.create_task(self._consume_asr(p)) for p in self._pipelines]
             tg.create_task(self._ticker())
             pumps = [tg.create_task(self._pump_audio(p)) for p in self._pipelines]
-            tg.create_task(self._supervise(pumps, consumers, workers))
+            # A side with no pipeline still streams audio at us; left unread it
+            # fills the socket buffer and eventually stalls the connection.
+            translated = {source_side(p.direction) for p in self._pipelines}
+            drains = [
+                tg.create_task(self._discard_audio(leg))
+                for leg in (self._legs.caller, self._legs.operator)
+                if leg.side not in translated
+            ]
+            tg.create_task(self._supervise([*pumps, *drains], consumers, workers))
         self._events.emit("call_ended")
 
     async def _supervise(
@@ -160,6 +170,11 @@ class SessionOrchestrator:
                     await self._enqueue_commit(p, commit)
                 await self.duplex.on_vad_offset(side)
             await p.asr.push(frame)
+
+    async def _discard_audio(self, leg: Leg) -> None:
+        with contextlib.suppress(Exception):
+            async for _ in self._adapter.inbound_audio(leg):
+                pass
 
     async def _consume_asr(self, p: DirectionPipeline) -> None:
         async for result in p.asr.results():
