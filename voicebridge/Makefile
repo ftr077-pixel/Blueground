@@ -1,4 +1,4 @@
-.PHONY: setup check-env preflight dev run tunnel test lint
+.PHONY: setup check-env preflight dev run tunnel test lint deploy
 
 # uv installs to ~/.local/bin, which is not on PATH until the shell is
 # restarted — look there too so `make run` works in the same session that
@@ -36,6 +36,11 @@ run:
 
 tunnel:
 	@cloudflared tunnel --url http://localhost:8080
+
+# Box-side only: pull the merged branch and restart the service. A pull on
+# its own leaves the old code running.
+deploy:
+	@./deploy/deploy.sh
 
 test:
 	@"$(UV)" run pytest -q
