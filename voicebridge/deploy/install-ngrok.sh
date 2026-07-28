@@ -35,6 +35,28 @@ MSG
   exit 1
 fi
 
+# The dashboard shows several values and only one of them works. A wrong one
+# is accepted here and then fails inside the agent as ERR_NGROK_105, with the
+# value printed into the system journal — so it is rejected up front instead.
+case "$TOKEN" in
+  cr_*|ak_*|"")
+    cat >&2 <<MSG
+
+  NGROK_AUTHTOKEN looks wrong: values starting with cr_ or ak_ are a
+  credential ID or an API key, not an authtoken.
+
+  Take the one from:  https://dashboard.ngrok.com/get-started/your-authtoken
+  It is a long string starting with a digit and containing an underscore.
+
+MSG
+    exit 1
+    ;;
+esac
+if (( ${#TOKEN} < 30 )); then
+  echo "  NGROK_AUTHTOKEN is only ${#TOKEN} characters — that is not an authtoken" >&2
+  exit 1
+fi
+
 echo "[1/4] installing ngrok"
 if ! command -v ngrok >/dev/null 2>&1; then
   curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
