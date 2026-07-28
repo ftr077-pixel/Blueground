@@ -5,10 +5,12 @@ instead of during a live call. Values are never printed or logged — only the
 variable name and a verdict, because this output gets pasted into chats.
 """
 
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 
 class Status(StrEnum):
@@ -112,6 +114,23 @@ def parse_env_file(text: str) -> dict[str, str]:
             raw = raw[1:-1]
         values[key] = raw
     return values
+
+
+def load_env_file(path: Path, environ: dict[str, str] | None = None) -> list[str]:
+    """Merge a .env file into the process environment and return the names set.
+
+    Real environment variables win: a value exported by the shell or the
+    deployment platform must not be silently overridden by a stale file.
+    """
+    target = os.environ if environ is None else environ
+    if not path.exists():
+        return []
+    loaded: list[str] = []
+    for key, value in parse_env_file(path.read_text(encoding="utf-8")).items():
+        if value and key not in target:
+            target[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def check(values: Mapping[str, str], rules: Iterable[Rule] = RULES) -> list[Result]:

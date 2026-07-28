@@ -1,7 +1,17 @@
 """Config-check tests, including the one that matters most: the report must
 never leak a secret, because its output gets pasted into chats."""
 
-from app.env_check import RULES, Report, Status, blocking, check, parse_env_file
+from pathlib import Path
+
+from app.env_check import (
+    RULES,
+    Report,
+    Status,
+    blocking,
+    check,
+    load_env_file,
+    parse_env_file,
+)
 
 FILLED = {
     "TWILIO_ACCOUNT_SID": "AC" + "0" * 32,
@@ -74,8 +84,6 @@ class TestCheck:
         assert host.status is Status.MALFORMED
 
     def test_example_file_shape_matches_the_rules(self) -> None:
-        from pathlib import Path
-
         example = Path(__file__).resolve().parents[2] / ".env.example"
         keys = parse_env_file(example.read_text(encoding="utf-8"))
         for rule in RULES:
@@ -104,3 +112,22 @@ class TestNoSecretLeak:
         rendered = Report(check(FILLED | {"OPENAI_API_KEY": "leaky-wrong-value"})).render()
         assert "leaky-wrong-value" not in rendered
         assert "OPENAI_API_KEY" in rendered
+
+
+class TestLoadEnvFile:
+    def test_missing_file_is_not_an_error(self, tmp_path: Path) -> None:
+        assert load_env_file(tmp_path / "nope.env", {}) == []
+
+    def test_values_are_merged(self, tmp_path: Path) -> None:
+        path = tmp_path / ".env"
+        path.write_text("A=1\nB=2\nEMPTY=\n", encoding="utf-8")
+        target: dict[str, str] = {}
+        assert sorted(load_env_file(path, target)) == ["A", "B"]
+        assert target == {"A": "1", "B": "2"}
+
+    def test_real_environment_wins_over_the_file(self, tmp_path: Path) -> None:
+        path = tmp_path / ".env"
+        path.write_text("KEY=from-file\n", encoding="utf-8")
+        target = {"KEY": "from-environment"}
+        assert load_env_file(path, target) == []
+        assert target["KEY"] == "from-environment"
