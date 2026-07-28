@@ -18,7 +18,7 @@ from app.pipeline.orchestrator import DirectionPipeline, SessionOrchestrator
 from app.pipeline.segmenter import Segmenter
 from app.providers.asr.deepgram import DeepgramASR, DeepgramConfig
 from app.providers.asr.speechmatics import SpeechmaticsASR, SpeechmaticsConfig
-from app.providers.base import ASROptions, VoiceSpec
+from app.providers.base import ASROptions, ASRProvider, VoiceSpec
 from app.providers.mt.openai_chat import OpenAIConfig, OpenAITranslator
 from app.providers.tts.cartesia import CartesiaConfig, CartesiaTTS
 from app.telephony.base import CallContext, CallLegs
@@ -58,10 +58,20 @@ def _hebrew_asr(env: Mapping[str, str] | None) -> SpeechmaticsASR:
     return SpeechmaticsASR(functools.partial(dial, config.endpoint, config.auth_headers()), config)
 
 
-def _english_asr(env: Mapping[str, str] | None) -> DeepgramASR:
-    config = DeepgramConfig.from_env(env)
-    url = config.stream_url(OPERATOR_LANGUAGE, ASROptions())
-    return DeepgramASR(functools.partial(dial, url, config.auth_headers()))
+def _english_asr(env: Mapping[str, str] | None) -> ASRProvider:
+    """Deepgram when its key is configured, Speechmatics otherwise.
+
+    ADR-003 prefers Deepgram for English on partial-result cadence, but the
+    per-language choice is config-driven by design — and a missing optional
+    key must never take a call down.
+    """
+    e = os.environ if env is None else env
+    if e.get("DEEPGRAM_API_KEY"):
+        config = DeepgramConfig.from_env(env)
+        url = config.stream_url(OPERATOR_LANGUAGE, ASROptions())
+        return DeepgramASR(functools.partial(dial, url, config.auth_headers()))
+    sm = SpeechmaticsConfig.from_env(env)
+    return SpeechmaticsASR(functools.partial(dial, sm.endpoint, sm.auth_headers()), sm)
 
 
 async def build_session(

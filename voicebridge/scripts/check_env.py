@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.env_check import Report, blocking, check, parse_env_file  # noqa: E402
+from app.env_check import Report, blocking, check, parse_env_file
 
 
 def main() -> int:
