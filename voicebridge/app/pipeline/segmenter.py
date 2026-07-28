@@ -17,6 +17,11 @@ from app.pipeline.languages import CLAUSE_PUNCTUATION, LanguageRules
 from app.providers.base import ASRResult
 
 
+def _bare(token: str) -> str:
+    """A token without the punctuation the ASR attaches when it finalises."""
+    return token.rstrip("".join(CLAUSE_PUNCTUATION))
+
+
 class CommitTrigger(StrEnum):
     ASR_FINAL = "asr_final"
     STABILITY = "stability"
@@ -98,15 +103,20 @@ class Segmenter:
         through as though it had been committed — one Hebrew sentence was
         translated four times in overlapping pieces.
         """
-        committed = self._committed_tokens
-        if tokens[: len(committed)] == committed:
+        # Compared on words alone: the vendor attaches the closing punctuation
+        # only when it finalises, so "עליך" and "עליך." are the same spoken
+        # word. Measured on a live call, comparing them literally made three of
+        # seven delivered turns duplicates of the turn before them.
+        committed = [_bare(token) for token in self._committed_tokens]
+        words = [_bare(token) for token in tokens]
+        if words[: len(committed)] == committed:
             self._committed = len(committed)
             return
-        if committed[: len(tokens)] == tokens:
+        if committed[: len(words)] == words:
             # A revision that shrank back inside committed text. The pointer
             # cannot run past the hypothesis, but the words stay committed
             # (ADR-005) and are re-anchored when the hypothesis grows back.
-            self._committed = len(tokens)
+            self._committed = len(words)
             return
         # Nothing in common: a new utterance re-using the old positions.
         self._committed_tokens = []
