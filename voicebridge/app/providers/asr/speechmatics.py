@@ -32,6 +32,10 @@ hears the translation twice.
 Verified against the live API on 2026-07-28: the StartRecognition handshake
 is accepted for Hebrew and transcripts arrive as described above. Reconnect
 behaviour is still only exercised against a fake.
+
+The handshake is schema-checked strictly and the whole message is rejected
+over one misplaced field, so every addition to it goes through preflight
+against the live API before it goes near a call.
 """
 
 import asyncio
@@ -106,13 +110,17 @@ class SpeechmaticsConfig:
             "operating_point": self.operating_point,
             "enable_partials": True,
             "max_delay": self.max_delay_s,
+            # Nested here, not at the top level of StartRecognition: the vendor
+            # rejects the whole handshake with "Additional property
+            # conversation_config is not allowed" if it sits beside
+            # transcription_config.
+            "conversation_config": {
+                "end_of_utterance_silence_trigger": self.utterance_end_silence_s
+            },
         }
         if opts.keyterms:
             config["additional_vocab"] = [{"content": term} for term in opts.keyterms]
         return {
-            "conversation_config": {
-                "end_of_utterance_silence_trigger": self.utterance_end_silence_s
-            },
             "message": "StartRecognition",
             "audio_format": {
                 "type": "raw",

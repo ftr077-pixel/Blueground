@@ -158,7 +158,10 @@ class TestConfig:
         assert config["language"] == "he"
         assert config["enable_partials"] is True
         assert config["additional_vocab"] == [{"content": "Blueground"}]
-        assert message["conversation_config"] == {"end_of_utterance_silence_trigger": 0.6}
+        # Inside transcription_config: at the top level the vendor rejects the
+        # whole StartRecognition message.
+        assert config["conversation_config"] == {"end_of_utterance_silence_trigger": 0.6}
+        assert "conversation_config" not in message
 
     def test_auth_header_and_env(self) -> None:
         assert CONFIG.auth_headers() == {"Authorization": "Bearer k"}
