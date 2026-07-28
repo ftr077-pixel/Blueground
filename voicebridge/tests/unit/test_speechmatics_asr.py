@@ -142,7 +142,11 @@ class TestConfig:
         assert CONFIG.auth_headers() == {"Authorization": "Bearer k"}
         with pytest.raises(RuntimeError, match="SPEECHMATICS_API_KEY"):
             SpeechmaticsConfig.from_env({})
-        assert SpeechmaticsConfig.from_env({"SPEECHMATICS_API_KEY": "k"}).max_delay_s == 1.0
+        assert SpeechmaticsConfig.from_env({"SPEECHMATICS_API_KEY": "k"}).max_delay_s == 3.0
+        override = SpeechmaticsConfig.from_env(
+            {"SPEECHMATICS_API_KEY": "k", "SPEECHMATICS_MAX_DELAY_S": "1.5"}
+        )
+        assert override.max_delay_s == 1.5
 
 
 class TestProtocol:

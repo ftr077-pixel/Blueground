@@ -53,9 +53,17 @@ class SpeechmaticsConfig:
     api_key: str
     endpoint: str = DEFAULT_ENDPOINT
     operating_point: str = "enhanced"
-    max_delay_s: float = 1.0
-    """Vendor-side endpointing delay. Lower is faster and less accurate; this
-    is tuned against the §8.2 fixtures alongside the ADR-004 thresholds."""
+    max_delay_s: float = 3.0
+    """How long the vendor may wait before finalising a chunk.
+
+    This is NOT an utterance detector: AddTranscript arrives on this timer
+    whether or not the speaker has finished, so a low value chops a sentence
+    into single words and each fragment gets translated on its own. Measured
+    on the first live call at 1.0 s, "היי, מה העניינים" arrived as two
+    commits and came out as "Hi, what" + "the matters".
+
+    3.0 s is a starting point, not a tuned value — the real number comes from
+    the §8.2 fixture corpus."""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "SpeechmaticsConfig":
@@ -67,7 +75,7 @@ class SpeechmaticsConfig:
             api_key=api_key,
             endpoint=e.get("SPEECHMATICS_ENDPOINT", DEFAULT_ENDPOINT),
             operating_point=e.get("SPEECHMATICS_OPERATING_POINT", "enhanced"),
-            max_delay_s=float(e.get("SPEECHMATICS_MAX_DELAY_S", "1.0")),
+            max_delay_s=float(e.get("SPEECHMATICS_MAX_DELAY_S", "3.0")),
         )
 
     def auth_headers(self) -> dict[str, str]:
