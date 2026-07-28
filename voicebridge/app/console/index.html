@@ -43,6 +43,7 @@ const stateEl = document.getElementById('state');
 const logEl = document.getElementById('log');
 
 let ws, micCtx, playCtx, playHead = 0, node, stream;
+let wanted = false, attempt = 0, retryTimer = null;
 const scheduled = new Set();
 
 function setState(text) { stateEl.textContent = text; }
@@ -126,7 +127,22 @@ function makeContext() {
   }
 }
 
+function scheduleRetry() {
+  // The socket closes at the end of every call, and a server restart drops
+  // it too. Reconnecting by hand each time is how a call gets missed, so the
+  // page redials on its own and only reports trouble if it cannot.
+  if (!wanted || retryTimer) return;
+  const delay = Math.min(1000 * 2 ** attempt, 15000);
+  attempt += 1;
+  setState('reconnecting in ' + Math.round(delay / 1000) + 's…');
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    openSocket().catch(() => scheduleRetry());
+  }, delay);
+}
+
 async function connect() {
+  wanted = true;
   joinBtn.disabled = true;
   setState('requesting microphone…');
   stream = await navigator.mediaDevices.getUserMedia({
@@ -138,7 +154,10 @@ async function connect() {
   micCtx = makeContext();
   playCtx = makeContext();
   await micCtx.resume();
+  await openSocket();
+}
 
+async function openSocket() {
   setState('connecting…');
   const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/operator';
   ws = new WebSocket(url);
@@ -147,7 +166,9 @@ async function connect() {
   ws.onerror = () => setState('connection failed — is the server running?');
 
   ws.onopen = () => {
+    attempt = 0;
     setState('waiting for a call (' + Math.round(micCtx.sampleRate) + ' Hz mic)');
+    if (node) node.disconnect();
     const source = micCtx.createMediaStreamSource(stream);
     node = micCtx.createScriptProcessor(BUFFER, 1, 1);
     node.onaudioprocess = (e) => {
@@ -171,10 +192,15 @@ async function connect() {
   };
 
   ws.onclose = () => {
-    setState('disconnected');
-    joinBtn.disabled = false;
     if (node) node.disconnect();
-    if (stream) stream.getTracks().forEach((t) => t.stop());
+    flushPlayback();
+    if (wanted) {
+      scheduleRetry();
+    } else {
+      setState('disconnected');
+      joinBtn.disabled = false;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    }
   };
 }
 

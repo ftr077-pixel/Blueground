@@ -155,7 +155,18 @@ class DuplexController:
                         age_ms=age_ms,
                     )
                     continue
-                await self._play(direction, queued.utterance)
+                try:
+                    await self._play(direction, queued.utterance)
+                except Exception as exc:
+                    self._state[direction] = DirectionState.IDLE
+                    self._active[direction] = None
+                    self._events.emit(
+                        "error",
+                        direction=direction,
+                        correlation_id=queued.utterance.correlation_id,
+                        stage="tts_playback",
+                        detail=repr(exc),
+                    )
             if self._closed:
                 return
 

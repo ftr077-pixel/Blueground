@@ -139,7 +139,13 @@ async def twilio_socket(ws: WebSocket) -> None:
     try:
         await _run_call(caller, operator)
     finally:
+        # One socket per call: the console reconnects and re-registers, which
+        # leaves no half-alive registration behind when a call ends badly.
         operator.released.set()
+        with contextlib.suppress(Exception):
+            await operator.ws.close()
+        with contextlib.suppress(Exception):
+            await caller.close()
 
 
 async def _run_call(caller: ServerSocket, operator: WaitingOperator) -> None:
