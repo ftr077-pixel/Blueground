@@ -64,6 +64,27 @@ async def check_deepgram(env: Mapping[str, str] | None = None) -> Check | None:
     return Check("Deepgram (en)", True, "stream opened")
 
 
+def _http_detail(exc: Exception) -> str:
+    """Pull the vendor's own error code out of the body.
+
+    A bare status is misleading here: OpenAI answers both 'you are going too
+    fast' and 'this account has no credit' with 429, and the two need
+    completely different fixes.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return f"{type(exc).__name__}: {exc}"
+    try:
+        error = response.json().get("error", {})
+    except Exception:
+        return f"HTTP {response.status_code}"
+    code = str(error.get("code") or error.get("type") or "")
+    message = str(error.get("message") or "")[:160]
+    if code == "insufficient_quota":
+        return f"HTTP {response.status_code} {code} — the account has no credit balance"
+    return f"HTTP {response.status_code} {code} {message}".strip()
+
+
 async def check_openai(env: Mapping[str, str] | None = None) -> Check:
     translator: OpenAITranslator | None = None
     try:
@@ -74,7 +95,7 @@ async def check_openai(env: Mapping[str, str] | None = None) -> Check:
         if not result.text.strip():
             return Check("OpenAI (mt)", False, "empty translation")
     except Exception as exc:
-        return Check("OpenAI (mt)", False, f"{type(exc).__name__}: {exc}")
+        return Check("OpenAI (mt)", False, _http_detail(exc))
     finally:
         if translator is not None:
             await translator.close()

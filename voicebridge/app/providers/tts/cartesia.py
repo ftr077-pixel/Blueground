@@ -18,9 +18,10 @@ impossible without it, so ``cancel`` both tells the vendor to stop billing
 and generating *and* immediately ends the local frame stream — the duplex
 controller must not wait for a vendor round trip to stop playing.
 
-UNVERIFIED against the live API: the message shapes above are implemented
-from the documented protocol and exercised against a fake. Confirm on the
-first real call before trusting the M0 numbers.
+Verified against the live API on 2026-07-28 via ``make preflight``: the
+connection, the synthesis request and the first audio chunk all behave as
+described. Cancellation and long-utterance streaming are still only exercised
+against a fake — confirm those on the first real call.
 """
 
 import asyncio

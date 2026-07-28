@@ -30,3 +30,42 @@ class TestOptionalVendors:
         assert result is not None
         assert result.ok is False
         assert result.vendor == "Deepgram (en)"
+
+
+class TestHttpDetail:
+    def test_insufficient_quota_is_explained_not_just_numbered(self) -> None:
+        import httpx
+
+        from app.preflight import _http_detail
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(
+            429,
+            json={"error": {"code": "insufficient_quota", "message": "quota"}},
+            request=request,
+        )
+        exc = httpx.HTTPStatusError("429", request=request, response=response)
+        detail = _http_detail(exc)
+        assert "insufficient_quota" in detail
+        assert "no credit balance" in detail
+
+    def test_real_rate_limit_is_not_mislabelled_as_billing(self) -> None:
+        import httpx
+
+        from app.preflight import _http_detail
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(
+            429,
+            json={"error": {"code": "rate_limit_exceeded", "message": "slow down"}},
+            request=request,
+        )
+        exc = httpx.HTTPStatusError("429", request=request, response=response)
+        detail = _http_detail(exc)
+        assert "rate_limit_exceeded" in detail
+        assert "no credit balance" not in detail
+
+    def test_non_http_errors_still_report_their_type(self) -> None:
+        from app.preflight import _http_detail
+
+        assert "ConnectionError" in _http_detail(ConnectionError("refused"))

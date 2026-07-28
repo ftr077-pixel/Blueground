@@ -20,8 +20,10 @@ dead socket (CLAUDE.md). Recovery is redial + re-StartRecognition; the vendor
 keeps no state we need to replay, and partials lost across the gap are
 absorbed by the segmenter's timeout and VAD triggers.
 
-UNVERIFIED against the live API: implemented from the documented protocol and
-exercised against a fake. Confirm on the first real call.
+Verified against the live API on 2026-07-28 via ``make preflight``: the
+StartRecognition handshake is accepted for Hebrew. Transcript parsing and
+reconnect behaviour are still only exercised against a fake — confirm those
+on the first real call.
 """
 
 import asyncio
