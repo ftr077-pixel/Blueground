@@ -56,6 +56,12 @@ class AsrStreamError(ConnectionError):
     pass
 
 
+class AsrRejected(AsrStreamError):
+    """The vendor answered the handshake with an error. Distinct from a
+    transport failure because redialling cannot change the answer — and each
+    redial holds another stream against the account's concurrency limit."""
+
+
 @dataclass(frozen=True, slots=True)
 class SpeechmaticsConfig:
     api_key: str
@@ -175,6 +181,8 @@ class SpeechmaticsASR:
         return self._results()
 
     async def close(self) -> None:
+        if self._closing:
+            return
         self._closing = True
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
@@ -214,6 +222,11 @@ class SpeechmaticsASR:
     async def _dial_and_start(self) -> MessageStream:
         delay = self._redial_base_delay_s
         for attempt in range(self._max_redials + 1):
+            # Every path out of the handshake except success must close this
+            # socket. A half-open stream is not free: it counts against the
+            # account's concurrent-stream limit until the vendor times it out,
+            # so a leak here makes the *next* call fail as well.
+            ws: MessageStream | None = None
             try:
                 ws = await self._dial()
                 await ws.send(json.dumps(self._config.start_message(self._language, self._opts)))
@@ -227,14 +240,21 @@ class SpeechmaticsASR:
                     kind = message.get("message")
                     if kind == "RecognitionStarted":
                         self._seq_no = 0
-                        return ws
+                        started, ws = ws, None  # ownership passes to the caller
+                        return started
                     if kind == "Error":
-                        raise AsrStreamError(str(message.get("reason") or message.get("type")))
+                        raise AsrRejected(str(message.get("reason") or message.get("type")))
+            except AsrRejected:
+                raise
             except (OSError, ConnectionError) as exc:
                 if attempt >= self._max_redials:
                     raise AsrStreamError(f"asr dial failed after {attempt + 1} attempts") from exc
                 await asyncio.sleep(delay)
                 delay *= 2
+            finally:
+                if ws is not None:
+                    with contextlib.suppress(OSError, ConnectionError):
+                        await ws.close()
         raise AsrStreamError("unreachable")
 
     async def _reconnect(self, seen_generation: int) -> None:

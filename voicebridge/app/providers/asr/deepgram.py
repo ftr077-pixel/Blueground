@@ -131,6 +131,8 @@ class DeepgramASR:
         return self._results()
 
     async def close(self) -> None:
+        if self._closing:
+            return
         self._closing = True
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()

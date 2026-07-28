@@ -106,26 +106,39 @@ class SessionOrchestrator:
 
     async def run(self) -> None:
         self._events.emit("call_started")
-        for pipeline in self._pipelines:
-            await pipeline.asr.open(pipeline.source_lang, ASROptions())
-        for leg in (self._legs.caller, self._legs.operator):
-            self._events.emit("leg_connected", side=leg.side)
-        async with asyncio.TaskGroup() as tg:
-            self.duplex.start(tg)
-            workers = [tg.create_task(self._translate_worker(p)) for p in self._pipelines]
-            consumers = [tg.create_task(self._consume_asr(p)) for p in self._pipelines]
-            tg.create_task(self._ticker())
-            pumps = [tg.create_task(self._pump_audio(p)) for p in self._pipelines]
-            # A side with no pipeline still streams audio at us; left unread it
-            # fills the socket buffer and eventually stalls the connection.
-            translated = {source_side(p.direction) for p in self._pipelines}
-            drains = [
-                tg.create_task(self._discard_audio(leg))
-                for leg in (self._legs.caller, self._legs.operator)
-                if leg.side not in translated
-            ]
-            tg.create_task(self._supervise([*pumps, *drains], consumers, workers))
+        try:
+            for pipeline in self._pipelines:
+                await pipeline.asr.open(pipeline.source_lang, ASROptions())
+            for leg in (self._legs.caller, self._legs.operator):
+                self._events.emit("leg_connected", side=leg.side)
+            async with asyncio.TaskGroup() as tg:
+                self.duplex.start(tg)
+                workers = [tg.create_task(self._translate_worker(p)) for p in self._pipelines]
+                consumers = [tg.create_task(self._consume_asr(p)) for p in self._pipelines]
+                tg.create_task(self._ticker())
+                pumps = [tg.create_task(self._pump_audio(p)) for p in self._pipelines]
+                # A side with no pipeline still streams audio at us; left unread
+                # it fills the socket buffer and eventually stalls the
+                # connection.
+                translated = {source_side(p.direction) for p in self._pipelines}
+                drains = [
+                    tg.create_task(self._discard_audio(leg))
+                    for leg in (self._legs.caller, self._legs.operator)
+                    if leg.side not in translated
+                ]
+                tg.create_task(self._supervise([*pumps, *drains], consumers, workers))
+        finally:
+            # The orderly drain in _supervise closes these on a healthy call,
+            # but a call that dies never reaches it, and a vendor stream that
+            # outlives its call holds a slot in the account's concurrency limit
+            # until the vendor times it out. Closing twice is a no-op.
+            await self._close_streams()
         self._events.emit("call_ended")
+
+    async def _close_streams(self) -> None:
+        for pipeline in self._pipelines:
+            with contextlib.suppress(Exception):
+                await pipeline.asr.close()
 
     async def _supervise(
         self,
@@ -137,8 +150,7 @@ class SessionOrchestrator:
         # commits translate -> playback stops. Each stage ends the next one's
         # input instead of cancelling it.
         await asyncio.gather(*pumps)
-        for pipeline in self._pipelines:
-            await pipeline.asr.close()
+        await self._close_streams()
         await asyncio.gather(*consumers)
         for queue in self._commit_queues.values():
             queue.put_nowait(None)
