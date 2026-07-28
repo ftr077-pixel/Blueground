@@ -20,26 +20,15 @@ telephony legs.
 import base64
 import json
 from collections.abc import AsyncIterator
-from typing import Protocol
 
 from app.audio.codecs import mulaw_decode, mulaw_encode
 from app.audio.frames import INTERNAL_SAMPLE_RATE, AudioFrame
 from app.audio.resample import StreamResampler
 from app.observability.events import monotonic_ms
 from app.telephony.base import CallContext, CallLegs, Leg
+from app.transport import MessageStream
 
 TWILIO_SAMPLE_RATE = 8000
-
-
-class MessageStream(Protocol):
-    """Minimal duplex message transport (a websocket, stripped to what we use).
-
-    ``recv`` returns ``None`` when the peer closes.
-    """
-
-    async def recv(self) -> str | bytes | None: ...
-    async def send(self, data: str | bytes) -> None: ...
-    async def close(self) -> None: ...
 
 
 class TwilioHandshakeError(ConnectionError):
