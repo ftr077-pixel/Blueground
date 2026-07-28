@@ -85,11 +85,12 @@ class TestOperatorFeed:
         feed = OperatorFeed()
         bus = EventBus("s1", (feed,))
         bus.emit("asr_partial", direction="a2b", text="שלום")
-        bus.emit("tts_first_audio", direction="a2b")  # not forwarded
+        bus.emit("leg_connected", side="caller")  # not forwarded
         bus.emit("mt_completed", direction="a2b", translated_text="Hello")
+        bus.emit("tts_first_audio", direction="a2b")
         lines = [feed.queue.get_nowait() for _ in range(feed.queue.qsize())]
         names = [json.loads(line)["name"] for line in lines if line is not None]
-        assert names == ["asr_partial", "mt_completed"]
+        assert names == ["asr_partial", "mt_completed", "tts_first_audio"]
 
     def test_a_stalled_console_never_blocks_emission(self) -> None:
         feed = OperatorFeed()
