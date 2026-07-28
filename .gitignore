@@ -16,8 +16,13 @@ __pycache__/
 .venv/
 scraper/.venv/
 
-# voicebridge (Twilio creds live here, never commit)
-voicebridge/.env
+# Secrets — never commit. Covers editor backups (.env.save, .env~) and
+# per-environment copies (.env.local) as well as the file itself.
+# .env.example is the blank template and stays tracked.
+.env
+.env.*
+.env~
+!.env.example
 
 # PriceLabs PDF drop folder (operator's downloaded reports, not source)
 scraper/pricelabs-inbox/

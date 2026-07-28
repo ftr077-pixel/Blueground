@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VoiceBridge — operator</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+         background: #111; color: #eee; }
+  header { padding: 16px 20px; border-bottom: 1px solid #2a2a2a;
+           display: flex; align-items: center; gap: 16px; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  button { font: inherit; padding: 8px 18px; border-radius: 6px; border: 0;
+           background: #2f6f4f; color: #fff; cursor: pointer; }
+  button[disabled] { opacity: .45; cursor: default; }
+  #state { font-variant-numeric: tabular-nums; color: #9a9a9a; }
+  #log { padding: 16px 20px; margin: 0; list-style: none; }
+  #log li { padding: 6px 0; border-bottom: 1px solid #1e1e1e;
+            display: grid; grid-template-columns: 90px 60px 1fr; gap: 12px; }
+  .name { color: #7a7a7a; }
+  .dir  { color: #5a8fb5; }
+  .a2b  { color: #8fd6a8; }
+  .b2a  { color: #d6c98f; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VoiceBridge operator</h1>
+  <button id="join">Connect</button>
+  <span id="state">idle</span>
+</header>
+<ul id="log"></ul>
+
+<script>
+const RATE = 16000;          // ADR-002: everything is 16 kHz mono PCM16
+const FRAME = 320;           // 20 ms
+
+const joinBtn = document.getElementById('join');
+const stateEl = document.getElementById('state');
+const logEl = document.getElementById('log');
+
+let ws, micCtx, playCtx, playHead = 0, node, stream;
+
+function setState(text) { stateEl.textContent = text; }
+
+function addLine(event) {
+  const li = document.createElement('li');
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = event.name;
+  const dir = document.createElement('span');
+  dir.className = 'dir ' + (event.direction || '');
+  dir.textContent = event.direction || '';
+  const text = document.createElement('span');
+  text.className = event.direction || '';
+  text.textContent = event.translated_text || event.text || event.detail || '';
+  li.append(name, dir, text);
+  logEl.prepend(li);
+  while (logEl.children.length > 300) logEl.lastChild.remove();
+}
+
+function floatToPcm16(samples) {
+  const out = new DataView(new ArrayBuffer(samples.length * 2));
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    out.setInt16(i * 2, clamped * 0x7fff, true);
+  }
+  return out.buffer;
+}
+
+function playPcm16(buffer) {
+  const view = new DataView(buffer);
+  const frames = buffer.byteLength / 2;
+  if (!frames) return;
+  const audio = playCtx.createBuffer(1, frames, RATE);
+  const channel = audio.getChannelData(0);
+  for (let i = 0; i < frames; i++) channel[i] = view.getInt16(i * 2, true) / 0x8000;
+  const source = playCtx.createBufferSource();
+  source.buffer = audio;
+  source.connect(playCtx.destination);
+  // Keep a small lead so chunks butt up against each other without gaps.
+  playHead = Math.max(playHead, playCtx.currentTime + 0.05);
+  source.start(playHead);
+  playHead += audio.duration;
+}
+
+function flushPlayback() {
+  // Barge-in: drop whatever has not been heard yet.
+  playHead = 0;
+  playCtx.close().then(() => {
+    playCtx = new AudioContext({ sampleRate: RATE });
+  });
+}
+
+async function connect() {
+  joinBtn.disabled = true;
+  setState('requesting microphone…');
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true,
+             autoGainControl: true, sampleRate: RATE },
+  });
+
+  micCtx = new AudioContext({ sampleRate: RATE });
+  playCtx = new AudioContext({ sampleRate: RATE });
+
+  const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/operator';
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setState('waiting for a call');
+    const source = micCtx.createMediaStreamSource(stream);
+    node = micCtx.createScriptProcessor(FRAME * 4, 1, 1);
+    node.onaudioprocess = (e) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(floatToPcm16(e.inputBuffer.getChannelData(0)));
+    };
+    source.connect(node);
+    node.connect(micCtx.destination);
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const event = JSON.parse(e.data);
+      if (event.event === 'clear') { flushPlayback(); return; }
+      setState('on a call');
+      addLine(event);
+      return;
+    }
+    playPcm16(e.data);
+  };
+
+  ws.onclose = () => {
+    setState('disconnected');
+    joinBtn.disabled = false;
+    if (node) node.disconnect();
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+  };
+}
+
+joinBtn.addEventListener('click', () => { connect().catch((err) => {
+  setState('error: ' + err.message);
+  joinBtn.disabled = false;
+}); });
+</script>
+</body>
+</html>
