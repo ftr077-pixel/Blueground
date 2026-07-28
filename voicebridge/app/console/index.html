@@ -34,13 +34,16 @@
 
 <script>
 const RATE = 16000;          // ADR-002: everything is 16 kHz mono PCM16
-const FRAME = 320;           // 20 ms
+// createScriptProcessor only accepts powers of two. 1024 frames at 16 kHz
+// is 64 ms of capture latency, which fits the §5 budget.
+const BUFFER = 1024;
 
 const joinBtn = document.getElementById('join');
 const stateEl = document.getElementById('state');
 const logEl = document.getElementById('log');
 
 let ws, micCtx, playCtx, playHead = 0, node, stream;
+const scheduled = new Set();
 
 function setState(text) { stateEl.textContent = text; }
 
@@ -58,6 +61,22 @@ function addLine(event) {
   li.append(name, dir, text);
   logEl.prepend(li);
   while (logEl.children.length > 300) logEl.lastChild.remove();
+}
+
+// Browsers may ignore the requested sampleRate (Safari in particular), so
+// capture is resampled here rather than assumed. ADR-002 says the wire is
+// always 16 kHz; this is the one place the browser's rate is allowed to differ.
+function resampleTo16k(samples, fromRate) {
+  if (fromRate === RATE) return samples;
+  const ratio = fromRate / RATE;
+  const out = new Float32Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio;
+    const low = Math.floor(pos);
+    const high = Math.min(low + 1, samples.length - 1);
+    out[i] = samples[low] + (samples[high] - samples[low]) * (pos - low);
+  }
+  return out;
 }
 
 function floatToPcm16(samples) {
@@ -83,14 +102,28 @@ function playPcm16(buffer) {
   playHead = Math.max(playHead, playCtx.currentTime + 0.05);
   source.start(playHead);
   playHead += audio.duration;
+  scheduled.add(source);
+  source.onended = () => scheduled.delete(source);
 }
 
 function flushPlayback() {
-  // Barge-in: drop whatever has not been heard yet.
+  // Barge-in: stop everything already scheduled. Stopping sources rather
+  // than recreating the context keeps the audio graph alive, so audio that
+  // arrives a millisecond later still has somewhere to play.
+  for (const source of scheduled) {
+    try { source.stop(); } catch (err) { /* already finished */ }
+  }
+  scheduled.clear();
   playHead = 0;
-  playCtx.close().then(() => {
-    playCtx = new AudioContext({ sampleRate: RATE });
-  });
+}
+
+function makeContext() {
+  // Not every browser honours the rate hint; resampling covers the rest.
+  try {
+    return new AudioContext({ sampleRate: RATE });
+  } catch (err) {
+    return new AudioContext();
+  }
 }
 
 async function connect() {
@@ -101,20 +134,26 @@ async function connect() {
              autoGainControl: true, sampleRate: RATE },
   });
 
-  micCtx = new AudioContext({ sampleRate: RATE });
-  playCtx = new AudioContext({ sampleRate: RATE });
+  setState('opening audio…');
+  micCtx = makeContext();
+  playCtx = makeContext();
+  await micCtx.resume();
 
+  setState('connecting…');
   const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/operator';
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
+  ws.onerror = () => setState('connection failed — is the server running?');
+
   ws.onopen = () => {
-    setState('waiting for a call');
+    setState('waiting for a call (' + Math.round(micCtx.sampleRate) + ' Hz mic)');
     const source = micCtx.createMediaStreamSource(stream);
-    node = micCtx.createScriptProcessor(FRAME * 4, 1, 1);
+    node = micCtx.createScriptProcessor(BUFFER, 1, 1);
     node.onaudioprocess = (e) => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      ws.send(floatToPcm16(e.inputBuffer.getChannelData(0)));
+      const captured = e.inputBuffer.getChannelData(0);
+      ws.send(floatToPcm16(resampleTo16k(captured, micCtx.sampleRate)));
     };
     source.connect(node);
     node.connect(micCtx.destination);

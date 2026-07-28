@@ -85,15 +85,29 @@ async def inbound_call(request: Request) -> Response:
     return Response(content=connect_stream(url), media_type="application/xml")
 
 
+DRAIN_TICK_S = 0.05
+
+
 @app.websocket("/ws/operator")
 async def operator_socket(ws: WebSocket) -> None:
     await ws.accept()
     pool = _pool(app)
-    operator = pool.register(ServerSocket(ws))
+    stream = ServerSocket(ws)
+    operator = pool.register(stream)
     try:
-        # Hold the connection open until a call claims it, then until the
-        # call ends — the adapter, not this handler, owns the socket
-        # in between.
+        # Audio arriving before a call is stale by the time a caller
+        # connects, so it is read and dropped rather than left to pile up in
+        # the socket buffer. Reading also surfaces a closed tab, which an
+        # idle handler would never notice.
+        while not operator.claimed.is_set():
+            try:
+                message = await asyncio.wait_for(stream.recv(), DRAIN_TICK_S)
+            except TimeoutError:
+                continue
+            if message is None:
+                return
+        # From here the adapter owns the socket; just keep the handler alive
+        # so the connection stays open for the duration of the call.
         await operator.released.wait()
     finally:
         pool.drop(operator)
