@@ -6,6 +6,7 @@ three calls in ``app.transport`` so every component above stays testable
 without a network.
 """
 
+import asyncio
 import contextlib
 from collections.abc import Mapping
 
@@ -19,10 +20,18 @@ MAX_MESSAGE_BYTES = 1 << 20
 
 
 class ServerSocket:
-    """A connection the framework accepted for us (Twilio or the console)."""
+    """A connection the framework accepted for us (Twilio or the console).
+
+    Sends are serialised. Both sockets are written to by more than one task
+    at a time — audio frames from the duplex worker, ``clear`` from the
+    barge-in path, transcript JSON from the console feed — and interleaving
+    two writes corrupts the frame stream, which kills the connection a
+    second or two into the call.
+    """
 
     def __init__(self, ws: WebSocket) -> None:
         self._ws = ws
+        self._send_lock = asyncio.Lock()
 
     async def recv(self) -> str | bytes | None:
         try:
@@ -41,15 +50,16 @@ class ServerSocket:
         return b""
 
     async def send(self, data: str | bytes) -> None:
-        if self._ws.client_state is not WebSocketState.CONNECTED:
-            raise ConnectionError("websocket is not connected")
-        try:
-            if isinstance(data, str):
-                await self._ws.send_text(data)
-            else:
-                await self._ws.send_bytes(data)
-        except (WebSocketDisconnect, RuntimeError) as exc:
-            raise ConnectionError("websocket send failed") from exc
+        async with self._send_lock:
+            if self._ws.client_state is not WebSocketState.CONNECTED:
+                raise ConnectionError("websocket is not connected")
+            try:
+                if isinstance(data, str):
+                    await self._ws.send_text(data)
+                else:
+                    await self._ws.send_bytes(data)
+            except (WebSocketDisconnect, RuntimeError) as exc:
+                raise ConnectionError("websocket send failed") from exc
 
     async def close(self) -> None:
         with contextlib.suppress(WebSocketDisconnect, RuntimeError):
@@ -61,6 +71,7 @@ class ClientSocket:
 
     def __init__(self, ws: websockets.ClientConnection) -> None:
         self._ws = ws
+        self._send_lock = asyncio.Lock()
 
     async def recv(self) -> str | bytes | None:
         try:
@@ -69,10 +80,11 @@ class ClientSocket:
             return None
 
     async def send(self, data: str | bytes) -> None:
-        try:
-            await self._ws.send(data)
-        except websockets.ConnectionClosed as exc:
-            raise ConnectionError("vendor websocket closed") from exc
+        async with self._send_lock:
+            try:
+                await self._ws.send(data)
+            except websockets.ConnectionClosed as exc:
+                raise ConnectionError("vendor websocket closed") from exc
 
     async def close(self) -> None:
         with contextlib.suppress(Exception):

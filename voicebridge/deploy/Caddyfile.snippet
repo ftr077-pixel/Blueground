@@ -1,0 +1,17 @@
+# Append this to /etc/caddy/Caddyfile, alongside the dashboard's block.
+# Caddy issues the TLS certificate itself and proxies WebSockets without
+# extra configuration.
+#
+# Point the subdomain's DNS A record at the box IP first.
+
+voice.your-domain.com {
+    # No basic_auth here: Twilio posts to /twilio/voice and opens a WebSocket
+    # to /ws/twilio, and neither can answer a login prompt. The operator
+    # console is protected instead — see the matcher below.
+    @console path /operator /ws/operator /debug/*
+    basic_auth @console {
+        admin $2a$14$REPLACE_WITH_BCRYPT_HASH
+    }
+
+    reverse_proxy localhost:8080
+}

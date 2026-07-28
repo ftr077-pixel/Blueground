@@ -106,3 +106,44 @@ class TestOperatorFeed:
         feed = OperatorFeed()
         feed.stop()
         assert await asyncio.wait_for(feed.queue.get(), 1.0) is None
+
+
+class TestConcurrentSends:
+    """Both sockets are written by several tasks at once; interleaved writes
+    corrupt the frame stream and drop the call a second or two in."""
+
+    async def test_sends_are_serialised(self) -> None:
+        import asyncio
+
+        from app.api.ws_transport import ServerSocket
+
+        overlaps = 0
+        in_flight = 0
+
+        class SlowWebSocket:
+            client_state = __import__(
+                "starlette.websockets", fromlist=["WebSocketState"]
+            ).WebSocketState.CONNECTED
+
+            async def _write(self) -> None:
+                nonlocal overlaps, in_flight
+                in_flight += 1
+                if in_flight > 1:
+                    overlaps += 1
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+
+            async def send_text(self, data: str) -> None:
+                await self._write()
+
+            async def send_bytes(self, data: bytes) -> None:
+                await self._write()
+
+        socket = ServerSocket(SlowWebSocket())  # type: ignore[arg-type]
+        await asyncio.gather(
+            socket.send(b"\x00\x01" * 160),
+            socket.send('{"event":"clear"}'),
+            socket.send(b"\x00\x02" * 160),
+            socket.send('{"name":"mt_completed"}'),
+        )
+        assert overlaps == 0
