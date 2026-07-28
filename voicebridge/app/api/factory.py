@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.api.ws_transport import dial
-from app.audio.vad import SileroVad
+from app.audio.vad import EnergyVad
 from app.config import DuplexConfig, SegmenterConfig
 from app.observability.events import EventBus
 from app.pipeline.languages import ENGLISH, HEBREW
@@ -85,7 +85,7 @@ async def build_session(
             source_lang=CALLER_LANGUAGE,
             target_lang=OPERATOR_LANGUAGE,
             asr=_hebrew_asr(env),
-            vad=SileroVad(),
+            vad=EnergyVad(),
             segmenter=Segmenter(segmenter_config, HEBREW),
             tts=tts,
             voice=VoiceSpec(voice_id=voices.english_voice_id, language=OPERATOR_LANGUAGE),
@@ -95,7 +95,7 @@ async def build_session(
             source_lang=OPERATOR_LANGUAGE,
             target_lang=CALLER_LANGUAGE,
             asr=_english_asr(env),
-            vad=SileroVad(),
+            vad=EnergyVad(),
             segmenter=Segmenter(segmenter_config, ENGLISH),
             tts=tts,
             voice=VoiceSpec(voice_id=voices.hebrew_voice_id, language=CALLER_LANGUAGE),
