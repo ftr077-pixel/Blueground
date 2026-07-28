@@ -31,6 +31,7 @@ from app.api.twiml import connect_stream, media_stream_url, reject
 from app.api.ws_transport import ServerSocket
 from app.env_check import blocking, check, load_env_file
 from app.observability.events import EventBus, JsonLinesSink
+from app.observability.trace import CallTrace
 from app.telephony.base import CallContext
 from app.telephony.twilio import TwilioAdapter
 
@@ -58,6 +59,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="VoiceBridge", lifespan=lifespan)
 app.state.pool = OperatorPool()
+app.state.trace = CallTrace()
 
 
 def _pool(request_app: FastAPI) -> OperatorPool:
@@ -69,6 +71,18 @@ def _pool(request_app: FastAPI) -> OperatorPool:
 @app.get("/health", response_class=PlainTextResponse)
 async def health() -> str:
     return f"ok operators_waiting={_pool(app).available}"
+
+
+@app.get("/debug/last-call")
+async def last_call() -> dict[str, object]:
+    """Per-stage waterfall for the most recent call (SPEC §7).
+
+    Contains transcripts, so it is a debugging aid, not a public endpoint —
+    it goes behind auth with the rest of the control plane at M2.
+    """
+    trace = app.state.trace
+    assert isinstance(trace, CallTrace)
+    return trace.summary()
 
 
 @app.get("/operator", response_class=FileResponse)
@@ -131,7 +145,9 @@ async def twilio_socket(ws: WebSocket) -> None:
 async def _run_call(caller: ServerSocket, operator: WaitingOperator) -> None:
     session_id = uuid.uuid4().hex
     feed = OperatorFeed()
-    events = EventBus(session_id, (JsonLinesSink(sys.stdout), feed))
+    trace = app.state.trace
+    assert isinstance(trace, CallTrace)
+    events = EventBus(session_id, (JsonLinesSink(sys.stdout), feed, trace))
     adapter = TwilioAdapter(caller, operator.ws)
     context = CallContext(
         session_id=session_id,

@@ -16,6 +16,8 @@ FORWARDED: frozenset[EventName] = frozenset(
         "asr_final",
         "segment_committed",
         "mt_completed",
+        "tts_first_audio",
+        "tts_completed",
         "barge_in",
         "tts_cancelled",
         "error",
