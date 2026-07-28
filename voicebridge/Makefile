@@ -5,14 +5,17 @@
 # ran `make setup`.
 UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
 
+# Deliberately not silenced: this step downloads a Python runtime and can
+# sit for a minute, and a quiet terminal is indistinguishable from a hung one.
 setup:
-	@command -v uv >/dev/null 2>&1 || { \
-		echo "installing uv..."; \
-		curl -LsSf https://astral.sh/uv/install.sh | sh; \
-	}
+	@echo "[1/3] checking for uv..."
+	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 	@test -x "$(UV)" || { echo "uv not found at $(UV) — see SETUP.md"; exit 1; }
-	@"$(UV)" python install 3.12
-	@"$(UV)" sync
+	@echo "[2/3] installing Python 3.12 (may take a minute)..."
+	"$(UV)" python install 3.12
+	@echo "[3/3] installing dependencies..."
+	"$(UV)" sync
+	@echo ""
 	@echo "setup complete — next: make check-env"
 
 # "|| true" keeps make from printing its own error noise on top of the
