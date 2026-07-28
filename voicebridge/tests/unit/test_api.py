@@ -4,6 +4,8 @@ promise that it never blocks the pipeline."""
 import asyncio
 import json
 
+import pytest
+
 from app.api.feed import MAX_PENDING, OperatorFeed
 from app.api.pool import OperatorPool
 from app.api.twiml import connect_stream, media_stream_url, reject
@@ -106,6 +108,48 @@ class TestOperatorFeed:
         feed = OperatorFeed()
         feed.stop()
         assert await asyncio.wait_for(feed.queue.get(), 1.0) is None
+
+
+class TestFailedCallSetup:
+    """A call that a vendor refuses must explain itself in the trace. Without
+    this the only record is the server journal, and /debug/last-call shows an
+    empty call that looks like nothing happened."""
+
+    async def test_a_refused_session_is_reported_on_the_trace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.api import main
+        from app.api.pool import WaitingOperator
+        from app.observability.trace import CallTrace
+
+        start = json.dumps({"event": "start", "start": {"streamSid": "MZ1"}})
+
+        class CallerSocket:
+            def __init__(self) -> None:
+                self._messages = [start, None]
+
+            async def recv(self) -> str | bytes | None:
+                return self._messages.pop(0)
+
+            async def send(self, data: str | bytes) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        async def refuse(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("Invalid language for model")
+
+        trace = CallTrace()
+        monkeypatch.setattr(main.app.state, "trace", trace)
+        monkeypatch.setattr(main, "build_session", refuse)
+
+        await main._run_call(CallerSocket(), WaitingOperator(ws=socket()))
+
+        summary = trace.summary()
+        assert summary["events"] == 1
+        assert summary["errors"][0]["stage"] == "session_setup"
+        assert "Invalid language for model" in summary["errors"][0]["detail"]
 
 
 class TestConcurrentSends:
