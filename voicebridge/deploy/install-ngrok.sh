@@ -52,7 +52,13 @@ DOMAIN="${DOMAIN#http://}"
 DOMAIN="${DOMAIN%/}"
 
 echo "[2/4] registering the token"
-"$NGROK" config add-authtoken "$TOKEN" >/dev/null
+# Path stated explicitly, never inferred: systemd starts services without
+# HOME, so an agent that resolves its config from $HOME starts unauthenticated
+# and fails with ERR_NGROK_4018.
+NGROK_CONFIG=/root/.config/ngrok/ngrok.yml
+mkdir -p "$(dirname "$NGROK_CONFIG")"
+"$NGROK" config add-authtoken --config "$NGROK_CONFIG" "$TOKEN" >/dev/null
+chmod 600 "$NGROK_CONFIG"
 
 echo "[3/4] installing the tunnel service"
 cat > /etc/systemd/system/ngrok.service <<UNIT
@@ -63,7 +69,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$NGROK http 8080 --url=https://$DOMAIN --log=stdout
+Environment=HOME=/root
+ExecStart=$NGROK http 8080 --url=https://$DOMAIN --config $NGROK_CONFIG --log=stdout
 Restart=always
 RestartSec=5
 
