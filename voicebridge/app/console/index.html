@@ -22,6 +22,8 @@
   button { font: inherit; padding: 7px 18px; border-radius: 6px; border: 0;
            background: #2f6f4f; color: #fff; cursor: pointer; }
   button[disabled] { opacity: .4; cursor: default; }
+  nav a { color: var(--dim); text-decoration: none; margin-right: 16px; font-size: 14px; }
+  nav a:hover, nav a.on { color: var(--text); }
   #state { color: var(--dim); }
   .spacer { margin-left: auto; }
 
@@ -69,6 +71,10 @@
 <body>
 <header>
   <h1>VoiceBridge</h1>
+  <nav>
+    <a href="/operator" class="on">Console</a>
+    <a href="/calls">Calls</a>
+  </nav>
   <button id="join">Connect</button>
   <span id="state">idle</span>
   <form id="dial">

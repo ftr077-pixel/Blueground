@@ -15,6 +15,9 @@ from app.transport import MessageStream
 @dataclass(slots=True)
 class WaitingOperator:
     ws: MessageStream
+    # Who is on this console. Empty when sign-in is not configured; the
+    # call record is then filed against nobody rather than against a guess.
+    email: str = ""
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
     released: asyncio.Event = field(default_factory=asyncio.Event)
     gone: bool = False
@@ -24,8 +27,8 @@ class OperatorPool:
     def __init__(self) -> None:
         self._waiting: deque[WaitingOperator] = deque()
 
-    def register(self, ws: MessageStream) -> WaitingOperator:
-        operator = WaitingOperator(ws=ws)
+    def register(self, ws: MessageStream, email: str = "") -> WaitingOperator:
+        operator = WaitingOperator(ws=ws, email=email)
         self._waiting.append(operator)
         return operator
 

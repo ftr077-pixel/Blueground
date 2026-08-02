@@ -7,6 +7,7 @@ Routes:
     WS   /ws/twilio       the call's audio, Twilio Media Streams protocol
     WS   /ws/operator     the console: PCM16 16 kHz audio plus a JSON feed
     GET  /operator        the console page
+    GET  /calls           past calls, transcripts and summaries (SPEC A9)
     GET  /auth/*          google sign-in for the control plane (SPEC A8)
 
 M0 pairs one call with one waiting operator (SPEC §9). Concurrency, auth and
@@ -19,6 +20,7 @@ import logging
 import os
 import secrets
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator, Coroutine, Mapping
 from contextlib import asynccontextmanager
@@ -53,6 +55,9 @@ from app.api.ws_transport import ServerSocket
 from app.env_check import blocking, check, load_env_file
 from app.observability.events import EventBus, JsonLinesSink
 from app.observability.trace import CallTrace
+from app.providers.mt.openai_chat import OpenAIConfig
+from app.storage.calls import CallRecord, CallStore, new_call_id
+from app.summary import Summariser
 from app.telephony.base import CallContext
 from app.telephony.twilio import TwilioAdapter
 from app.telephony.twilio_rest import TwilioDialer, TwilioRestConfig
@@ -60,7 +65,9 @@ from app.telephony.twiml import connect_stream, media_stream_url, reject
 from app.transport import MessageStream
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONSOLE_PAGE = REPO_ROOT / "app" / "console" / "index.html"
+CONSOLE_DIR = REPO_ROOT / "app" / "console"
+CONSOLE_PAGE = CONSOLE_DIR / "index.html"
+HISTORY_PAGE = CONSOLE_DIR / "calls.html"
 ENV_FILE = REPO_ROOT / ".env"
 NO_OPERATOR_MESSAGE = "No operator is available right now. Please call back shortly."
 
@@ -86,6 +93,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         )
     elif not os.environ.get("SESSION_SECRET"):
         log.warning("SESSION_SECRET is unset: every restart signs all operators out")
+    days = float(os.environ.get("CALL_RETENTION_DAYS", "90"))
+    if days > 0:
+        removed = await _store(app).prune(days)
+        if removed:
+            log.info("pruned %d call records older than %g days", removed, days)
     yield
 
 
@@ -95,6 +107,8 @@ app.state.trace = CallTrace()
 # Reported by /health so a deploy can wait for the line to be free instead
 # of cutting somebody off mid-sentence.
 app.state.active_calls = 0
+# Durable call history (SPEC A9). One file, backed up with cp.
+app.state.store = CallStore(Path(os.environ.get("CALL_DB", REPO_ROOT / "data" / "calls.db")))
 # A regenerated key at restart only signs people out; a key committed to the
 # repository would let anyone mint a session, so a missing one is generated.
 app.add_middleware(
@@ -146,6 +160,83 @@ async def operator_page(request: Request) -> Response:
     if not _signed_in(request.session):
         return RedirectResponse("/auth/login")
     return FileResponse(CONSOLE_PAGE, media_type="text/html")
+
+
+def _store(request_app: FastAPI) -> CallStore:
+    store = request_app.state.store
+    assert isinstance(store, CallStore)
+    return store
+
+
+def _admins() -> frozenset[str]:
+    raw = os.environ.get("ADMIN_EMAILS", "")
+    return frozenset(part.strip().casefold() for part in raw.split(",") if part.strip())
+
+
+def _visible_to(session: Mapping[str, object]) -> str | None:
+    """Which operator's calls this session may read; None means all of them.
+
+    Fail closed twice over: an unlisted address sees only its own calls, and
+    with sign-in unconfigured there is no email at all, so nothing matches
+    and the history is empty rather than everybody's.
+    """
+    email = str(session.get("email") or "").casefold()
+    return None if email and email in _admins() else email
+
+
+@app.get("/calls")
+async def history_page(request: Request) -> Response:
+    if not _signed_in(request.session):
+        return RedirectResponse("/auth/login")
+    return FileResponse(HISTORY_PAGE, media_type="text/html")
+
+
+@app.get("/api/calls")
+async def list_calls(request: Request) -> Response:
+    if not _signed_in(request.session):
+        return JSONResponse({"detail": "sign in first"}, 401)
+    records = await _store(app).recent(_visible_to(request.session))
+    return JSONResponse(
+        {
+            "admin": _visible_to(request.session) is None,
+            "calls": [
+                {
+                    "id": r.id,
+                    "operator": r.operator,
+                    "started_at": r.started_at,
+                    "duration_s": round(r.duration_s, 1),
+                    "turns": len(r.turns),
+                    "summary": r.summary,
+                    "action_items": r.action_items,
+                }
+                for r in records
+            ],
+        }
+    )
+
+
+@app.get("/api/calls/{call_id}")
+async def read_call(call_id: str, request: Request) -> Response:
+    if not _signed_in(request.session):
+        return JSONResponse({"detail": "sign in first"}, 401)
+    record = await _store(app).get(call_id)
+    visible = _visible_to(request.session)
+    # Same answer for "does not exist" and "not yours": a 403 on a real id
+    # tells a stranger the call happened.
+    if record is None or (visible is not None and record.operator != visible):
+        return JSONResponse({"detail": "not found"}, 404)
+    return JSONResponse(
+        {
+            "id": record.id,
+            "operator": record.operator,
+            "started_at": record.started_at,
+            "duration_s": round(record.duration_s, 1),
+            "summary": record.summary,
+            "action_items": record.action_items,
+            "stats": record.stats,
+            "turns": record.turns,
+        }
+    )
 
 
 @app.get("/auth/login")
@@ -267,7 +358,7 @@ async def operator_socket(ws: WebSocket) -> None:
     await ws.accept()
     pool = _pool(app)
     stream = ServerSocket(ws)
-    operator = pool.register(stream)
+    operator = pool.register(stream, email=str(ws.session.get("email") or ""))
     try:
         # Audio arriving before a call is stale by the time a caller
         # connects, so it is read and dropped rather than left to pile up in
@@ -312,6 +403,7 @@ async def twilio_socket(ws: WebSocket) -> None:
 
 async def _run_call(caller: MessageStream, operator: WaitingOperator) -> None:
     session_id = uuid.uuid4().hex
+    started_at = time.time()
     feed = OperatorFeed()
     trace = app.state.trace
     assert isinstance(trace, CallTrace)
@@ -342,6 +434,49 @@ async def _run_call(caller: MessageStream, operator: WaitingOperator) -> None:
             log.exception("call %s failed", session_id, exc_info=error)
     finally:
         await session.aclose()
+        # Persisting and summarising happen after the call, never during it.
+        await _record_call(session_id, operator.email, started_at, trace)
+
+
+async def _record_call(
+    session_id: str, operator_email: str, started_at: float, trace: CallTrace
+) -> None:
+    summary = trace.summary()
+    turns = summary.get("turns") or []
+    if not isinstance(turns, list) or not turns:
+        # A call where nobody was understood leaves no transcript worth keeping.
+        return
+    record = CallRecord(
+        id=new_call_id(),
+        session_id=session_id,
+        operator=operator_email,
+        started_at=started_at,
+        ended_at=time.time(),
+        direction="",
+        counterparty="",
+        turns=turns,
+        stats={
+            key: summary[key]
+            for key in ("commit_to_first_audio_ms", "utterances", "barge_ins", "errors")
+            if key in summary
+        },
+    )
+    store = _store(app)
+    try:
+        await store.save(record)
+    except Exception:
+        log.exception("could not save call %s", session_id)
+        return
+    # The transcript is the deliverable; a failed summary must not lose it.
+    try:
+        summariser = Summariser(OpenAIConfig.from_env())
+        try:
+            result = await summariser.summarise(turns)
+        finally:
+            await summariser.close()
+        await store.set_summary(record.id, result.text, result.action_items)
+    except Exception:
+        log.exception("could not summarise call %s", session_id)
 
 
 async def _run_and_stop_feed(run: Coroutine[None, None, None], feed: OperatorFeed) -> None:

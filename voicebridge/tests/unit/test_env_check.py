@@ -76,6 +76,7 @@ class TestCheck:
         results = check(FILLED)
         optional = [r for r in results if not r.required]
         assert {r.name for r in optional} == {
+            "ADMIN_EMAILS",
             "DEEPGRAM_API_KEY",
             "GOOGLE_CLIENT_ID",
             "GOOGLE_CLIENT_SECRET",

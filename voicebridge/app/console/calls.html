@@ -1,0 +1,207 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VoiceBridge — calls</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #101214; --panel: #171a1d; --line: #24282c; --hover: #1d2125;
+    --dim: #7d858c; --text: #e8eaec;
+    --caller: #7fd1a0; --you: #e0c584; --bad: #e0736a; --accent: #6fa8dc;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+         font: 15px/1.55 ui-sans-serif, system-ui, sans-serif; }
+
+  header { display: flex; align-items: center; gap: 20px; padding: 12px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel);
+           position: sticky; top: 0; z-index: 2; }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  nav a { color: var(--dim); text-decoration: none; margin-right: 16px; font-size: 14px; }
+  nav a:hover, nav a.on { color: var(--text); }
+  .spacer { margin-left: auto; }
+  #who { color: var(--dim); font-size: 13px; }
+  #who a { color: var(--dim); }
+
+  main { max-width: 900px; margin: 0 auto; padding: 20px; }
+  .empty { color: var(--dim); padding: 60px 0; text-align: center; }
+
+  /* List */
+  .call { display: block; text-decoration: none; color: inherit; padding: 14px 16px;
+          border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px;
+          background: var(--panel); }
+  .call:hover { background: var(--hover); }
+  .call .top { display: flex; align-items: baseline; gap: 12px; }
+  .when { font-weight: 600; }
+  .meta { color: var(--dim); font-size: 13px; }
+  .call .sum { margin: 6px 0 0; color: var(--dim); }
+  .pending { font-style: italic; }
+  .tasks { margin: 8px 0 0; padding-left: 18px; font-size: 14px; }
+  .tasks li { margin: 2px 0; }
+
+  /* Detail */
+  .back { color: var(--dim); text-decoration: none; font-size: 14px; }
+  .head { display: flex; align-items: baseline; gap: 14px; margin: 14px 0 4px; }
+  .head h2 { margin: 0; font-size: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 16px; margin: 16px 0; }
+  .card h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+             letter-spacing: .6px; color: var(--dim); font-weight: 600; }
+  .turn { display: grid; grid-template-columns: 74px 1fr 62px; gap: 14px;
+          padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .turn:last-child { border-bottom: 0; }
+  .who2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; padding-top: 3px; }
+  .a2b .who2 { color: var(--caller); }
+  .b2a .who2 { color: var(--you); }
+  .source { margin: 0; color: var(--dim); font-size: 14px; }
+  .target { margin: 2px 0 0; font-size: 16px; }
+  .lat { text-align: right; color: var(--dim); font-size: 13px; padding-top: 4px;
+         font-variant-numeric: tabular-nums; }
+  .over { color: var(--bad); }
+  .cut .target::after { content: " — cut off"; color: var(--bad); font-size: 13px; }
+</style>
+
+<header>
+  <h1>VoiceBridge</h1>
+  <nav>
+    <a href="/operator">Console</a>
+    <a href="/calls" class="on">Calls</a>
+  </nav>
+  <span class="spacer"></span>
+  <span id="who"></span>
+</header>
+<main id="main"><p class="empty">Loading…</p></main>
+
+<script>
+const BUDGET_MS = 1500;          // SPEC §5, same threshold as the live console
+const main = document.getElementById('main');
+
+fetch('/auth/me').then((r) => r.json()).then((me) => {
+  const who = document.getElementById('who');
+  if (me.email) {
+    who.append(me.email + ' · ');
+    const out = document.createElement('a');
+    out.href = '/auth/logout';
+    out.textContent = 'sign out';
+    who.append(out);
+  } else if (!me.required) {
+    who.textContent = 'no login configured';
+  }
+}).catch(() => {});
+
+function when(seconds) {
+  const d = new Date(seconds * 1000);
+  return d.toLocaleString(undefined, {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function duration(seconds) {
+  const total = Math.round(seconds);
+  return Math.floor(total / 60) + 'm ' + String(total % 60).padStart(2, '0') + 's';
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function fail(message) {
+  main.replaceChildren(el('p', 'empty', message));
+}
+
+async function showList() {
+  const response = await fetch('/api/calls');
+  if (!response.ok) return fail('Sign in to see call history.');
+  const { calls, admin } = await response.json();
+  if (!calls.length) {
+    return fail('No calls yet. Finished calls appear here with a summary.');
+  }
+  main.replaceChildren();
+  for (const call of calls) {
+    const card = el('a', 'call');
+    card.href = '#' + call.id;
+    const top = el('div', 'top');
+    top.append(el('span', 'when', when(call.started_at)));
+    const bits = [duration(call.duration_s), call.turns + ' turns'];
+    // Whose call it was only matters when you can see other people's.
+    if (admin && call.operator) bits.push(call.operator);
+    top.append(el('span', 'meta', bits.join(' · ')));
+    card.append(top);
+    card.append(el('p', call.summary ? 'sum' : 'sum pending',
+                   call.summary || 'Summary not available.'));
+    if (call.action_items && call.action_items.length) {
+      const list = el('ul', 'tasks');
+      for (const item of call.action_items) list.append(el('li', null, item));
+      card.append(list);
+    }
+    main.append(card);
+  }
+}
+
+async function showCall(id) {
+  const response = await fetch('/api/calls/' + encodeURIComponent(id));
+  if (!response.ok) return fail('That call is not available.');
+  const call = await response.json();
+
+  main.replaceChildren();
+  const back = el('a', 'back', '← All calls');
+  back.href = '#';
+  main.append(back);
+
+  const head = el('div', 'head');
+  head.append(el('h2', null, when(call.started_at)));
+  const bits = [duration(call.duration_s), call.turns.length + ' turns'];
+  const p50 = call.stats && call.stats.commit_to_first_audio_ms
+    && call.stats.commit_to_first_audio_ms.p50;
+  if (p50) bits.push('p50 ' + (p50 / 1000).toFixed(2) + 's');
+  if (call.operator) bits.push(call.operator);
+  head.append(el('span', 'meta', bits.join(' · ')));
+  main.append(head);
+
+  if (call.summary) {
+    const card = el('div', 'card');
+    card.append(el('h3', null, 'Summary'));
+    card.append(el('p', null, call.summary));
+    if (call.action_items.length) {
+      card.append(el('h3', null, 'Follow-up'));
+      const list = el('ul', 'tasks');
+      for (const item of call.action_items) list.append(el('li', null, item));
+      card.append(list);
+    }
+    main.append(card);
+  }
+
+  const transcript = el('div', 'card');
+  transcript.append(el('h3', null, 'Transcript'));
+  for (const turn of call.turns) {
+    const row = el('div', 'turn ' + (turn.direction || ''));
+    if (turn.interrupted) row.classList.add('cut');
+    row.append(el('span', 'who2', turn.direction === 'a2b' ? 'Caller' : 'You'));
+    const texts = el('div');
+    const source = el('p', 'source', turn.source || '');
+    // Hebrew and English share this column; the browser decides per line.
+    source.dir = 'auto';
+    const target = el('p', 'target', turn.translated || '');
+    target.dir = 'auto';
+    texts.append(source, target);
+    row.append(texts);
+    const ms = turn.commit_to_audio_ms;
+    const lat = el('span', 'lat' + (ms && ms > BUDGET_MS ? ' over' : ''),
+                   ms ? (ms / 1000).toFixed(2) + 's' : '');
+    row.append(lat);
+    transcript.append(row);
+  }
+  main.append(transcript);
+}
+
+function route() {
+  const id = location.hash.replace(/^#/, '');
+  const render = id ? showCall(id) : showList();
+  render.catch(() => fail('Could not load. Is the server running?'));
+}
+
+addEventListener('hashchange', route);
+route();
+</script>

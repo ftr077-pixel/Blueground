@@ -31,3 +31,6 @@ scraper/pricelabs-inbox/
 scraper/.pricelabs_state.json
 scraper/pricelabs-captures/
 scraper/pricelabs-downloads/
+
+# Call transcripts live here. Never in git.
+voicebridge/data/
