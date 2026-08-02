@@ -50,3 +50,17 @@ class TelephonyAdapter(Protocol):
         ...
 
     async def hangup(self, leg: Leg) -> None: ...
+
+
+class OutboundDialer(Protocol):
+    """Place a call to a number (SPEC A7).
+
+    Separate from ``TelephonyAdapter`` because it runs before any leg exists:
+    it is a control-plane action that creates the call the adapter will later
+    be handed. Keeping it apart is also what stops the media contract from
+    growing a REST client.
+    """
+
+    async def dial(self, to: str, stream_url: str) -> str:
+        """Ring ``to`` and connect it to ``stream_url``. Returns the call id."""
+        ...

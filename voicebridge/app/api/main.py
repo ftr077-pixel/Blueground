@@ -3,6 +3,7 @@
 Routes:
     GET  /health          liveness plus how many operators are waiting
     POST /twilio/voice    inbound-call webhook, answers with TwiML
+    POST /call            ring a number and bridge it in (SPEC A7)
     WS   /ws/twilio       the call's audio, Twilio Media Streams protocol
     WS   /ws/operator     the console: PCM16 16 kHz audio plus a JSON feed
     GET  /operator        the console page
@@ -21,19 +22,22 @@ from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 from app.api.factory import CALLER_LANGUAGE, OPERATOR_LANGUAGE, build_session
 from app.api.feed import OperatorFeed
+from app.api.outbound import allowlist, normalise
 from app.api.pool import OperatorPool, WaitingOperator
-from app.api.twiml import connect_stream, media_stream_url, reject
 from app.api.ws_transport import ServerSocket
 from app.env_check import blocking, check, load_env_file
 from app.observability.events import EventBus, JsonLinesSink
 from app.observability.trace import CallTrace
 from app.telephony.base import CallContext
 from app.telephony.twilio import TwilioAdapter
+from app.telephony.twilio_rest import TwilioDialer, TwilioRestConfig
+from app.telephony.twiml import connect_stream, media_stream_url, reject
 from app.transport import MessageStream
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -95,9 +99,54 @@ async def operator_page() -> FileResponse:
 async def inbound_call(request: Request) -> Response:
     if _pool(app).available == 0:
         return Response(content=reject(NO_OPERATOR_MESSAGE), media_type="application/xml")
-    host = request.headers.get("x-forwarded-host") or request.url.hostname or ""
-    url = media_stream_url(f"https://{host}")
+    url = media_stream_url(_public_host(request))
     return Response(content=connect_stream(url), media_type="application/xml")
+
+
+def _public_host(request: Request) -> str:
+    """The address Twilio must dial back on.
+
+    Behind a tunnel the request's own hostname is localhost, so the forwarded
+    header comes first and PUBLIC_HOST is the manual override for anything
+    that does not set one.
+    """
+    configured = os.environ.get("PUBLIC_HOST", "").strip().rstrip("/")
+    if configured:
+        return configured
+    host = request.headers.get("x-forwarded-host") or request.url.hostname or ""
+    return f"https://{host}"
+
+
+@app.post("/call")
+async def place_call(request: Request) -> Response:
+    """Ring a number and bridge it into the waiting operator (SPEC A7).
+
+    Fail-closed on the allowlist: this endpoint is on a public tunnel with no
+    auth until M2, and an open dial endpoint is somebody else's phone bill.
+    """
+    payload = await request.json()
+    number = normalise(str(payload.get("to", "")))
+    if number is None:
+        return JSONResponse({"detail": "not a phone number in international format"}, 400)
+    allowed = allowlist()
+    if not allowed:
+        return JSONResponse({"detail": "outbound calling is off — set OUTBOUND_ALLOWED"}, 403)
+    if number not in allowed:
+        return JSONResponse({"detail": "this number is not in OUTBOUND_ALLOWED"}, 403)
+    if _pool(app).available == 0:
+        # The dialled party would otherwise hear silence and hang up.
+        return JSONResponse({"detail": "connect the console before placing a call"}, 409)
+    try:
+        config = TwilioRestConfig.from_env()
+        async with httpx.AsyncClient() as client:
+            sid = await TwilioDialer(config, client).dial(
+                number, media_stream_url(_public_host(request))
+            )
+    except Exception as exc:
+        log.exception("outbound call failed")
+        return JSONResponse({"detail": str(exc)}, 502)
+    log.info("placed outbound call %s", sid)
+    return JSONResponse({"sid": sid}, 201)
 
 
 DRAIN_TICK_S = 0.05

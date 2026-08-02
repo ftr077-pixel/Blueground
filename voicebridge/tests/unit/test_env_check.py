@@ -75,7 +75,11 @@ class TestCheck:
     def test_optional_values_do_not_block(self) -> None:
         results = check(FILLED)
         optional = [r for r in results if not r.required]
-        assert {r.name for r in optional} == {"DEEPGRAM_API_KEY", "PUBLIC_HOST"}
+        assert {r.name for r in optional} == {
+            "DEEPGRAM_API_KEY",
+            "OUTBOUND_ALLOWED",
+            "PUBLIC_HOST",
+        }
         assert blocking(results) == []
 
     def test_public_host_rejects_trailing_slash(self) -> None:

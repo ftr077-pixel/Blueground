@@ -11,6 +11,7 @@ Owner: Denis. Implementer: Claude Code.
 > - **A3 (2026-07-27):** ADR-002's hot-path resampler is an in-repo half-band FIR. soxr's streaming API was measured unusable for 20 ms frames: ~100 ms of startup silence, 26–66 ms steady-state hold, and its low-latency mode is 17.7 dB SNR.
 > - **A4 (2026-07-27):** §6.4 `synthesize` returns a `Synthesis{handle, frames}` — the spec'd signature gave `cancel()` no way to obtain its handle.
 > - **A5 (2026-07-27):** §11 dependencies: +`httpx` (HTTP client for vendor REST endpoints); −`soxr`. Stdlib `audioop` pins Python to 3.12 until a replacement is named.
+> - **A7 (2026-08-02, requested by Denis):** §1.1 already says the bridge drops into "an inbound **or outbound** voice call", but nothing in §1.2 or §9 let anyone start one. The operator console gains a dial control, and §6.1 gains an `OutboundDialer` protocol alongside `TelephonyAdapter` — placing a call is a control-plane action, not part of the media contract, and it is the one telephony operation that happens before any leg exists. The dialled call joins the same `<Connect><Stream>` path as an inbound one, so the pipeline, the segmenter and ADR-006 are untouched. Until the control plane has auth (M2), the endpoint is fail-closed behind an explicit number allowlist: a public URL with an open dial endpoint is toll fraud waiting to happen, and M0 has no other guard.
 
 ---
 
