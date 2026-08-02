@@ -8,8 +8,8 @@ import pytest
 
 from app.api.feed import MAX_PENDING, OperatorFeed
 from app.api.pool import OperatorPool
-from app.api.twiml import connect_stream, media_stream_url, reject
 from app.observability.events import EventBus
+from app.telephony.twiml import connect_stream, media_stream_url, reject
 from app.transport import MessageStream
 
 

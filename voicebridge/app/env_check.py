@@ -89,6 +89,12 @@ RULES: tuple[Rule, ...] = (
         required_for_first_call=False,
     ),
     Rule(
+        name="OUTBOUND_ALLOWED",
+        where="you decide: numbers the console may dial, comma separated",
+        expected="international format, e.g. +972501234567 — unset means no outbound calls",
+        required_for_first_call=False,
+    ),
+    Rule(
         name="PUBLIC_HOST",
         where="printed by the tunnel once the server runs",
         pattern=r"^https://\S+[^/]$",

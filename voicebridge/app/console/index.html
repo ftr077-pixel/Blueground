@@ -25,6 +25,12 @@
   #state { color: var(--dim); }
   .spacer { margin-left: auto; }
 
+  #dial { display: flex; gap: 8px; }
+  #number { font: inherit; width: 170px; padding: 7px 10px; border-radius: 6px;
+            border: 1px solid var(--line); background: #0d0f11; color: var(--text); }
+  #number::placeholder { color: #545b61; }
+  #call { background: #3a5a80; }
+
   /* Latency is the operator's trust signal: it says whether a silence means
      "still translating" or "something is wrong". */
   #latency { display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
@@ -63,6 +69,10 @@
   <h1>VoiceBridge</h1>
   <button id="join">Connect</button>
   <span id="state">idle</span>
+  <form id="dial">
+    <input id="number" type="tel" placeholder="+972…" autocomplete="tel" />
+    <button id="call" type="submit" disabled>Call</button>
+  </form>
   <span class="spacer"></span>
   <div id="latency">
     <div><span class="k">last</span><span class="v" id="lat-last">—</span></div>
@@ -417,6 +427,44 @@ joinBtn.addEventListener('click', () => { connect().catch((err) => {
   setState('error: ' + err.message);
   joinBtn.disabled = false;
 }); });
+
+// Dialling out (SPEC A7). The button stays disabled until the console is in
+// the queue: a call placed with nobody listening reaches a person who hears
+// silence.
+const dialForm = document.getElementById('dial');
+const numberEl = document.getElementById('number');
+const callBtn = document.getElementById('call');
+
+function refreshDialButton() {
+  callBtn.disabled = !(ws && ws.readyState === WebSocket.OPEN) || !numberEl.value.trim();
+}
+
+numberEl.addEventListener('input', refreshDialButton);
+setInterval(refreshDialButton, 500);
+
+dialForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  callBtn.disabled = true;
+  setState('dialling ' + numberEl.value.trim() + '…');
+  try {
+    const response = await fetch('/call', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: numberEl.value.trim() }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      showError('Call failed: ' + (body.detail || response.status));
+      setState('waiting for a call');
+    } else {
+      setState('ringing…');
+    }
+  } catch (err) {
+    showError('Call failed: ' + err.message);
+  } finally {
+    refreshDialButton();
+  }
+});
 </script>
 </body>
 </html>

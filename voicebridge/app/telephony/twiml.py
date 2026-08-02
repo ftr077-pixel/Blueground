@@ -1,4 +1,7 @@
-"""TwiML responses for the inbound-call webhook (ADR-001).
+"""TwiML — Twilio's call-control XML (ADR-001).
+
+Lives beside the adapter because it is Twilio wire format: nothing outside
+/app/telephony may know what a <Stream> element is.
 
 Pure string building so the exact XML Twilio receives is unit-testable.
 """
