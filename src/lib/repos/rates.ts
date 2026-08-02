@@ -920,7 +920,7 @@ export function upsertOverride(
   date: string,
   patch: OverridePatch,
   source: "manual" | "minihotel" = "manual",
-): void {
+): { keptManualMinStay: boolean } {
   const db = getDb();
   const existing = db
     .prepare("SELECT * FROM rate_calendar WHERE unit_id = ? AND date = ?")
@@ -934,10 +934,29 @@ export function upsertOverride(
   // it restamp the pin as "minihotel" would demote it to an ignorable mirror,
   // and the next push would then overwrite the PMS with the engine's min-stay.
   // Only the operator clears a manual pin.
-  const minNightsPatch =
-    source === "minihotel" && existing?.min_nights != null && existing.min_nights_source === "manual"
-      ? undefined
-      : patch.minNights;
+  const manualPin =
+    existing != null && existing.min_nights != null && existing.min_nights_source === "manual"
+      ? existing.min_nights
+      : null;
+  const keptManualMinStay =
+    source === "minihotel" && patch.minNights !== undefined && manualPin != null;
+  const minNightsPatch = keptManualMinStay ? undefined : patch.minNights;
+  if (keptManualMinStay) {
+    console.info(
+      `[rates] min-stay pin kept — unit=${unitId} date=${date} pin=${manualPin}n, sync sent ${
+        patch.minNights == null ? "clear" : `${patch.minNights}n`
+      } (ignored)`,
+    );
+  } else if (patch.minNights !== undefined && (source === "manual" || process.env.RATES_DEBUG === "1")) {
+    // Manual pin edits are rare and load-bearing — always logged. Synced
+    // min-stay mirrors arrive ~thousands per pull, so they only log with
+    // RATES_DEBUG=1.
+    console.info(
+      `[rates] min-stay ${patch.minNights == null ? "cleared" : `set to ${patch.minNights}n`} — unit=${unitId} date=${date} source=${source}${
+        manualPin != null && source === "manual" ? ` (was pinned ${manualPin}n)` : ""
+      }`,
+    );
+  }
 
   const merged = {
     unit_id: unitId,
@@ -974,6 +993,7 @@ export function upsertOverride(
        pct_adjust = @pct_adjust, expires_on = @expires_on,
        note = @note, source = @source, created_at = @created_at, updated_at = @updated_at`,
   ).run(merged);
+  return { keptManualMinStay };
 }
 
 // ------------------------------------------------------------- base-rate rebase

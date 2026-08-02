@@ -482,6 +482,7 @@ export async function syncFromMiniHotel(opts: {
   const typesSeen = new Set<string>();
   const unmapped = new Set<string>();
   let written = 0;
+  let keptPins = 0;
   for (const c of parsed) {
     typesSeen.add(c.roomType);
     const units = byType.get(c.roomType.trim().toUpperCase());
@@ -496,14 +497,20 @@ export async function syncFromMiniHotel(opts: {
     const booked =
       soldByType != null ? undefined : c.available != null ? !closed && c.available <= 0 : undefined;
     for (const unitId of units) {
-      upsertOverride(
+      const w = upsertOverride(
         unitId,
         c.date,
         { price: c.price, available: c.available, minNights: c.minNights, closed: c.closed, booked },
         "minihotel",
       );
+      if (w.keptManualMinStay) keptPins++;
       written++;
     }
+  }
+  if (keptPins > 0) {
+    const kept = `Kept ${keptPins} manual min-stay pin(s) — the PMS's min-nights on those nights were ignored.`;
+    note = note ? `${note} ${kept}` : kept;
+    console.info(`[rates] MiniHotel pull: ${kept}`);
   }
 
   // Reservation truth: mark each mapped unit's sold nights across the FULL

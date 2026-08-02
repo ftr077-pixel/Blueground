@@ -39,6 +39,7 @@ export async function POST(req: Request) {
 
   let recorded = 0;
   let skipped = 0;
+  let keptPins = 0;
   for (const raw of cells) {
     const c = raw as {
       unitId?: string;
@@ -76,9 +77,13 @@ export async function POST(req: Request) {
       skipped++;
       continue;
     }
-    upsertOverride(c.unitId, c.date, patch, "minihotel");
+    const w = upsertOverride(c.unitId, c.date, patch, "minihotel");
+    if (w.keptManualMinStay) keptPins++;
     recorded++;
   }
+  if (keptPins > 0) {
+    console.info(`[rates] snapshot ingest: kept ${keptPins} manual min-stay pin(s) — PMS min-nights ignored`);
+  }
 
-  return NextResponse.json({ ok: true, recorded, skipped });
+  return NextResponse.json({ ok: true, recorded, skipped, keptMinStayPins: keptPins });
 }
