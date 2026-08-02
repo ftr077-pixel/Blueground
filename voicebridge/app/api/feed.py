@@ -15,7 +15,11 @@ FORWARDED: frozenset[EventName] = frozenset(
         "asr_partial",
         "asr_final",
         "segment_committed",
+        # The console's per-stage latency indicator (§1.2) needs both ends of
+        # each stage, not just its result.
+        "mt_started",
         "mt_completed",
+        "tts_started",
         "tts_first_audio",
         "tts_completed",
         "barge_in",

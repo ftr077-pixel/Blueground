@@ -94,6 +94,27 @@ class TestOperatorFeed:
         names = [json.loads(line)["name"] for line in lines if line is not None]
         assert names == ["asr_partial", "mt_completed", "tts_first_audio"]
 
+    def test_both_ends_of_each_stage_reach_the_console(self) -> None:
+        """The console's per-stage latency indicator (§1.2) measures each stage
+        itself, so the start of a stage is as necessary as its result."""
+        feed = OperatorFeed()
+        bus = EventBus("s1", (feed,))
+        for name in ("segment_committed", "mt_started", "mt_completed", "tts_started"):
+            bus.emit(name, direction="a2b", correlation_id="c1")
+        lines = [feed.queue.get_nowait() for _ in range(feed.queue.qsize())]
+        names = [json.loads(line)["name"] for line in lines if line is not None]
+        assert names == ["segment_committed", "mt_started", "mt_completed", "tts_started"]
+
+    def test_forwarded_events_carry_the_timestamp_the_console_measures_with(self) -> None:
+        feed = OperatorFeed()
+        bus = EventBus("s1", (feed,))
+        bus.emit("segment_committed", direction="a2b", correlation_id="c1", text="שלום")
+        line = feed.queue.get_nowait()
+        assert line is not None
+        payload = json.loads(line)
+        assert isinstance(payload["monotonic_ts"], float)
+        assert payload["correlation_id"] == "c1"
+
     def test_a_stalled_console_never_blocks_emission(self) -> None:
         feed = OperatorFeed()
         bus = EventBus("s1", (feed,))
