@@ -73,12 +73,27 @@ fi
 # redirect for this subdomain, and everything that matters here — Twilio's
 # webhook, the media socket, the console — is https already.
 PORT80_OWNER="$(ss -lptnH 'sport = :80' 2>/dev/null | grep -o 'users:((\"[^\"]*' | cut -d'"' -f2 | head -1 || true)"
-if [[ -n "$PORT80_OWNER" && "$PORT80_OWNER" != "caddy" ]]; then
+if [[ -n "$PORT80_OWNER" && "$PORT80_OWNER" != "caddy"* ]]; then
   echo "     port 80 belongs to '$PORT80_OWNER' — leaving it alone, using 443 only"
   if ! grep -q "auto_https" /etc/caddy/Caddyfile; then
     printf '{\n\tauto_https disable_redirects\n}\n\n%s\n' \
       "$(cat /etc/caddy/Caddyfile)" > /etc/caddy/Caddyfile.new
     mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
+  fi
+  # The Debian package ships a ":80 { root * /usr/share/caddy; file_server }"
+  # welcome site. Caddy binds every site it is given or refuses to start at
+  # all, so that one block takes the whole server down — including :443 —
+  # when something else already owns port 80.
+  if grep -qE '^\s*:80\s*\{' /etc/caddy/Caddyfile; then
+    echo "     commenting out the packaged :80 welcome site"
+    cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.before-voicebridge"
+    awk '
+      /^[[:space:]]*:80[[:space:]]*\{/ && depth == 0 { inblock = 1 }
+      inblock { depth += gsub(/\{/, "{"); depth -= gsub(/\}/, "}"); print "# " $0
+                if (depth == 0) inblock = 0
+                next }
+      { print }
+    ' "/etc/caddy/Caddyfile.before-voicebridge" > /etc/caddy/Caddyfile
   fi
 fi
 
@@ -90,8 +105,19 @@ SITECONF
 
 echo "[4/5] reloading caddy"
 systemctl enable caddy >/dev/null 2>&1 || true
-systemctl restart caddy
+systemctl restart caddy || true
 sleep 8
+
+# A refused connection on 443 is not slow certificate issuance, it is a server
+# that never started. Say which one it is instead of blaming the wait.
+if ! systemctl is-active --quiet caddy; then
+  echo "" >&2
+  echo "  caddy did not start — its own reason:" >&2
+  journalctl -u caddy -n 25 --no-pager >&2
+  echo "" >&2
+  echo "  the configuration it refused is /etc/caddy/Caddyfile" >&2
+  exit 1
+fi
 
 echo "[5/5] checking from the outside"
 if curl -fsS --max-time 25 "https://$DOMAIN/health" | grep -q "^ok"; then
