@@ -5,63 +5,272 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>VoiceBridge — operator</title>
 <style>
-  :root { color-scheme: dark; }
-  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
-         background: #111; color: #eee; }
-  header { padding: 16px 20px; border-bottom: 1px solid #2a2a2a;
-           display: flex; align-items: center; gap: 16px; }
-  h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  button { font: inherit; padding: 8px 18px; border-radius: 6px; border: 0;
+  :root {
+    color-scheme: dark;
+    --bg: #101214; --panel: #171a1d; --line: #24282c;
+    --dim: #7d858c; --text: #e8eaec;
+    --caller: #7fd1a0; --you: #e0c584; --bad: #e0736a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+         font: 15px/1.55 ui-sans-serif, system-ui, sans-serif;
+         background: var(--bg); color: var(--text); }
+
+  header { display: flex; align-items: center; gap: 20px; padding: 12px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  button { font: inherit; padding: 7px 18px; border-radius: 6px; border: 0;
            background: #2f6f4f; color: #fff; cursor: pointer; }
-  button[disabled] { opacity: .45; cursor: default; }
-  #state { font-variant-numeric: tabular-nums; color: #9a9a9a; }
-  #log { padding: 16px 20px; margin: 0; list-style: none; }
-  #log li { padding: 6px 0; align-items: baseline; border-bottom: 1px solid #1e1e1e;
-            display: grid; grid-template-columns: 150px 52px 1fr; gap: 12px; }
-  .name { color: #7a7a7a; }
-  .dir  { color: #5a8fb5; }
-  .a2b  { color: #8fd6a8; }
-  .b2a  { color: #d6c98f; }
+  button[disabled] { opacity: .4; cursor: default; }
+  #state { color: var(--dim); }
+  .spacer { margin-left: auto; }
+
+  /* Latency is the operator's trust signal: it says whether a silence means
+     "still translating" or "something is wrong". */
+  #latency { display: flex; gap: 18px; font-variant-numeric: tabular-nums; }
+  #latency div { text-align: right; }
+  #latency .k { display: block; font-size: 11px; color: var(--dim);
+                text-transform: uppercase; letter-spacing: .6px; }
+  #latency .v { font-size: 17px; }
+  .over { color: var(--bad); }
+
+  #errors { margin: 0; padding: 0; list-style: none; }
+  #errors li { padding: 9px 20px; background: #2b1a19; color: var(--bad);
+               border-bottom: 1px solid #3a2422; font-size: 13px; }
+
+  #timeline { flex: 1; overflow-y: auto; margin: 0; padding: 12px 20px 24px;
+              list-style: none; }
+  .turn { display: grid; grid-template-columns: 74px 1fr 62px; gap: 14px;
+          padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .who { font-size: 12px; text-transform: uppercase; letter-spacing: .6px;
+         padding-top: 3px; }
+  .a2b .who { color: var(--caller); }
+  .b2a .who { color: var(--you); }
+  /* The original is what the operator falls back to when the translation
+     reads oddly, so it stays legible rather than being a footnote. */
+  .source { margin: 0; color: var(--dim); font-size: 14px; }
+  .target { margin: 2px 0 0; font-size: 16px; }
+  .lat { text-align: right; color: var(--dim); font-size: 13px; padding-top: 4px;
+         font-variant-numeric: tabular-nums; }
+  .pending .target { color: var(--dim); font-style: italic; }
+  .cut .target::after { content: " — cut off"; color: var(--bad); font-size: 13px; }
+  .live { opacity: .65; border-bottom: 0; }
+  .live .source { font-style: italic; }
 </style>
 </head>
 <body>
 <header>
-  <h1>VoiceBridge operator</h1>
+  <h1>VoiceBridge</h1>
   <button id="join">Connect</button>
   <span id="state">idle</span>
+  <span class="spacer"></span>
+  <div id="latency">
+    <div><span class="k">last</span><span class="v" id="lat-last">—</span></div>
+    <div><span class="k">median</span><span class="v" id="lat-p50">—</span></div>
+    <div><span class="k">turns</span><span class="v" id="lat-n">0</span></div>
+  </div>
 </header>
-<ul id="log"></ul>
+<ul id="errors"></ul>
+<ul id="timeline"></ul>
 
 <script>
 const RATE = 16000;          // ADR-002: everything is 16 kHz mono PCM16
 // createScriptProcessor only accepts powers of two. 1024 frames at 16 kHz
 // is 64 ms of capture latency, which fits the §5 budget.
 const BUFFER = 1024;
+// SPEC §5: p50 commit -> first audio. Past this the number turns red rather
+// than the operator having to remember the budget.
+const BUDGET_MS = 1500;
+const SIDE = { a2b: 'Caller', b2a: 'You' };
 
 const joinBtn = document.getElementById('join');
 const stateEl = document.getElementById('state');
-const logEl = document.getElementById('log');
+const timelineEl = document.getElementById('timeline');
+const errorsEl = document.getElementById('errors');
+const latLast = document.getElementById('lat-last');
+const latP50 = document.getElementById('lat-p50');
+const latN = document.getElementById('lat-n');
 
 let ws, micCtx, playCtx, playHead = 0, node, stream;
 let wanted = false, attempt = 0, retryTimer = null;
 const scheduled = new Set();
 
+// One entry per utterance, keyed by the correlation ID that §6.5 threads
+// through every stage — which is what lets a translation and its latency find
+// the row its source text already created.
+const turns = new Map();
+const liveRows = { a2b: null, b2a: null };
+const totals = [];
+
 function setState(text) { stateEl.textContent = text; }
 
-function addLine(event) {
+function atBottom() {
+  return timelineEl.scrollHeight - timelineEl.scrollTop - timelineEl.clientHeight < 60;
+}
+
+function scrollIfFollowing(wasAtBottom) {
+  if (wasAtBottom) timelineEl.scrollTop = timelineEl.scrollHeight;
+}
+
+function makeRow(direction, extraClass) {
   const li = document.createElement('li');
-  const name = document.createElement('span');
-  name.className = 'name';
-  name.textContent = event.name;
-  const dir = document.createElement('span');
-  dir.className = 'dir ' + (event.direction || '');
-  dir.textContent = event.direction || '';
-  const text = document.createElement('span');
-  text.className = event.direction || '';
-  text.textContent = event.translated_text || event.text || event.detail || '';
-  li.append(name, dir, text);
-  logEl.prepend(li);
-  while (logEl.children.length > 300) logEl.lastChild.remove();
+  li.className = 'turn ' + direction + (extraClass ? ' ' + extraClass : '');
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.textContent = SIDE[direction] || direction;
+  const texts = document.createElement('div');
+  const source = document.createElement('p');
+  source.className = 'source';
+  // Hebrew must lay out right-to-left next to English in the same column;
+  // the browser decides per line from the text itself.
+  source.dir = 'auto';
+  const target = document.createElement('p');
+  target.className = 'target';
+  target.dir = 'auto';
+  texts.append(source, target);
+  const lat = document.createElement('span');
+  lat.className = 'lat';
+  li.append(who, texts, lat);
+  return { li, source, target, lat };
+}
+
+function appendRow(row) {
+  const following = atBottom();
+  timelineEl.append(row.li);
+  while (timelineEl.children.length > 400) timelineEl.firstChild.remove();
+  scrollIfFollowing(following);
+}
+
+// What the ASR is hearing right now, shown as one provisional line per side
+// and replaced by a real turn the moment the segmenter commits it.
+function showLive(direction, text) {
+  let row = liveRows[direction];
+  if (!row) {
+    row = makeRow(direction, 'live');
+    liveRows[direction] = row;
+    appendRow(row);
+  }
+  const following = atBottom();
+  row.source.textContent = text;
+  scrollIfFollowing(following);
+}
+
+function clearLive(direction) {
+  const row = liveRows[direction];
+  if (!row) return;
+  row.li.remove();
+  liveRows[direction] = null;
+}
+
+function fmt(ms) { return (ms / 1000).toFixed(2) + 's'; }
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function recordLatency(ms) {
+  totals.push(ms);
+  latLast.textContent = fmt(ms);
+  latLast.className = 'v' + (ms > BUDGET_MS ? ' over' : '');
+  const p50 = median(totals);
+  latP50.textContent = fmt(p50);
+  latP50.className = 'v' + (p50 > BUDGET_MS ? ' over' : '');
+  latN.textContent = String(totals.length);
+}
+
+function showError(detail) {
+  // Errors go above the transcript, not inside it: a silent direction is the
+  // failure an operator cannot diagnose from the transcript alone.
+  const li = document.createElement('li');
+  li.textContent = detail;
+  errorsEl.append(li);
+  while (errorsEl.children.length > 4) errorsEl.firstChild.remove();
+}
+
+function handleEvent(event) {
+  const dir = event.direction;
+  const id = event.correlation_id;
+
+  switch (event.name) {
+    case 'asr_partial':
+    case 'asr_final':
+      if (dir && event.text) showLive(dir, event.text);
+      return;
+
+    case 'segment_committed': {
+      if (!dir || !id) return;
+      clearLive(dir);
+      const row = makeRow(dir, 'pending');
+      row.source.textContent = event.text || '';
+      row.target.textContent = 'translating…';
+      turns.set(id, { row, committedAt: event.monotonic_ts, mtStart: null, ttsStart: null });
+      appendRow(row);
+      return;
+    }
+
+    case 'mt_started': {
+      const turn = turns.get(id);
+      if (turn) turn.mtStart = event.monotonic_ts;
+      return;
+    }
+
+    case 'mt_completed': {
+      const turn = turns.get(id);
+      if (!turn) return;
+      turn.row.li.classList.remove('pending');
+      turn.row.target.textContent = event.translated_text || '';
+      if (event.source_text) turn.row.source.textContent = event.source_text;
+      turn.mtMs = turn.mtStart === null ? null : event.monotonic_ts - turn.mtStart;
+      return;
+    }
+
+    case 'tts_started': {
+      const turn = turns.get(id);
+      if (turn) turn.ttsStart = event.monotonic_ts;
+      return;
+    }
+
+    case 'tts_first_audio': {
+      const turn = turns.get(id);
+      if (!turn) return;
+      const total = event.monotonic_ts - turn.committedAt;
+      const ttsMs = turn.ttsStart === null ? null : event.monotonic_ts - turn.ttsStart;
+      turn.row.lat.textContent = fmt(total);
+      turn.row.lat.className = 'lat' + (total > BUDGET_MS ? ' over' : '');
+      const parts = [];
+      if (turn.mtMs !== null && turn.mtMs !== undefined) parts.push('translate ' + Math.round(turn.mtMs) + 'ms');
+      if (ttsMs !== null) parts.push('speak ' + Math.round(ttsMs) + 'ms');
+      if (parts.length) turn.row.lat.title = parts.join(' · ');
+      recordLatency(total);
+      return;
+    }
+
+    case 'tts_cancelled': {
+      const turn = turns.get(id);
+      if (turn) turn.row.li.classList.add('cut');
+      return;
+    }
+
+    case 'error':
+      showError(event.detail || 'unknown error');
+      return;
+
+    default:
+      return;
+  }
+}
+
+function resetCall() {
+  turns.clear();
+  totals.length = 0;
+  liveRows.a2b = liveRows.b2a = null;
+  timelineEl.replaceChildren();
+  errorsEl.replaceChildren();
+  latLast.textContent = latP50.textContent = '—';
+  latLast.className = latP50.className = 'v';
+  latN.textContent = '0';
 }
 
 // Browsers may ignore the requested sampleRate (Safari in particular), so
@@ -184,8 +393,8 @@ async function openSocket() {
     if (typeof e.data === 'string') {
       const event = JSON.parse(e.data);
       if (event.event === 'clear') { flushPlayback(); return; }
-      setState('on a call');
-      addLine(event);
+      if (stateEl.textContent !== 'on a call') { resetCall(); setState('on a call'); }
+      handleEvent(event);
       return;
     }
     playPcm16(e.data);
