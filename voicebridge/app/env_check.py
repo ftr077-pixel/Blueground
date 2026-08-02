@@ -89,6 +89,30 @@ RULES: tuple[Rule, ...] = (
         required_for_first_call=False,
     ),
     Rule(
+        name="GOOGLE_CLIENT_ID",
+        where="console.cloud.google.com -> APIs & Services -> Credentials",
+        expected="ends with .apps.googleusercontent.com — unset means no sign-in",
+        required_for_first_call=False,
+    ),
+    Rule(
+        name="GOOGLE_CLIENT_SECRET",
+        where="the same OAuth client, next to the ID",
+        expected="any non-empty secret",
+        required_for_first_call=False,
+    ),
+    Rule(
+        name="OPERATOR_EMAILS",
+        where="you decide: google accounts allowed to open the console",
+        expected="comma separated addresses — empty admits nobody",
+        required_for_first_call=False,
+    ),
+    Rule(
+        name="SESSION_SECRET",
+        where="generate one: openssl rand -base64 32",
+        expected="any long random string — unset signs everyone out on restart",
+        required_for_first_call=False,
+    ),
+    Rule(
         name="OUTBOUND_ALLOWED",
         where="you decide: numbers the console may dial, comma separated",
         expected="international format, e.g. +972501234567 — unset means no outbound calls",

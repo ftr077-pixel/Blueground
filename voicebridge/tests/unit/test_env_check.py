@@ -77,8 +77,12 @@ class TestCheck:
         optional = [r for r in results if not r.required]
         assert {r.name for r in optional} == {
             "DEEPGRAM_API_KEY",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "OPERATOR_EMAILS",
             "OUTBOUND_ALLOWED",
             "PUBLIC_HOST",
+            "SESSION_SECRET",
         }
         assert blocking(results) == []
 
