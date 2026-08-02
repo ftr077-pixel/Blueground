@@ -69,3 +69,26 @@ class TestHttpDetail:
         from app.preflight import _http_detail
 
         assert "ConnectionError" in _http_detail(ConnectionError("refused"))
+
+
+class TestVoiceLanguages:
+    """A voice that cannot speak the language it is configured for connects
+    fine and fails only at synthesis, so each voice is probed in its own
+    language rather than both being assumed from one English probe."""
+
+    async def test_a_missing_hebrew_voice_is_named(self) -> None:
+        from app.preflight import check_cartesia_voice
+
+        result = await check_cartesia_voice(
+            "Cartesia (he voice)", "CARTESIA_VOICE_HE", "he", "שלום.", {}
+        )
+        assert result.ok is False
+        assert "CARTESIA_VOICE_HE" in result.detail
+
+    async def test_both_voices_are_checked_separately(self) -> None:
+        from app.preflight import run_all
+
+        checks = await run_all({})
+        names = [c.vendor for c in checks]
+        assert "Cartesia (en voice)" in names
+        assert "Cartesia (he voice)" in names
