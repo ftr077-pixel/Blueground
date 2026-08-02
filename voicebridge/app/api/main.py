@@ -92,6 +92,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="VoiceBridge", lifespan=lifespan)
 app.state.pool = OperatorPool()
 app.state.trace = CallTrace()
+# Reported by /health so a deploy can wait for the line to be free instead
+# of cutting somebody off mid-sentence.
+app.state.active_calls = 0
 # A regenerated key at restart only signs people out; a key committed to the
 # repository would let anyone mint a session, so a missing one is generated.
 app.add_middleware(
@@ -121,7 +124,7 @@ def _signed_in(session: Mapping[str, object]) -> bool:
 
 @app.get("/health", response_class=PlainTextResponse)
 async def health() -> str:
-    return f"ok operators_waiting={_pool(app).available}"
+    return f"ok operators_waiting={_pool(app).available} calls_active={app.state.active_calls}"
 
 
 @app.get("/debug/last-call")
@@ -293,9 +296,11 @@ async def twilio_socket(ws: WebSocket) -> None:
         log.warning("call arrived with no operator waiting")
         await caller.close()
         return
+    app.state.active_calls += 1
     try:
         await _run_call(caller, operator)
     finally:
+        app.state.active_calls -= 1
         # One socket per call: the console reconnects and re-registers, which
         # leaves no half-alive registration behind when a call ends badly.
         operator.released.set()
