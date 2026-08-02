@@ -158,7 +158,10 @@ class TestGuardedRoutes:
         assert "<Response>" in response.text
 
     def test_health_stays_open_for_the_deploy_script(self) -> None:
-        assert self.client().get("/health").status_code == 200
+        response = self.client().get("/health")
+        assert response.status_code == 200
+        # The auto-deploy timer reads this to avoid restarting mid-call.
+        assert "calls_active=0" in response.text
 
 
 class TestUnconfigured:
