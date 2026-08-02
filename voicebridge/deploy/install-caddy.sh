@@ -66,6 +66,22 @@ touch /etc/caddy/Caddyfile
 if ! grep -q "conf.d/\*.caddy" /etc/caddy/Caddyfile; then
   printf '\nimport %s/*.caddy\n' "$CONF_DIR" >> /etc/caddy/Caddyfile
 fi
+
+# Somebody else's site may already own port 80. Taking it would be an outage
+# for them, so instead Caddy stays off 80 entirely and proves the domain over
+# port 443 (TLS-ALPN-01). The only thing lost is the http:// -> https://
+# redirect for this subdomain, and everything that matters here — Twilio's
+# webhook, the media socket, the console — is https already.
+PORT80_OWNER="$(ss -lptnH 'sport = :80' 2>/dev/null | grep -o 'users:((\"[^\"]*' | cut -d'"' -f2 | head -1 || true)"
+if [[ -n "$PORT80_OWNER" && "$PORT80_OWNER" != "caddy" ]]; then
+  echo "     port 80 belongs to '$PORT80_OWNER' — leaving it alone, using 443 only"
+  if ! grep -q "auto_https" /etc/caddy/Caddyfile; then
+    printf '{\n\tauto_https disable_redirects\n}\n\n%s\n' \
+      "$(cat /etc/caddy/Caddyfile)" > /etc/caddy/Caddyfile.new
+    mv /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
+  fi
+fi
+
 cat > "$SITE" <<SITECONF
 $DOMAIN {
     reverse_proxy localhost:8080

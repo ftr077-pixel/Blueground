@@ -64,6 +64,22 @@ The address it prints must equal the IP from step 1. If it prints nothing,
 wait and retry — usually 5–15 minutes, occasionally longer. Do not continue
 until it matches; a certificate cannot be issued before then.
 
+## Port 80 already belongs to something else
+
+This box also runs Denis's live site (a Next.js app, `next-server`, on
+port 80). **Do not stop it and do not take port 80 from it.** It is not a
+leftover dev server.
+
+`install-caddy.sh` handles this by itself: it detects that port 80 is
+owned by another process, stays off it, and proves the domain over port
+443 instead (TLS-ALPN-01). Nothing about the existing site changes. The
+only thing given up is the http:// -> https:// redirect for this
+subdomain, which nothing here needs — Twilio's webhook, the media socket
+and the console are all https.
+
+Port 443 must be free for this to work. If something already holds 443,
+stop and report it rather than displacing it.
+
 ## Step 3 — switch the server over (you do this)
 
 ```bash
@@ -136,7 +152,8 @@ Leave it installed as a fallback.
 - **`points at X but this box is Y`** — the A record has the wrong IP, or an
   old record still exists. Denis must fix it at the registrar.
 - **Certificate issuance fails** — check `journalctl -u caddy -n 40`. Almost
-  always DNS, or port 80 blocked. Caddy needs both 80 and 443 reachable.
+  always DNS. Port 443 must be reachable from the internet; port 80 is not
+  required here, see the port-80 section above.
 - **Calls reach the number but nothing happens** — the Twilio webhook still
   points at the old address. Step 4.
 - **`redirect_uri_mismatch`** — the string in Google does not match step 5
