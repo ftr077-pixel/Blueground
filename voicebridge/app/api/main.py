@@ -7,6 +7,7 @@ Routes:
     WS   /ws/twilio       the call's audio, Twilio Media Streams protocol
     WS   /ws/operator     the console: PCM16 16 kHz audio plus a JSON feed
     GET  /operator        the console page
+    GET  /auth/*          google sign-in for the control plane (SPEC A8)
 
 M0 pairs one call with one waiting operator (SPEC §9). Concurrency, auth and
 the real console are later milestones.
@@ -16,16 +17,34 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
 import sys
 import uuid
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
+from starlette.middleware.sessions import SessionMiddleware
 
+from app.api.auth import (
+    CALLBACK_PATH,
+    AuthConfig,
+    AuthError,
+    authorise,
+    authorize_url,
+    check_state,
+    exchange_code,
+    new_state,
+)
 from app.api.factory import CALLER_LANGUAGE, OPERATOR_LANGUAGE, build_session
 from app.api.feed import OperatorFeed
 from app.api.outbound import allowlist, normalise
@@ -59,12 +78,28 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if problems:
         names = ", ".join(problem.name for problem in problems)
         raise RuntimeError(f"configuration incomplete: {names}. Run 'make check-env'.")
+    if AuthConfig.from_env() is None:
+        log.warning(
+            "sign-in is NOT configured: /operator, /call and /debug are open to anyone "
+            "who can reach this address. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET "
+            "and OPERATOR_EMAILS."
+        )
+    elif not os.environ.get("SESSION_SECRET"):
+        log.warning("SESSION_SECRET is unset: every restart signs all operators out")
     yield
 
 
 app = FastAPI(title="VoiceBridge", lifespan=lifespan)
 app.state.pool = OperatorPool()
 app.state.trace = CallTrace()
+# A regenerated key at restart only signs people out; a key committed to the
+# repository would let anyone mint a session, so a missing one is generated.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("SESSION_SECRET") or secrets.token_urlsafe(32),
+    same_site="lax",
+    https_only=True,
+)
 
 
 def _pool(request_app: FastAPI) -> OperatorPool:
@@ -73,26 +108,91 @@ def _pool(request_app: FastAPI) -> OperatorPool:
     return pool
 
 
+def _signed_in(session: Mapping[str, object]) -> bool:
+    """True when the request may use the control plane.
+
+    Unconfigured sign-in leaves the console open: a box mid-setup must not
+    lock its owner out. The startup check says so out loud.
+    """
+    if AuthConfig.from_env() is None:
+        return True
+    return bool(session.get("email"))
+
+
 @app.get("/health", response_class=PlainTextResponse)
 async def health() -> str:
     return f"ok operators_waiting={_pool(app).available}"
 
 
 @app.get("/debug/last-call")
-async def last_call() -> dict[str, object]:
+async def last_call(request: Request) -> Response:
     """Per-stage waterfall for the most recent call (SPEC §7).
 
-    Contains transcripts, so it is a debugging aid, not a public endpoint —
-    it goes behind auth with the rest of the control plane at M2.
+    Holds transcripts of real conversations, so it sits behind sign-in
+    with the rest of the control plane.
     """
+    if not _signed_in(request.session):
+        return JSONResponse({"detail": "sign in first"}, 401)
     trace = app.state.trace
     assert isinstance(trace, CallTrace)
-    return trace.summary()
+    return JSONResponse(trace.summary())
 
 
-@app.get("/operator", response_class=FileResponse)
-async def operator_page() -> FileResponse:
+@app.get("/operator")
+async def operator_page(request: Request) -> Response:
+    if not _signed_in(request.session):
+        return RedirectResponse("/auth/login")
     return FileResponse(CONSOLE_PAGE, media_type="text/html")
+
+
+@app.get("/auth/login")
+async def sign_in(request: Request) -> Response:
+    config = AuthConfig.from_env()
+    if config is None:
+        return RedirectResponse("/operator")
+    state = new_state()
+    request.session["oauth_state"] = state
+    redirect_uri = _public_host(request) + CALLBACK_PATH
+    return RedirectResponse(authorize_url(config, redirect_uri, state))
+
+
+@app.get(CALLBACK_PATH)
+async def sign_in_callback(request: Request) -> Response:
+    config = AuthConfig.from_env()
+    if config is None:
+        return RedirectResponse("/operator")
+    try:
+        check_state(request.session.pop("oauth_state", None), request.query_params.get("state"))
+        code = request.query_params.get("code")
+        if not code:
+            raise AuthError("google sent no code — sign-in was cancelled")
+        async with httpx.AsyncClient() as client:
+            email = await exchange_code(config, code, _public_host(request) + CALLBACK_PATH, client)
+        request.session["email"] = authorise(config, email)
+    except AuthError as exc:
+        # The address is named on purpose: "not on the operator list" is only
+        # actionable if you know which account you just used.
+        log.warning("sign-in refused: %s", exc)
+        return PlainTextResponse(str(exc), status_code=403)
+    log.info("signed in %s", request.session["email"])
+    return RedirectResponse("/operator")
+
+
+@app.get("/auth/logout")
+async def sign_out(request: Request) -> Response:
+    request.session.clear()
+    return RedirectResponse("/operator")
+
+
+@app.get("/auth/me")
+async def whoami(request: Request) -> Response:
+    """Lets the console show who is signed in, and whether it needs to."""
+    return JSONResponse(
+        {
+            "email": request.session.get("email"),
+            "required": AuthConfig.from_env() is not None,
+        }
+    )
 
 
 @app.post("/twilio/voice")
@@ -124,6 +224,8 @@ async def place_call(request: Request) -> Response:
     Fail-closed on the allowlist: this endpoint is on a public tunnel with no
     auth until M2, and an open dial endpoint is somebody else's phone bill.
     """
+    if not _signed_in(request.session):
+        return JSONResponse({"detail": "sign in first"}, 401)
     payload = await request.json()
     number = normalise(str(payload.get("to", "")))
     if number is None:
@@ -154,6 +256,11 @@ DRAIN_TICK_S = 0.05
 
 @app.websocket("/ws/operator")
 async def operator_socket(ws: WebSocket) -> None:
+    # Checked before accept: an unauthenticated socket must never reach
+    # the pool, or a stranger is handed the next caller.
+    if not _signed_in(ws.session):
+        await ws.close(code=1008)
+        return
     await ws.accept()
     pool = _pool(app)
     stream = ServerSocket(ws)

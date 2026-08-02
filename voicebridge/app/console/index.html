@@ -25,6 +25,8 @@
   #state { color: var(--dim); }
   .spacer { margin-left: auto; }
 
+  #who { color: var(--dim); font-size: 13px; }
+  #who a { color: var(--dim); }
   #dial { display: flex; gap: 8px; }
   #number { font: inherit; width: 170px; padding: 7px 10px; border-radius: 6px;
             border: 1px solid var(--line); background: #0d0f11; color: var(--text); }
@@ -74,6 +76,7 @@
     <button id="call" type="submit" disabled>Call</button>
   </form>
   <span class="spacer"></span>
+  <span id="who"></span>
   <div id="latency">
     <div><span class="k">last</span><span class="v" id="lat-last">—</span></div>
     <div><span class="k">median</span><span class="v" id="lat-p50">—</span></div>
@@ -427,6 +430,22 @@ joinBtn.addEventListener('click', () => { connect().catch((err) => {
   setState('error: ' + err.message);
   joinBtn.disabled = false;
 }); });
+
+// Who is signed in (SPEC A8). A console with no login says so rather than
+// leaving the corner blank and looking the same as a protected one.
+fetch('/auth/me').then((r) => r.json()).then((me) => {
+  const who = document.getElementById('who');
+  if (me.email) {
+    who.innerHTML = '';
+    who.append(me.email + ' · ');
+    const out = document.createElement('a');
+    out.href = '/auth/logout';
+    out.textContent = 'sign out';
+    who.append(out);
+  } else if (!me.required) {
+    who.textContent = 'no login configured';
+  }
+}).catch(() => {});
 
 // Dialling out (SPEC A7). The button stays disabled until the console is in
 // the queue: a call placed with nobody listening reaches a person who hears
