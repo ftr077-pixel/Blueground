@@ -263,3 +263,27 @@ class TestCommittedTextIsNeverReEmitted:
         second = seg.poll(1200.0)
         assert second is not None
         assert second.text == "four five."
+
+
+class TestPunctuationIsNotNewText:
+    """Measured on a live call: the vendor attaches the closing punctuation
+    only when it finalises, so the final's last token differs from the one
+    already committed. Compared literally that reads as a different sentence
+    and the whole utterance goes out a second time — three of seven delivered
+    turns on that call were such duplicates."""
+
+    def test_a_final_that_only_adds_punctuation_commits_nothing(self) -> None:
+        seg = make(HEBREW)
+        seg.on_asr_result(partial("מה מצב כפרה עליך", 0.0), 0.0)
+        vad = seg.on_vad_silence(600.0)
+        assert vad is not None and vad.text == "מה מצב כפרה עליך"
+        assert seg.on_asr_result(final("מה מצב כפרה עליך.", 700.0), 700.0) is None
+
+    def test_a_final_that_adds_punctuation_and_words_emits_only_the_words(self) -> None:
+        seg = make()
+        seg.on_asr_result(partial("i entered", 0.0), 0.0)
+        vad = seg.on_vad_silence(600.0)
+        assert vad is not None and vad.text == "i entered"
+        commit = seg.on_asr_result(final("i entered, and it stinks.", 700.0), 700.0)
+        assert commit is not None
+        assert commit.text == "and it stinks."
