@@ -48,6 +48,11 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now voicebridge-update.timer
 
+# Deploy once here. The timer only fires when main *moves*, so installing it
+# right after a manual pull would otherwise leave the old build running with
+# nothing scheduled to replace it.
+"$APP_DIR/deploy/deploy.sh"
+
 cat <<DONE
 
   The box now follows main, checking every $INTERVAL.
