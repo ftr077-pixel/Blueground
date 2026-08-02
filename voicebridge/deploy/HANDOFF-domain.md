@@ -64,6 +64,22 @@ The address it prints must equal the IP from step 1. If it prints nothing,
 wait and retry — usually 5–15 minutes, occasionally longer. Do not continue
 until it matches; a certificate cannot be issued before then.
 
+## Port 80 already belongs to something else
+
+This box also runs Denis's live site (a Next.js app, `next-server`, on
+port 80). **Do not stop it and do not take port 80 from it.** It is not a
+leftover dev server.
+
+`install-caddy.sh` handles this by itself: it detects that port 80 is
+owned by another process, stays off it, and proves the domain over port
+443 instead (TLS-ALPN-01). Nothing about the existing site changes. The
+only thing given up is the http:// -> https:// redirect for this
+subdomain, which nothing here needs — Twilio's webhook, the media socket
+and the console are all https.
+
+Port 443 must be free for this to work. If something already holds 443,
+stop and report it rather than displacing it.
+
 ## Step 3 — switch the server over (you do this)
 
 ```bash
