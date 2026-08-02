@@ -4,3 +4,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+
+# Call transcripts live here. Never in git.
+voicebridge/data/

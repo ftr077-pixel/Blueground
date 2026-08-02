@@ -113,6 +113,12 @@ RULES: tuple[Rule, ...] = (
         required_for_first_call=False,
     ),
     Rule(
+        name="ADMIN_EMAILS",
+        where="you decide: who may read every operator's calls",
+        expected="comma separated addresses — empty means everyone sees only their own",
+        required_for_first_call=False,
+    ),
+    Rule(
         name="OUTBOUND_ALLOWED",
         where="you decide: numbers the console may dial, comma separated",
         expected="international format, e.g. +972501234567 — unset means no outbound calls",

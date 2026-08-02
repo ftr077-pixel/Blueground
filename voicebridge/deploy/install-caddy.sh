@@ -130,9 +130,10 @@ if curl -fsS --max-time 25 "https://$DOMAIN/health" | grep -q "^ok"; then
   Operator console:   https://$DOMAIN/operator
   Last call timings:  https://$DOMAIN/debug/last-call
 
-  The console has no login yet. Twilio cannot answer an auth prompt, so the
-  webhook and media socket must stay open; protecting the console and
-  verifying Twilio's request signature is M2 work.
+  The console signs in through Google when GOOGLE_CLIENT_ID is set, and is
+  open to anyone otherwise — 'make check-env' says which. Twilio cannot
+  answer a login prompt, so the webhook and media socket stay open either
+  way; verifying Twilio's request signature is M2 work.
 
 DONE
 else
