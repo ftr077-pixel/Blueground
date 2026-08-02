@@ -102,16 +102,29 @@ async def check_openai(env: Mapping[str, str] | None = None) -> Check:
     return Check("OpenAI (mt)", True, "translated a probe phrase")
 
 
-async def check_cartesia(env: Mapping[str, str] | None = None) -> Check:
-    voice_id = _env(env).get("CARTESIA_VOICE_EN", "")
+async def check_cartesia_voice(
+    label: str,
+    variable: str,
+    language: str,
+    probe: str,
+    env: Mapping[str, str] | None = None,
+) -> Check:
+    """Synthesize in the voice's own language.
+
+    A voice that does not speak the language it is configured for is accepted
+    at connect time and fails only at synthesis. Measured twice on live calls:
+    an English voice in CARTESIA_VOICE_HE left the operator inaudible for the
+    whole call while every other check was green.
+    """
+    voice_id = _env(env).get(variable, "")
     if not voice_id:
-        return Check("Cartesia (tts)", False, "CARTESIA_VOICE_EN is not set")
+        return Check(label, False, f"{variable} is not set")
     tts: CartesiaTTS | None = None
     try:
         config = CartesiaConfig.from_env(env)
         tts = CartesiaTTS(functools.partial(dial, config.stream_url()), config)
         await asyncio.wait_for(tts.start(), TIMEOUT_S)
-        synthesis = tts.synthesize("Hello.", VoiceSpec(voice_id=voice_id, language="en"))
+        synthesis = tts.synthesize(probe, VoiceSpec(voice_id=voice_id, language=language))
         frames = 0
 
         async def first_chunk() -> int:
@@ -124,13 +137,13 @@ async def check_cartesia(env: Mapping[str, str] | None = None) -> Check:
 
         await asyncio.wait_for(first_chunk(), TIMEOUT_S)
         if frames == 0:
-            return Check("Cartesia (tts)", False, "no audio returned")
+            return Check(label, False, "no audio returned")
     except Exception as exc:
-        return Check("Cartesia (tts)", False, f"{type(exc).__name__}: {exc}")
+        return Check(label, False, f"{type(exc).__name__}: {exc}")
     finally:
         if tts is not None:
             await tts.close()
-    return Check("Cartesia (tts)", True, "audio received")
+    return Check(label, True, f"spoke {language} audio")
 
 
 async def run_all(env: Mapping[str, str] | None = None) -> list[Check]:
@@ -138,7 +151,8 @@ async def run_all(env: Mapping[str, str] | None = None) -> list[Check]:
         check_speechmatics(env),
         check_deepgram(env),
         check_openai(env),
-        check_cartesia(env),
+        check_cartesia_voice("Cartesia (en voice)", "CARTESIA_VOICE_EN", "en", "Hello.", env),
+        check_cartesia_voice("Cartesia (he voice)", "CARTESIA_VOICE_HE", "he", "שלום.", env),
     )
     return [check for check in results if check is not None]
 
