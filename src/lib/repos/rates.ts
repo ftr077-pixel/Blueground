@@ -929,17 +929,27 @@ export function upsertOverride(
   const boolCol = (v: boolean | null | undefined, prev: number | null): number | null =>
     v !== undefined ? (v === null ? null : v ? 1 : 0) : prev;
 
+  // A MiniHotel sync never touches an operator's manual min-stay pin. The PMS
+  // only echoes back whatever was last pushed (or holds a stale value); letting
+  // it restamp the pin as "minihotel" would demote it to an ignorable mirror,
+  // and the next push would then overwrite the PMS with the engine's min-stay.
+  // Only the operator clears a manual pin.
+  const minNightsPatch =
+    source === "minihotel" && existing?.min_nights != null && existing.min_nights_source === "manual"
+      ? undefined
+      : patch.minNights;
+
   const merged = {
     unit_id: unitId,
     date,
     price: patch.price !== undefined ? patch.price : (existing?.price ?? null),
     available: patch.available !== undefined ? patch.available : (existing?.available ?? null),
-    min_nights: patch.minNights !== undefined ? patch.minNights : (existing?.min_nights ?? null),
+    min_nights: minNightsPatch !== undefined ? minNightsPatch : (existing?.min_nights ?? null),
     // Stamp provenance whenever this write sets min_nights; clearing it (null)
     // drops the provenance too. Untouched writes keep the prior source.
     min_nights_source:
-      patch.minNights !== undefined
-        ? patch.minNights === null
+      minNightsPatch !== undefined
+        ? minNightsPatch === null
           ? null
           : source
         : (existing?.min_nights_source ?? null),
