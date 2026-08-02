@@ -152,7 +152,8 @@ Leave it installed as a fallback.
 - **`points at X but this box is Y`** — the A record has the wrong IP, or an
   old record still exists. Denis must fix it at the registrar.
 - **Certificate issuance fails** — check `journalctl -u caddy -n 40`. Almost
-  always DNS, or port 80 blocked. Caddy needs both 80 and 443 reachable.
+  always DNS. Port 443 must be reachable from the internet; port 80 is not
+  required here, see the port-80 section above.
 - **Calls reach the number but nothing happens** — the Twilio webhook still
   points at the old address. Step 4.
 - **`redirect_uri_mismatch`** — the string in Google does not match step 5
