@@ -88,6 +88,9 @@ async def build_session(
     await tts.start()
 
     translator = OpenAITranslator(OpenAIConfig.from_env(env))
+    # Before the caller says anything, so the first turn does not pay for
+    # the TLS handshake while somebody listens to silence.
+    await translator.warm()
     segmenter_config = SegmenterConfig.from_env(env)
 
     english_asr = _english_asr(env)

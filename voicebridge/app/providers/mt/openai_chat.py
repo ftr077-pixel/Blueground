@@ -8,6 +8,7 @@ at any OpenAI-compatible endpoint if the host ever changes.
 Configuration comes from the environment — no URLs or keys in code.
 """
 
+import contextlib
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -80,6 +81,18 @@ class OpenAITranslator(Translator):
         body = response.json()
         translated = str(body["choices"][0]["message"]["content"]).strip()
         return Translation(text=translated, tier=tier)
+
+    async def warm(self) -> None:
+        """Open the connection before anybody is waiting on it.
+
+        Measured on a live call: the first translation of a call took 1596 ms
+        against 551 ms for the third. The difference is DNS and the TLS
+        handshake, and a call has exactly one first turn — the one the caller
+        is listening to silence for. Failure is ignored: this is an
+        optimisation, and the real request will report its own error.
+        """
+        with contextlib.suppress(Exception):
+            await self._client.get(f"{self._config.base_url}/v1/models", timeout=5.0)
 
     async def close(self) -> None:
         await self._client.aclose()

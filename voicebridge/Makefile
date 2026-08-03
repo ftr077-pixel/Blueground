@@ -1,4 +1,4 @@
-.PHONY: setup check-env preflight dev run tunnel test lint deploy
+.PHONY: setup check-env preflight probe dev run tunnel test lint deploy
 
 # uv installs to ~/.local/bin, which is not on PATH until the shell is
 # restarted — look there too so `make run` works in the same session that
@@ -26,6 +26,10 @@ check-env:
 
 preflight:
 	@"$(UV)" run python scripts/preflight.py || true
+
+# SPEC §8.4: what each vendor actually costs, against the live APIs.
+probe:
+	@"$(UV)" run python -m app.probe
 
 dev:
 	@"$(UV)" run python scripts/dev.py
