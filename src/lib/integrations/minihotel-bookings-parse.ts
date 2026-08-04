@@ -28,6 +28,19 @@ export function escXml(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+// MiniHotel responses are entity-encoded XML (their .asmx endpoints wrap the
+// payload in <string>…</string> with the inner XML escaped). Decode before
+// parsing so the <Booking> regexes see real tags — on the raw text they match
+// nothing and a live pull silently stores zero bookings.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, "&");
+}
+
 function attr(s: string, name: string): string | null {
   const m = new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, "i").exec(s);
   return m ? m[1] : null;
@@ -82,9 +95,10 @@ export function buildReservationsRequest(conn: MiniHotelConnection, from: string
  */
 export function parseReservations(xml: string): ParsedReservation[] {
   const out: ParsedReservation[] = [];
+  const x = decodeEntities(xml);
   const bRe = /<Booking\b([^>]*)>([\s\S]*?)<\/Booking>/gi;
   let b: RegExpExecArray | null;
-  while ((b = bRe.exec(xml))) {
+  while ((b = bRe.exec(x))) {
     const head = b[1];
     const body = b[2];
     const minihotelId = attr(head, "Minihotel_reservation_id");
