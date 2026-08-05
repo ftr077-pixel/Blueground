@@ -1612,10 +1612,22 @@ export function buildReservationsRequest(conn: MiniHotelConnection, from: string
   );
 }
 
+// Per-request ceiling. The response for an arrival window grows with the book,
+// so any "one big window" pull eventually crosses whatever limit is set — the
+// cure is the chunking below, not a bigger number. 30s (was 20s) just keeps a
+// slow-but-alive PMS from reading as dead.
+const RES_FETCH_TIMEOUT_MS = 30_000;
+// Arrival-window chunk for reservation pulls. A 330-day single-window pull
+// worked until the book grew past what MiniHotel can serialize in time — then
+// every sync aborted ("This operation was aborted") and the feed silently
+// froze. Chunks bound the response size per request no matter how the book
+// grows; each chunk is its own request under the timeout.
+const RES_CHUNK_DAYS = 90;
+
 export async function fetchReservations(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const timer = setTimeout(() => controller.abort(), RES_FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(`${ep.content}/api/Agents/Sci/Reservation/GetReservationKey`, {
       method: "POST",
@@ -1635,9 +1647,44 @@ export async function fetchReservations(conn: MiniHotelConnection, from: string,
       if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
     }
     return text;
+  } catch (e) {
+    // "This operation was aborted" is our own timeout — say what actually
+    // happened and for which window, so the feed banner is actionable.
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(
+        `MiniHotel didn't answer within ${RES_FETCH_TIMEOUT_MS / 1000}s for arrivals ${from}→${to}`,
+      );
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Pull an arrival window in RES_CHUNK_DAYS slices, one request each. Failed
+ * slices are reported, not thrown — a partial pull still refreshes what it
+ * reached, and the caller decides whether the whole is fresh enough to stamp.
+ */
+async function fetchReservationsChunked(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+): Promise<{ payloads: string[]; errors: string[] }> {
+  const payloads: string[] = [];
+  const errors: string[] = [];
+  let cur = from;
+  while (cur <= to) {
+    const chunkEnd = plusDays(cur, RES_CHUNK_DAYS - 1);
+    const end = chunkEnd < to ? chunkEnd : to;
+    try {
+      payloads.push(await fetchReservations(conn, cur, end));
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : `pull failed for ${cur}→${end}`);
+    }
+    cur = plusDays(end, 1);
+  }
+  return { payloads, errors };
 }
 
 export interface ReservationSyncResult {
@@ -1683,7 +1730,7 @@ export function buildCancellationsRequest(conn: MiniHotelConnection, from: strin
 export async function fetchCancellations(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const timer = setTimeout(() => controller.abort(), RES_FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(`${ep.content}/api/Agents/Sci/Reservation/GetReservationKey`, {
       method: "POST",
@@ -1701,6 +1748,13 @@ export async function fetchCancellations(conn: MiniHotelConnection, from: string
       if (err) throw new Error(`MiniHotel ${err[0].trim()}`);
     }
     return text;
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(
+        `MiniHotel didn't answer within ${RES_FETCH_TIMEOUT_MS / 1000}s for cancellations ${from}→${to}`,
+      );
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -1767,8 +1821,9 @@ export async function syncReservationsFromMiniHotel(opts: {
   const days = Math.max(1, Math.min(370, opts.days ?? RES_LOOKBACK_DAYS + RES_HORIZON_DAYS));
   const to = plusDays(from, days - 1);
 
-  let payload = opts.payload;
-  if (!payload) {
+  let mainPayloads: string[] = opts.payload ? [opts.payload] : [];
+  let mainErrors: string[] = [];
+  if (!opts.payload) {
     if (!conn.username || !conn.password || !conn.hotelId) {
       return {
         ok: false,
@@ -1785,52 +1840,49 @@ export async function syncReservationsFromMiniHotel(opts: {
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
-    try {
-      payload = await fetchReservations(conn, from, to);
-    } catch (e) {
-      // A dead main pull means the money on every tab silently freezes — record
-      // why, so the UI can say "feed is stale since X because Y" instead of
-      // quietly serving old numbers. Cleared again on the next successful pull.
-      recordReservationSyncError(e instanceof Error ? e.message : "reservation pull failed");
-      throw e;
+    // Chunked main pull: one big arrival window is exactly what outgrew the
+    // request timeout and froze the feed. Failed chunks are collected — a
+    // partial pull still refreshes everything it reached.
+    const main = await fetchReservationsChunked(conn, from, to);
+    if (main.payloads.length === 0 && main.errors.length > 0) {
+      // Nothing at all came back — record why (the pacing banner reads this)
+      // and fail the sync like the old single-request path did.
+      const msg = main.errors.join("; ");
+      recordReservationSyncError(msg);
+      throw new Error(msg);
     }
+    mainPayloads = main.payloads;
+    mainErrors = main.errors;
   }
 
   // Long-stay tail: on a default (auto) sync, also re-read arrivals older than
   // the standard lookback so months still occupied by long stays keep their
   // revenue. Best-effort — a failed tail pull must not sink the main one. An
   // explicit `from` means the caller asked for a specific window; honor it as-is.
-  let deepPayload: string | null = null;
+  const tailPayloads: string[] = [];
   let deepError: string | undefined;
   let deepFrom: string | undefined;
+  let hadDeep = false;
   // Forward tail: arrivals beyond the standard horizon (up to a year out), so
   // far-future bookings land the day they're made, not months later.
-  let fwdPayload: string | null = null;
   let horizonError: string | undefined;
   if (!opts.payload && !opts.from) {
     deepFrom = plusDays(todayLocal(), -RES_DEEP_LOOKBACK_DAYS);
     const deepTo = plusDays(todayLocal(), -(RES_LOOKBACK_DAYS + 1));
-    try {
-      deepPayload = await fetchReservations(conn, deepFrom, deepTo);
-    } catch (e) {
-      deepError = e instanceof Error ? e.message : "long-stay lookback pull failed";
-    }
+    const deep = await fetchReservationsChunked(conn, deepFrom, deepTo);
+    hadDeep = deep.payloads.length > 0;
+    tailPayloads.push(...deep.payloads);
+    if (deep.errors.length) deepError = deep.errors.join("; ");
     // The main window's last arrival is today + (LOOKBACK+HORIZON) − LOOKBACK − 1
     // = today + HORIZON − 1, so the forward tail starts at today + HORIZON.
     const fwdFrom = plusDays(todayLocal(), RES_HORIZON_DAYS);
     const fwdTo = plusDays(todayLocal(), RES_DEEP_HORIZON_DAYS);
-    try {
-      fwdPayload = await fetchReservations(conn, fwdFrom, fwdTo);
-    } catch (e) {
-      horizonError = e instanceof Error ? e.message : "forward horizon pull failed";
-    }
+    const fwd = await fetchReservationsChunked(conn, fwdFrom, fwdTo);
+    tailPayloads.push(...fwd.payloads);
+    if (fwd.errors.length) horizonError = fwd.errors.join("; ");
   }
 
-  const parsed = [
-    ...parseReservations(payload),
-    ...(deepPayload ? parseReservations(deepPayload) : []),
-    ...(fwdPayload ? parseReservations(fwdPayload) : []),
-  ];
+  const parsed = [...mainPayloads, ...tailPayloads].flatMap((p) => parseReservations(p));
   const { recorded, skipped } = upsertReservations(
     parsed.map((r) => ({
       id: r.id,
@@ -1862,17 +1914,28 @@ export async function syncReservationsFromMiniHotel(opts: {
     }
     // Freshness marker for the auto-refresh hook (live checks only — a captured
     // payload refreshes rows but isn't a verification against MiniHotel).
+    // Stamped clean only when EVERY window came back; a partial pull keeps the
+    // banner up with the exact windows that failed, because "verified" must
+    // mean the whole book, not whichever chunks happened to answer.
     const db = getDb();
-    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_synced_at', ?)")
-      .run(new Date().toISOString());
-    // Main pull verified — any stale "feed is broken" banner comes down.
-    db.prepare("DELETE FROM meta WHERE key = 'reservations_sync_error'").run();
+    const windowErrors = [
+      ...mainErrors,
+      ...(deepError ? [deepError] : []),
+      ...(horizonError ? [horizonError] : []),
+    ];
+    if (windowErrors.length === 0) {
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_synced_at', ?)")
+        .run(new Date().toISOString());
+      db.prepare("DELETE FROM meta WHERE key = 'reservations_sync_error'").run();
+    } else {
+      recordReservationSyncError(`partial sync — some windows failed: ${windowErrors.join("; ")}`);
+    }
   }
 
   const stats = reservationStats();
   return {
     ok: true,
-    from: deepPayload && deepFrom ? deepFrom : from,
+    from: hadDeep && deepFrom ? deepFrom : from,
     to,
     parsed: parsed.length,
     recorded,
