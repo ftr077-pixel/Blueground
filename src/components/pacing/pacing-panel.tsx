@@ -362,6 +362,8 @@ export function PacingPanel() {
   const [aptOpen, setAptOpen] = useState<string | null>(null);
   const [aptDetail, setAptDetail] = useState<ApartmentRevenueDetail | null>(null);
   const [aptDetailLoading, setAptDetailLoading] = useState(false);
+  // Bumped after an exclusion so the by-apartment table refetches.
+  const [aptRefresh, setAptRefresh] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -452,7 +454,35 @@ export function PacingPanel() {
     setAptOpen(null);
     setAptDetail(null);
     return () => ctrl.abort();
-  }, [aptFrom, aptTo]);
+  }, [aptFrom, aptTo, aptRefresh]);
+
+  // Retire an old/test unit from every statistic: adds its room code to the
+  // excluded set (Settings → MiniHotel — same list, reviewable and undoable
+  // there). Reservations stay stored; they just stop counting anywhere.
+  const excludeApartment = useCallback(
+    async (key: string, label: string, roomType: string | null) => {
+      const code = roomType || (key.startsWith("#") ? key.slice(1) : key);
+      const ok = window.confirm(
+        `Exclude “${label}” (code ${code}) from ALL statistics — revenue, occupancy, pacing and P&L?\n\n` +
+          "Its reservations stay stored but stop counting everywhere. Undo anytime in Settings → MiniHotel → excluded room types.",
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch("/api/reservations/exclude-room", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        if (!res.ok) throw new Error(`exclude failed: ${res.status}`);
+        setAptOpen(null);
+        setAptDetail(null);
+        setAptRefresh((n) => n + 1);
+      } catch {
+        window.alert("Couldn’t save the exclusion — check the connection and try again.");
+      }
+    },
+    [],
+  );
 
   // Expand one apartment row into its underlying reservations (the debug view).
   const toggleAptDetail = useCallback(
@@ -1209,13 +1239,28 @@ export function PacingPanel() {
                                       ))}
                                     </tbody>
                                   </table>
-                                  <p className="mt-1.5 text-[10px] text-muted-foreground">
-                                    Struck-through rows are excluded (cancelled / test). “Net stay” is the whole
-                                    reservation; “Net in win.” is the share accrued inside the selected window —
-                                    the table above sums that column. A currency other than ILS, VAT basis
-                                    “assumed-none” on Israeli guests, or a gross that looks like a nightly/monthly
-                                    rate instead of the stay total are the usual suspects when a figure is wrong.
-                                  </p>
+                                  <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
+                                    <p className="max-w-3xl text-[10px] text-muted-foreground">
+                                      Struck-through rows are excluded (cancelled / test). “Net stay” is the whole
+                                      reservation; “Net in win.” is the share accrued inside the selected window —
+                                      the table above sums that column. A currency other than ILS, VAT basis
+                                      “assumed-none” on Israeli guests, or a gross that looks like a nightly/monthly
+                                      rate instead of the stay total are the usual suspects when a figure is wrong.
+                                    </p>
+                                    {r.key !== "unassigned" && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          excludeApartment(r.key, r.apartment, r.roomType);
+                                        }}
+                                        className="shrink-0 rounded-md border border-[hsl(var(--danger))]/30 bg-[hsl(var(--danger))]/10 px-2 py-1 text-[10px] font-medium text-[hsl(var(--danger))] hover:bg-[hsl(var(--danger))]/20"
+                                        title="Old/test unit? Drop it from every statistic (undo in Settings → MiniHotel)"
+                                      >
+                                        Exclude “{r.apartment}” from all analytics
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               )}
                             </td>
