@@ -1659,6 +1659,9 @@ export interface ReservationSyncResult {
   /** The long-stay tail pull (arrivals older than the standard lookback) is
    *  best-effort too — its failure is reported here, never thrown. */
   deepError?: string;
+  /** The forward tail pull (arrivals beyond the standard horizon) is
+   *  best-effort — its failure is reported here, never thrown. */
+  horizonError?: string;
   message?: string;
 }
 
@@ -1743,6 +1746,13 @@ const RES_HORIZON_DAYS = 120;
 // Kept as a separate request because one giant window blows MiniHotel's 20s
 // request timeout; this chunk is smaller than the main pull.
 const RES_DEEP_LOOKBACK_DAYS = 365; // arrivals up to 12 months back
+// Forward tail. The same arrival filter cuts the FUTURE off at RES_HORIZON_DAYS:
+// a booking created today for a stay 5+ months out doesn't arrive inside any
+// pull window, so it stays invisible until its arrival drifts within horizon —
+// which freezes the far-out booking-curve months (nothing "new" ever lands on
+// them) and under-reports future revenue. Stays are booked up to a year ahead
+// (see RESERVATION_DAYS), so a second forward window covers that tail.
+const RES_DEEP_HORIZON_DAYS = 365; // arrivals up to 12 months ahead
 
 export async function syncReservationsFromMiniHotel(opts: {
   from?: string;
@@ -1775,7 +1785,15 @@ export async function syncReservationsFromMiniHotel(opts: {
         message: "MiniHotel connection isn't configured — set username, password and hotel id in Settings first.",
       };
     }
-    payload = await fetchReservations(conn, from, to);
+    try {
+      payload = await fetchReservations(conn, from, to);
+    } catch (e) {
+      // A dead main pull means the money on every tab silently freezes — record
+      // why, so the UI can say "feed is stale since X because Y" instead of
+      // quietly serving old numbers. Cleared again on the next successful pull.
+      recordReservationSyncError(e instanceof Error ? e.message : "reservation pull failed");
+      throw e;
+    }
   }
 
   // Long-stay tail: on a default (auto) sync, also re-read arrivals older than
@@ -1785,6 +1803,10 @@ export async function syncReservationsFromMiniHotel(opts: {
   let deepPayload: string | null = null;
   let deepError: string | undefined;
   let deepFrom: string | undefined;
+  // Forward tail: arrivals beyond the standard horizon (up to a year out), so
+  // far-future bookings land the day they're made, not months later.
+  let fwdPayload: string | null = null;
+  let horizonError: string | undefined;
   if (!opts.payload && !opts.from) {
     deepFrom = plusDays(todayLocal(), -RES_DEEP_LOOKBACK_DAYS);
     const deepTo = plusDays(todayLocal(), -(RES_LOOKBACK_DAYS + 1));
@@ -1793,11 +1815,21 @@ export async function syncReservationsFromMiniHotel(opts: {
     } catch (e) {
       deepError = e instanceof Error ? e.message : "long-stay lookback pull failed";
     }
+    // The main window's last arrival is today + (LOOKBACK+HORIZON) − LOOKBACK − 1
+    // = today + HORIZON − 1, so the forward tail starts at today + HORIZON.
+    const fwdFrom = plusDays(todayLocal(), RES_HORIZON_DAYS);
+    const fwdTo = plusDays(todayLocal(), RES_DEEP_HORIZON_DAYS);
+    try {
+      fwdPayload = await fetchReservations(conn, fwdFrom, fwdTo);
+    } catch (e) {
+      horizonError = e instanceof Error ? e.message : "forward horizon pull failed";
+    }
   }
 
   const parsed = [
     ...parseReservations(payload),
     ...(deepPayload ? parseReservations(deepPayload) : []),
+    ...(fwdPayload ? parseReservations(fwdPayload) : []),
   ];
   const { recorded, skipped } = upsertReservations(
     parsed.map((r) => ({
@@ -1830,9 +1862,11 @@ export async function syncReservationsFromMiniHotel(opts: {
     }
     // Freshness marker for the auto-refresh hook (live checks only — a captured
     // payload refreshes rows but isn't a verification against MiniHotel).
-    getDb()
-      .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_synced_at', ?)")
+    const db = getDb();
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_synced_at', ?)")
       .run(new Date().toISOString());
+    // Main pull verified — any stale "feed is broken" banner comes down.
+    db.prepare("DELETE FROM meta WHERE key = 'reservations_sync_error'").run();
   }
 
   const stats = reservationStats();
@@ -1851,7 +1885,45 @@ export async function syncReservationsFromMiniHotel(opts: {
     cancelledSwept,
     sweepError,
     deepError,
+    horizonError,
   };
+}
+
+/** Persist the last failed live pull (shown on the money tabs — a frozen feed
+ *  must be visible, not silent). Cleared by the next successful pull. */
+function recordReservationSyncError(message: string): void {
+  try {
+    getDb()
+      .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_sync_error', ?)")
+      .run(JSON.stringify({ at: new Date().toISOString(), message }));
+  } catch {
+    /* recording the error must never mask the error itself */
+  }
+}
+
+export interface ReservationFeedStatus {
+  /** Last successful live verification against MiniHotel (null = never). */
+  syncedAt: string | null;
+  /** Last failed live pull since the last success (null = none). */
+  error: { at: string; message: string } | null;
+}
+
+export function reservationFeedStatus(): ReservationFeedStatus {
+  const db = getDb();
+  const get = (key: string) =>
+    (db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined)
+      ?.value ?? null;
+  const rawErr = get("reservations_sync_error");
+  let error: ReservationFeedStatus["error"] = null;
+  if (rawErr) {
+    try {
+      const p = JSON.parse(rawErr) as { at?: string; message?: string };
+      error = { at: p.at ?? "", message: p.message ?? "sync failed" };
+    } catch {
+      error = { at: "", message: rawErr };
+    }
+  }
+  return { syncedAt: get("reservations_synced_at"), error };
 }
 
 // ------------------------------------------------- freshness (auto re-check)

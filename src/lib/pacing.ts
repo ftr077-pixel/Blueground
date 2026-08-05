@@ -8,6 +8,7 @@ import {
 } from "@/lib/repos/market";
 import { listProfiles } from "@/lib/repos/visibility";
 import { getExcludedRoomCodes } from "@/lib/repos/integrations";
+import { reservationFeedStatus } from "@/lib/integrations/minihotel";
 
 /**
  * Pacing tab assembly (the PriceLabs "Market Dashboards → Pacing" report).
@@ -97,6 +98,9 @@ export interface PacingReport {
   curveSource: "bookings" | "reservations" | null;
   curveApprox: boolean; // true while booking dates are still guessed from sync time (no real created-on yet)
   sources: { market: boolean; compPrices: boolean; yours: "reservations" | "calendar" | null };
+  /** Reservation-feed freshness: when MiniHotel was last verified live, and the
+   *  last failed pull since. A frozen feed must be visible on the tab. */
+  feed: { syncedAt: string | null; error: { at: string; message: string } | null };
 }
 
 export interface PacingQuery {
@@ -814,5 +818,6 @@ export function buildPacingReport(q: PacingQuery): PacingReport {
       compPrices: comps.size > 0,
       yours: yours.useReservations ? "reservations" : yours.hasSignal ? "calendar" : null,
     },
+    feed: reservationFeedStatus(),
   };
 }
