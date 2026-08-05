@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactElement } from "react";
 import { Loader2, RefreshCw, Settings2 } from "lucide-react";
 import {
   Area,
@@ -76,6 +76,36 @@ interface ApartmentRevenueReport {
   totals: { reservations: number; nights: number; gross: number; vat: number; net: number };
   excluded: { cancelled: number; cancelledNet: number; test: number; testNet: number };
   currency: string;
+}
+
+interface ApartmentReservationDetail {
+  id: string;
+  groupId: string | null;
+  status: string | null;
+  counted: boolean;
+  excludedReason: "cancelled" | "test" | null;
+  roomNumber: string | null;
+  checkIn: string;
+  checkOut: string;
+  nights: number;
+  nightsInWindow: number;
+  gross: number | null;
+  vat: number | null;
+  net: number;
+  netInWindow: number;
+  vatBasis: string | null;
+  country: string | null;
+  currency: string | null;
+  bookedOn: string | null;
+  syncedAt: string | null;
+}
+
+interface ApartmentRevenueDetail {
+  key: string;
+  from: string | null;
+  to: string | null;
+  rows: ApartmentReservationDetail[];
+  totals: { counted: number; nights: number; netInWindow: number };
 }
 
 interface PacingReport {
@@ -328,6 +358,10 @@ export function PacingPanel() {
   // Revenue-by-apartment window: follows the chart window until the operator
   // picks their own range on the card (null = follow charts).
   const [aptRange, setAptRange] = useState<{ from: string; to: string } | null>(null);
+  // Drill-down: which apartment row is expanded, and its per-reservation detail.
+  const [aptOpen, setAptOpen] = useState<string | null>(null);
+  const [aptDetail, setAptDetail] = useState<ApartmentRevenueDetail | null>(null);
+  const [aptDetailLoading, setAptDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -414,8 +448,36 @@ export function PacingPanel() {
       .catch(() => {
         /* aborted or unreachable — keep whatever is shown */
       });
+    // A new window invalidates any open drill-down.
+    setAptOpen(null);
+    setAptDetail(null);
     return () => ctrl.abort();
   }, [aptFrom, aptTo]);
+
+  // Expand one apartment row into its underlying reservations (the debug view).
+  const toggleAptDetail = useCallback(
+    (key: string) => {
+      if (aptOpen === key) {
+        setAptOpen(null);
+        setAptDetail(null);
+        return;
+      }
+      setAptOpen(key);
+      setAptDetail(null);
+      setAptDetailLoading(true);
+      const p = new URLSearchParams({ key });
+      if (aptFrom && aptTo) {
+        p.set("from", aptFrom);
+        p.set("to", aptTo);
+      }
+      fetch(`/api/reservations/by-apartment/detail?${p}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => setAptDetail(d && !d.error ? (d as ApartmentRevenueDetail) : null))
+        .catch(() => setAptDetail(null))
+        .finally(() => setAptDetailLoading(false));
+    },
+    [aptOpen, aptFrom, aptTo],
+  );
 
   function update() {
     try {
@@ -1036,30 +1098,130 @@ export function PacingPanel() {
                   </thead>
                   <tbody>
                     {byApt.rows.map((r) => (
-                      <tr key={r.key} className="border-b border-border/50">
-                        <td className="py-1.5 pr-3">
-                          {r.apartment}
-                          {r.roomType && r.apartment !== r.roomType && (
-                            <span className="ml-1.5 text-[10px] text-muted-foreground">{r.roomType}</span>
-                          )}
-                          {r.noCreatedOn > 0 && (
-                            <span
-                              className="ml-1.5 text-[10px] text-[hsl(var(--warning))]"
-                              title={`${r.noCreatedOn} reservation(s) missing the real booking date — their curve position falls back to sync time`}
-                            >
-                              {r.noCreatedOn} w/o booked-on
+                      <Fragment key={r.key}>
+                        <tr
+                          className="cursor-pointer border-b border-border/50 hover:bg-muted/40"
+                          onClick={() => toggleAptDetail(r.key)}
+                          title="Click to show every reservation behind this figure"
+                        >
+                          <td className="py-1.5 pr-3">
+                            <span className="mr-1 inline-block w-3 text-muted-foreground">
+                              {aptOpen === r.key ? "▾" : "▸"}
                             </span>
-                          )}
-                        </td>
-                        <td className="py-1.5 pr-3 text-right tabular-nums">{r.reservations}</td>
-                        <td className="py-1.5 pr-3 text-right tabular-nums">{r.nights.toLocaleString()}</td>
-                        <td className="py-1.5 pr-3 text-right tabular-nums">{money(r.gross)}</td>
-                        <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">{money(r.vat)}</td>
-                        <td className="py-1.5 pr-3 text-right font-medium tabular-nums">{money(r.net)}</td>
-                        <td className="py-1.5 text-right tabular-nums text-muted-foreground">
-                          {byApt.totals.net > 0 ? `${((r.net / byApt.totals.net) * 100).toFixed(1)}%` : "—"}
-                        </td>
-                      </tr>
+                            {r.apartment}
+                            {r.roomType && r.apartment !== r.roomType && (
+                              <span className="ml-1.5 text-[10px] text-muted-foreground">{r.roomType}</span>
+                            )}
+                            {r.noCreatedOn > 0 && (
+                              <span
+                                className="ml-1.5 text-[10px] text-[hsl(var(--warning))]"
+                                title={`${r.noCreatedOn} reservation(s) missing the real booking date — their curve position falls back to sync time`}
+                              >
+                                {r.noCreatedOn} w/o booked-on
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-3 text-right tabular-nums">{r.reservations}</td>
+                          <td className="py-1.5 pr-3 text-right tabular-nums">{r.nights.toLocaleString()}</td>
+                          <td className="py-1.5 pr-3 text-right tabular-nums">{money(r.gross)}</td>
+                          <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">{money(r.vat)}</td>
+                          <td className="py-1.5 pr-3 text-right font-medium tabular-nums">{money(r.net)}</td>
+                          <td className="py-1.5 text-right tabular-nums text-muted-foreground">
+                            {byApt.totals.net > 0 ? `${((r.net / byApt.totals.net) * 100).toFixed(1)}%` : "—"}
+                          </td>
+                        </tr>
+                        {aptOpen === r.key && (
+                          <tr className="border-b border-border/50 bg-muted/20">
+                            <td colSpan={7} className="px-2 py-2">
+                              {aptDetailLoading ? (
+                                <p className="py-2 text-center text-[11px] text-muted-foreground">Loading reservations…</p>
+                              ) : !aptDetail || aptDetail.rows.length === 0 ? (
+                                <p className="py-2 text-center text-[11px] text-muted-foreground">
+                                  No stored reservations found for this apartment in the window.
+                                </p>
+                              ) : (
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-[11px]">
+                                    <thead>
+                                      <tr className="text-left text-[9px] uppercase tracking-wider text-muted-foreground">
+                                        <th className="py-1 pr-2 font-medium">Reservation</th>
+                                        <th className="py-1 pr-2 font-medium">Status</th>
+                                        <th className="py-1 pr-2 font-medium">Room</th>
+                                        <th className="py-1 pr-2 font-medium">Stay</th>
+                                        <th className="py-1 pr-2 text-right font-medium">Nights (in win.)</th>
+                                        <th className="py-1 pr-2 text-right font-medium">Gross</th>
+                                        <th className="py-1 pr-2 text-right font-medium">VAT</th>
+                                        <th className="py-1 pr-2 text-right font-medium">Net stay</th>
+                                        <th className="py-1 pr-2 text-right font-medium">Net in win.</th>
+                                        <th className="py-1 pr-2 font-medium">VAT basis</th>
+                                        <th className="py-1 pr-2 font-medium">Country</th>
+                                        <th className="py-1 pr-2 font-medium">Cur.</th>
+                                        <th className="py-1 pr-2 font-medium">Booked on</th>
+                                        <th className="py-1 font-medium">Synced</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {aptDetail.rows.map((d) => (
+                                        <tr
+                                          key={d.id}
+                                          className={
+                                            "border-t border-border/40 " +
+                                            (d.counted ? "" : "text-muted-foreground/70 line-through")
+                                          }
+                                        >
+                                          <td className="py-1 pr-2 font-mono text-[10px]">
+                                            {d.id}
+                                            {d.groupId && (
+                                              <span className="ml-1 rounded bg-muted px-1 no-underline">group</span>
+                                            )}
+                                          </td>
+                                          <td className="py-1 pr-2">
+                                            {d.status ?? "—"}
+                                            {d.excludedReason && (
+                                              <span className="ml-1 text-[9px] uppercase">({d.excludedReason})</span>
+                                            )}
+                                          </td>
+                                          <td className="py-1 pr-2">{d.roomNumber ?? "—"}</td>
+                                          <td className="py-1 pr-2 whitespace-nowrap">
+                                            {d.checkIn} → {d.checkOut}
+                                          </td>
+                                          <td className="py-1 pr-2 text-right tabular-nums">
+                                            {d.nights} ({d.nightsInWindow})
+                                          </td>
+                                          <td className="py-1 pr-2 text-right tabular-nums">
+                                            {d.gross != null ? money(d.gross) : "—"}
+                                          </td>
+                                          <td className="py-1 pr-2 text-right tabular-nums">
+                                            {d.vat != null ? money(d.vat) : "—"}
+                                          </td>
+                                          <td className="py-1 pr-2 text-right tabular-nums">{money(d.net)}</td>
+                                          <td className="py-1 pr-2 text-right font-medium tabular-nums">
+                                            {money(d.netInWindow)}
+                                          </td>
+                                          <td className="py-1 pr-2">{d.vatBasis ?? "—"}</td>
+                                          <td className="py-1 pr-2">{d.country ?? "—"}</td>
+                                          <td className="py-1 pr-2">{d.currency ?? "—"}</td>
+                                          <td className="py-1 pr-2 whitespace-nowrap">{d.bookedOn ?? "—"}</td>
+                                          <td className="py-1 whitespace-nowrap">
+                                            {d.syncedAt ? fmtRel(d.syncedAt) : "—"}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  <p className="mt-1.5 text-[10px] text-muted-foreground">
+                                    Struck-through rows are excluded (cancelled / test). “Net stay” is the whole
+                                    reservation; “Net in win.” is the share accrued inside the selected window —
+                                    the table above sums that column. A currency other than ILS, VAT basis
+                                    “assumed-none” on Israeli guests, or a gross that looks like a nightly/monthly
+                                    rate instead of the stay total are the usual suspects when a figure is wrong.
+                                  </p>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     ))}
                   </tbody>
                   <tfoot>

@@ -731,6 +731,138 @@ export function revenueByApartment(from?: string | null, to?: string | null): Ap
   return { from: windowed ? from! : null, to: windowed ? to! : null, rows: out, totals, excluded };
 }
 
+// ------------------------------------------- per-apartment drill-down (debug)
+export interface ApartmentReservationDetail {
+  id: string;
+  /** Shared booking id for group rows (`<bookingId>:<member>`), else null. */
+  groupId: string | null;
+  status: string | null;
+  counted: boolean;
+  excludedReason: "cancelled" | "test" | null;
+  roomNumber: string | null;
+  checkIn: string;
+  checkOut: string;
+  nights: number;
+  nightsInWindow: number;
+  /** Stored whole-stay money, exactly as the sync recorded it. */
+  gross: number | null;
+  vat: number | null;
+  net: number;
+  /** The share of net actually accrued inside the window (what the table sums). */
+  netInWindow: number;
+  vatBasis: string | null; // flag | country | explicit-* | assumed-none
+  country: string | null;
+  currency: string | null;
+  bookedOn: string | null;
+  syncedAt: string | null; // updated_at — when the sync last touched this row
+}
+
+export interface ApartmentRevenueDetail {
+  key: string;
+  from: string | null;
+  to: string | null;
+  rows: ApartmentReservationDetail[]; // every row, counted AND excluded, by check-in
+  totals: { counted: number; nights: number; netInWindow: number };
+}
+
+/**
+ * Every stored reservation row behind one apartment's Revenue-by-Apartment
+ * figure — the drill-down for "this apartment's number is wrong". Shows the
+ * raw stored money (gross/vat/net), how VAT was decided, the currency the PMS
+ * sent, and the excluded rows, so a bad parse, a mis-taxed booking, a foreign-
+ * currency total, or an over-eager cancellation filter is visible per booking.
+ */
+export function apartmentRevenueDetail(
+  key: string,
+  from?: string | null,
+  to?: string | null,
+): ApartmentRevenueDetail {
+  const windowed = !!(from && to && DATE_RE.test(from) && DATE_RE.test(to) && from <= to);
+  const excludedCodes = getExcludedRoomCodes();
+  const want = key.trim().toUpperCase();
+
+  const rows = getDb()
+    .prepare(
+      "SELECT id, room_type, room_number, check_in, check_out, nights, revenue, gross, vat, vat_basis, currency, country, status, created_on, updated_at FROM reservation ORDER BY check_in",
+    )
+    .all() as Array<
+    ReservationSql & {
+      id: string;
+      gross: number | null;
+      vat: number | null;
+      vat_basis: string | null;
+      currency: string | null;
+      country: string | null;
+      created_on: string | null;
+      updated_at: string | null;
+    }
+  >;
+
+  const out: ApartmentReservationDetail[] = [];
+  const totals = { counted: 0, nights: 0, netInWindow: 0 };
+
+  for (const r of rows) {
+    // Same grouping rule as revenueByApartment.
+    const typeCode = (r.room_type ?? "").trim();
+    const rowKey = typeCode
+      ? typeCode.toUpperCase()
+      : r.room_number
+        ? `#${r.room_number.trim()}`
+        : "unassigned";
+    if (rowKey.toUpperCase() !== want) continue;
+
+    const nights = r.nights > 0 ? r.nights : nightsBetween(r.check_in, r.check_out);
+    if (nights <= 0 || !DATE_RE.test(r.check_in) || !DATE_RE.test(r.check_out)) continue;
+
+    let nightsIn = nights;
+    if (windowed) {
+      const DAY = 86_400_000;
+      const start = Date.parse(r.check_in + "T00:00:00Z");
+      const end = Date.parse(r.check_out + "T00:00:00Z");
+      const winStart = Date.parse(from! + "T00:00:00Z");
+      const winEnd = Date.parse(to! + "T00:00:00Z") + DAY;
+      nightsIn = Math.round((Math.min(end, winEnd) - Math.max(start, winStart)) / DAY);
+      if (nightsIn <= 0) continue;
+    }
+
+    const cancelled = !!(r.status && CANCELLED_RE.test(r.status));
+    const isTest = isExcludedRoom(r.room_type, r.room_number, excludedCodes);
+    const reason: "cancelled" | "test" | null = cancelled ? "cancelled" : isTest ? "test" : null;
+    const counted = reason === null;
+    const netInWindow = Math.round(r.revenue * (nightsIn / nights));
+
+    const sep = r.id.indexOf(":");
+    out.push({
+      id: r.id,
+      groupId: sep > 0 ? r.id.slice(0, sep) : null,
+      status: r.status,
+      counted,
+      excludedReason: reason,
+      roomNumber: r.room_number,
+      checkIn: r.check_in,
+      checkOut: r.check_out,
+      nights,
+      nightsInWindow: nightsIn,
+      gross: r.gross,
+      vat: r.vat,
+      net: r.revenue,
+      netInWindow,
+      vatBasis: r.vat_basis,
+      country: r.country,
+      currency: r.currency,
+      bookedOn: (r.created_on ?? "").slice(0, 10) || null,
+      syncedAt: r.updated_at,
+    });
+    if (counted) {
+      totals.counted++;
+      totals.nights += nightsIn;
+      totals.netInWindow += netInWindow;
+    }
+  }
+
+  return { key, from: windowed ? from! : null, to: windowed ? to! : null, rows: out, totals };
+}
+
 // ----------------------------------------------------------------- diagnostics
 export interface BookedMonthDiag {
   month: string; // YYYY-MM of the booking-CREATION date
