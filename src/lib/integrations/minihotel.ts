@@ -1623,6 +1623,11 @@ const RES_FETCH_TIMEOUT_MS = 30_000;
 // froze. Chunks bound the response size per request no matter how the book
 // grows; each chunk is its own request under the timeout.
 const RES_CHUNK_DAYS = 90;
+// When a chunk STILL times out (a dense quarter can outweigh a quiet
+// half-year), it is split in half and retried, recursively, down to this
+// floor — the pull self-tunes to wherever the book is heavy instead of
+// needing a hand-tuned global chunk size.
+const RES_CHUNK_MIN_DAYS = 12;
 
 export async function fetchReservations(conn: MiniHotelConnection, from: string, to: string): Promise<string> {
   const ep = miniHotelEndpoints(conn.env);
@@ -1649,11 +1654,15 @@ export async function fetchReservations(conn: MiniHotelConnection, from: string,
     return text;
   } catch (e) {
     // "This operation was aborted" is our own timeout — say what actually
-    // happened and for which window, so the feed banner is actionable.
+    // happened and for which window, so the feed banner is actionable. The
+    // timedOut marker lets the chunked puller know splitting can help (an
+    // auth or ERR failure would only fan out into more failing requests).
     if (e instanceof Error && e.name === "AbortError") {
-      throw new Error(
+      const err = new Error(
         `MiniHotel didn't answer within ${RES_FETCH_TIMEOUT_MS / 1000}s for arrivals ${from}→${to}`,
-      );
+      ) as Error & { timedOut?: boolean };
+      err.timedOut = true;
+      throw err;
     }
     throw e;
   } finally {
@@ -1661,10 +1670,38 @@ export async function fetchReservations(conn: MiniHotelConnection, from: string,
   }
 }
 
+const spanDays = (from: string, to: string) =>
+  Math.round((Date.parse(to + "T00:00:00Z") - Date.parse(from + "T00:00:00Z")) / 86400000) + 1;
+
+/** One window, adaptively: on timeout, split in half and retry each side, down
+ *  to RES_CHUNK_MIN_DAYS. Only a minimum-size window that still times out (or
+ *  any non-timeout failure) lands in `errors`. */
+async function fetchReservationsAdaptive(
+  conn: MiniHotelConnection,
+  from: string,
+  to: string,
+  payloads: string[],
+  errors: string[],
+): Promise<void> {
+  try {
+    payloads.push(await fetchReservations(conn, from, to));
+  } catch (e) {
+    const days = spanDays(from, to);
+    if ((e as { timedOut?: boolean })?.timedOut && days > RES_CHUNK_MIN_DAYS) {
+      const mid = plusDays(from, Math.floor(days / 2) - 1);
+      await fetchReservationsAdaptive(conn, from, mid, payloads, errors);
+      await fetchReservationsAdaptive(conn, plusDays(mid, 1), to, payloads, errors);
+      return;
+    }
+    errors.push(e instanceof Error ? e.message : `pull failed for ${from}→${to}`);
+  }
+}
+
 /**
- * Pull an arrival window in RES_CHUNK_DAYS slices, one request each. Failed
- * slices are reported, not thrown — a partial pull still refreshes what it
- * reached, and the caller decides whether the whole is fresh enough to stamp.
+ * Pull an arrival window in RES_CHUNK_DAYS slices, one request each; a slice
+ * that times out is subdivided (see fetchReservationsAdaptive). Failed slices
+ * are reported, not thrown — a partial pull still refreshes what it reached,
+ * and the caller decides whether the whole is fresh enough to stamp.
  */
 async function fetchReservationsChunked(
   conn: MiniHotelConnection,
@@ -1677,11 +1714,7 @@ async function fetchReservationsChunked(
   while (cur <= to) {
     const chunkEnd = plusDays(cur, RES_CHUNK_DAYS - 1);
     const end = chunkEnd < to ? chunkEnd : to;
-    try {
-      payloads.push(await fetchReservations(conn, cur, end));
-    } catch (e) {
-      errors.push(e instanceof Error ? e.message : `pull failed for ${cur}→${end}`);
-    }
+    await fetchReservationsAdaptive(conn, cur, end, payloads, errors);
     cur = plusDays(end, 1);
   }
   return { payloads, errors };
