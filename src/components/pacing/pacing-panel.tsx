@@ -325,6 +325,9 @@ export function PacingPanel() {
   const [remember, setRemember] = useState(false);
   const [report, setReport] = useState<PacingReport | null>(null);
   const [byApt, setByApt] = useState<ApartmentRevenueReport | null>(null);
+  // Revenue-by-apartment window: follows the chart window until the operator
+  // picks their own range on the card (null = follow charts).
+  const [aptRange, setAptRange] = useState<{ from: string; to: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -360,12 +363,6 @@ export function PacingPanel() {
       if (!res.ok) throw new Error(`load failed: ${res.status}`);
       const r = (await res.json()) as PacingReport;
       setReport(r);
-      // Per-apartment reconciliation list for the same stay-date window —
-      // best-effort, the charts render without it.
-      fetch(`/api/reservations/by-apartment?from=${r.from}&to=${r.to}`, { cache: "no-store" })
-        .then((ar) => (ar.ok ? ar.json() : null))
-        .then((a) => setByApt(a && !a.error ? (a as ApartmentRevenueReport) : null))
-        .catch(() => setByApt(null));
       // Reflect the server-resolved defaults back into the selects.
       setControls((cur) => ({
         ...cur,
@@ -400,6 +397,25 @@ export function PacingPanel() {
     fetchReport(init);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Per-apartment reconciliation list — refetches whenever its window changes
+  // (chart window by default, or the card's own range once one is picked).
+  const aptFrom = aptRange?.from ?? report?.from ?? "";
+  const aptTo = aptRange?.to ?? report?.to ?? "";
+  useEffect(() => {
+    if (!aptFrom || !aptTo || aptFrom > aptTo) return;
+    const ctrl = new AbortController();
+    fetch(`/api/reservations/by-apartment?from=${aptFrom}&to=${aptTo}`, {
+      cache: "no-store",
+      signal: ctrl.signal,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((a) => setByApt(a && !a.error ? (a as ApartmentRevenueReport) : null))
+      .catch(() => {
+        /* aborted or unreachable — keep whatever is shown */
+      });
+    return () => ctrl.abort();
+  }, [aptFrom, aptTo]);
 
   function update() {
     try {
@@ -952,13 +968,49 @@ export function PacingPanel() {
       {/* --------------------------------------------- revenue by apartment */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle>Revenue by Apartment</CardTitle>
-          <p className="mt-1 max-w-2xl text-[11px] text-muted-foreground">
-            NET reservation revenue accrued per night over the selected stay window
-            {byApt?.from ? ` (${byApt.from} → ${byApt.to})` : ""} — the reconciliation list for
-            tying this tab back to MiniHotel. Cancelled and test-apartment revenue is listed
-            below the table instead of disappearing silently.
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>Revenue by Apartment</CardTitle>
+              <p className="mt-1 max-w-2xl text-[11px] text-muted-foreground">
+                NET reservation revenue accrued per night over the stay window
+                {byApt?.from ? ` (${byApt.from} → ${byApt.to})` : ""} — the reconciliation list
+                for tying this tab back to MiniHotel. Cancelled and test-apartment revenue is
+                listed below the table instead of disappearing silently.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-end gap-2">
+              <Field label="From">
+                <input
+                  type="date"
+                  className={selectCls}
+                  value={aptFrom}
+                  onChange={(e) =>
+                    e.target.value && setAptRange({ from: e.target.value, to: aptTo })
+                  }
+                />
+              </Field>
+              <Field label="To">
+                <input
+                  type="date"
+                  className={selectCls}
+                  value={aptTo}
+                  onChange={(e) =>
+                    e.target.value && setAptRange({ from: aptFrom, to: e.target.value })
+                  }
+                />
+              </Field>
+              {aptRange && (
+                <button
+                  type="button"
+                  onClick={() => setAptRange(null)}
+                  className="rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted/50"
+                  title="Follow the chart window again"
+                >
+                  Match charts
+                </button>
+              )}
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           {!byApt || byApt.rows.length === 0 ? (
