@@ -731,6 +731,119 @@ export function revenueByApartment(from?: string | null, to?: string | null): Ap
   return { from: windowed ? from! : null, to: windowed ? to! : null, rows: out, totals, excluded };
 }
 
+// ----------------------------------------------------------------- diagnostics
+export interface BookedMonthDiag {
+  month: string; // YYYY-MM of the booking-CREATION date
+  bookings: number; // counted reservations created that month
+  net: number; // their total NET revenue (whole stays)
+}
+
+export interface ReservationDiagnostics {
+  totals: {
+    rows: number;
+    counted: number;
+    cancelled: number;
+    test: number;
+    missingCreatedOn: number; // counted rows with no real booking date
+  };
+  /** Counted bookings by the month they were CREATED (not stayed) — the direct
+   *  answer to "did any new bookings land recently?". Last 13 months. */
+  byBookedMonth: BookedMonthDiag[];
+  /** The newest counted bookings by creation date — spot-check freshness. */
+  latestBookings: Array<{
+    id: string;
+    bookedOn: string | null;
+    checkIn: string;
+    checkOut: string;
+    nights: number;
+    net: number;
+    status: string | null;
+    roomType: string | null;
+  }>;
+  /** Row counts per raw status code — spots a sweep or filter eating revenue. */
+  byStatus: Record<string, number>;
+}
+
+/**
+ * Feed-freshness forensics for "the curves stopped moving": how many bookings
+ * were CREATED each month (per created_on), the newest ones on file, and the
+ * raw status distribution. If byBookedMonth shows zeros for recent months while
+ * the operator knows bookings were made, the sync isn't landing them; if the
+ * bookings are here but the curves stay flat, the filtering is eating them.
+ */
+export function reservationDiagnostics(): ReservationDiagnostics {
+  const excluded = getExcludedRoomCodes();
+  const rows = getDb()
+    .prepare(
+      "SELECT id, room_type, room_number, check_in, check_out, nights, revenue, status, created_on FROM reservation",
+    )
+    .all() as Array<{
+    id: string;
+    room_type: string | null;
+    room_number: string | null;
+    check_in: string;
+    check_out: string;
+    nights: number;
+    revenue: number;
+    status: string | null;
+    created_on: string | null;
+  }>;
+
+  const totals = { rows: rows.length, counted: 0, cancelled: 0, test: 0, missingCreatedOn: 0 };
+  const byMonth = new Map<string, BookedMonthDiag>();
+  const byStatus: Record<string, number> = {};
+  const counted: typeof rows = [];
+
+  for (const r of rows) {
+    const status = (r.status ?? "(none)").trim() || "(none)";
+    byStatus[status] = (byStatus[status] ?? 0) + 1;
+    if (r.status && CANCELLED_RE.test(r.status)) {
+      totals.cancelled++;
+      continue;
+    }
+    if (isExcludedRoom(r.room_type, r.room_number, excluded)) {
+      totals.test++;
+      continue;
+    }
+    totals.counted++;
+    counted.push(r);
+    const booked = (r.created_on ?? "").slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(booked)) {
+      totals.missingCreatedOn++;
+      continue;
+    }
+    let m = byMonth.get(booked);
+    if (!m) {
+      m = { month: booked, bookings: 0, net: 0 };
+      byMonth.set(booked, m);
+    }
+    m.bookings++;
+    m.net += r.revenue;
+  }
+
+  const byBookedMonth = [...byMonth.values()]
+    .sort((a, b) => (a.month < b.month ? 1 : -1))
+    .slice(0, 13)
+    .map((m) => ({ ...m, net: Math.round(m.net) }));
+
+  const latestBookings = counted
+    .filter((r) => r.created_on)
+    .sort((a, b) => ((a.created_on ?? "") < (b.created_on ?? "") ? 1 : -1))
+    .slice(0, 15)
+    .map((r) => ({
+      id: r.id,
+      bookedOn: (r.created_on ?? "").slice(0, 10) || null,
+      checkIn: r.check_in,
+      checkOut: r.check_out,
+      nights: r.nights,
+      net: r.revenue,
+      status: r.status,
+      roomType: r.room_type,
+    }));
+
+  return { totals, byBookedMonth, latestBookings, byStatus };
+}
+
 export interface LeadTimeBucket {
   label: string;
   /** Inclusive lower / exclusive upper bound on lead days (upTo null = open-ended). */

@@ -96,6 +96,7 @@ interface PacingReport {
   curveSource: "bookings" | "reservations" | null;
   curveApprox: boolean;
   sources: { market: boolean; compPrices: boolean; yours: "reservations" | "calendar" | null };
+  feed: { syncedAt: string | null; error: { at: string; message: string } | null };
 }
 
 // ----------------------------------------------------------------- controls
@@ -410,23 +411,18 @@ export function PacingPanel() {
     fetchReport(controls);
   }
 
-  // Force the booking dates to refresh by re-running the reservation sync — the
-  // same bounded pull the P&L already uses (it works wherever MiniHotel is
-  // reachable), which now also captures each booking's real created-on date. A
-  // wide multi-year pull blows MiniHotel's 20s request timeout ("operation
-  // aborted"); this curve-sized window stays well under it.
+  // Force a full default reservation sync — the server chunks it itself
+  // (210-day lookback + 120-day horizon window, plus best-effort deep-lookback
+  // and forward-horizon tail pulls, each its own request under MiniHotel's 20s
+  // timeout), captures real created-on dates, and stamps the freshness marker.
   async function syncBookings() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      const today = new Date();
-      const from = new Date(today.getTime() - 45 * 86_400_000).toISOString().slice(0, 10);
       const res = await fetch("/api/reservations/sync", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // ~1.5 months back through ~8 months ahead (by arrival) — covers the curve's
-        // default months and stays under the 370-day / 20s ceiling that the wide pull blew.
-        body: JSON.stringify({ from, days: 300 }),
+        body: JSON.stringify({}),
       });
       const b = (await res.json().catch(() => null)) as
         | { ok?: boolean; recorded?: number; parsed?: number; message?: string }
@@ -682,6 +678,36 @@ export function PacingPanel() {
             {report.rooms} units
           </p>
         )}
+        {report?.feed &&
+          (() => {
+            const ageH = report.feed.syncedAt
+              ? (Date.now() - new Date(report.feed.syncedAt).getTime()) / 3_600_000
+              : null;
+            const stale = ageH == null || ageH > 24;
+            if (!report.feed.error && !stale) return null;
+            return (
+              <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <p className="max-w-3xl text-[11px] text-[hsl(var(--warning))]">
+                  ⚠ Reservation feed{" "}
+                  {report.feed.syncedAt
+                    ? `last verified against MiniHotel ${fmtRel(report.feed.syncedAt)}`
+                    : "has never been verified against MiniHotel"}
+                  {report.feed.error && ` — last sync attempt failed: ${report.feed.error.message}`}
+                  . Bookings made since then are NOT on these charts — check the MiniHotel
+                  connection in Settings, or retry now.
+                </p>
+                <button
+                  type="button"
+                  onClick={syncBookings}
+                  disabled={syncing}
+                  className="shrink-0 rounded-md border border-primary/30 bg-primary/15 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+                >
+                  {syncing ? "Syncing…" : "Retry sync now"}
+                </button>
+                {syncMsg && <span className="text-[11px] text-muted-foreground">{syncMsg}</span>}
+              </div>
+            );
+          })()}
         {error && <p className="mt-2 text-[11px] text-[hsl(var(--danger))]">{error}</p>}
       </Card>
 
