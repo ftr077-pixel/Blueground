@@ -601,6 +601,136 @@ export function reservationReport(thisMonth?: string): ReservationReport {
   return { thisMonth: ym, current, byMonth, vatBasis, totals, rows: out };
 }
 
+// ------------------------------------------------------- revenue by apartment
+export interface ApartmentRevenueRow {
+  /** Grouping key: MiniHotel RoomTypeCode, else room number, else "unassigned". */
+  key: string;
+  /** Hub unit name when the room type is mapped; otherwise the raw code. */
+  apartment: string;
+  roomType: string | null;
+  reservations: number; // counted reservations touching the window
+  nights: number; // reservation-nights inside the window
+  gross: number;
+  vat: number;
+  net: number; // counted revenue (net of VAT) accrued inside the window
+  /** Counted rows still missing the real booking-creation date (their curve
+   *  position falls back to sync time — a data-quality hint, not money). */
+  noCreatedOn: number;
+}
+
+export interface ApartmentRevenueReport {
+  from: string | null; // null = whole book (no window)
+  to: string | null;
+  rows: ApartmentRevenueRow[]; // sorted by net, descending
+  totals: { reservations: number; nights: number; gross: number; vat: number; net: number };
+  /** What the report deliberately leaves out — where "missing" revenue hides. */
+  excluded: {
+    cancelled: number;
+    cancelledNet: number;
+    test: number;
+    testNet: number;
+  };
+}
+
+/**
+ * NET revenue per apartment (MiniHotel room type → Hub unit), the reconciliation
+ * surface for "the tab shows less than MiniHotel does": per-night accrual over
+ * [from, to] when a window is given (matching the P&L / pacing basis), whole-stay
+ * totals otherwise. Cancelled and test rows are reported in `excluded` — with
+ * their net — instead of vanishing silently, so a filter eating real revenue is
+ * visible at a glance.
+ */
+export function revenueByApartment(from?: string | null, to?: string | null): ApartmentRevenueReport {
+  const windowed = !!(from && to && DATE_RE.test(from) && DATE_RE.test(to) && from <= to);
+  const excludedCodes = getExcludedRoomCodes();
+  const byType = roomTypeToUnit();
+  const unitName = new Map<string, string>();
+  for (const r of getMiniHotelMapping()) unitName.set(r.unitId, r.name);
+
+  const rows = getDb()
+    .prepare(
+      "SELECT room_type, room_number, check_in, check_out, nights, revenue, gross, vat, status, created_on FROM reservation",
+    )
+    .all() as Array<
+    ReservationSql & { gross: number | null; vat: number | null; created_on: string | null }
+  >;
+
+  const acc = new Map<string, ApartmentRevenueRow>();
+  const totals = { reservations: 0, nights: 0, gross: 0, vat: 0, net: 0 };
+  const excluded = { cancelled: 0, cancelledNet: 0, test: 0, testNet: 0 };
+
+  for (const r of rows) {
+    const nights = r.nights > 0 ? r.nights : nightsBetween(r.check_in, r.check_out);
+    if (nights <= 0 || !DATE_RE.test(r.check_in) || !DATE_RE.test(r.check_out)) continue;
+
+    // Nights (and the revenue share) falling inside the window; everything when unwindowed.
+    let nightsIn = nights;
+    if (windowed) {
+      const DAY = 86_400_000;
+      const start = Date.parse(r.check_in + "T00:00:00Z");
+      const end = Date.parse(r.check_out + "T00:00:00Z");
+      const winStart = Date.parse(from! + "T00:00:00Z");
+      const winEnd = Date.parse(to! + "T00:00:00Z") + DAY; // exclusive
+      nightsIn = Math.round((Math.min(end, winEnd) - Math.max(start, winStart)) / DAY);
+      if (nightsIn <= 0) continue;
+    }
+    const share = nightsIn / nights;
+    const net = r.revenue * share;
+
+    if (r.status && CANCELLED_RE.test(r.status)) {
+      excluded.cancelled++;
+      excluded.cancelledNet += net;
+      continue;
+    }
+    if (isExcludedRoom(r.room_type, r.room_number, excludedCodes)) {
+      excluded.test++;
+      excluded.testNet += net;
+      continue;
+    }
+
+    const typeCode = (r.room_type ?? "").trim();
+    const key = typeCode ? typeCode.toUpperCase() : r.room_number ? `#${r.room_number.trim()}` : "unassigned";
+    let row = acc.get(key);
+    if (!row) {
+      const unitId = typeCode ? byType.get(typeCode.toUpperCase()) : undefined;
+      row = {
+        key,
+        apartment: (unitId && unitName.get(unitId)) || typeCode || (r.room_number ? `Room ${r.room_number.trim()}` : "Unassigned"),
+        roomType: typeCode || null,
+        reservations: 0,
+        nights: 0,
+        gross: 0,
+        vat: 0,
+        net: 0,
+        noCreatedOn: 0,
+      };
+      acc.set(key, row);
+    }
+    row.reservations++;
+    row.nights += nightsIn;
+    row.net += net;
+    row.gross += (r.gross ?? r.revenue) * share;
+    row.vat += (r.vat ?? 0) * share;
+    if (!r.created_on) row.noCreatedOn++;
+    totals.reservations++;
+    totals.nights += nightsIn;
+    totals.net += net;
+    totals.gross += (r.gross ?? r.revenue) * share;
+    totals.vat += (r.vat ?? 0) * share;
+  }
+
+  const out = [...acc.values()]
+    .map((r) => ({ ...r, gross: Math.round(r.gross), vat: Math.round(r.vat), net: Math.round(r.net) }))
+    .sort((a, b) => b.net - a.net);
+  totals.gross = Math.round(totals.gross);
+  totals.vat = Math.round(totals.vat);
+  totals.net = Math.round(totals.net);
+  excluded.cancelledNet = Math.round(excluded.cancelledNet);
+  excluded.testNet = Math.round(excluded.testNet);
+
+  return { from: windowed ? from! : null, to: windowed ? to! : null, rows: out, totals, excluded };
+}
+
 export interface LeadTimeBucket {
   label: string;
   /** Inclusive lower / exclusive upper bound on lead days (upTo null = open-ended). */

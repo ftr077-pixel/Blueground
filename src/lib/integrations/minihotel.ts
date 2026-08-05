@@ -1293,7 +1293,10 @@ function normDate(s: string | null | undefined): string | null {
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
   m = /^(\d{4})(\d{2})(\d{2})$/.exec(t); // YYYYMMDD
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-  m = /^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/.exec(t); // DD/MM/YYYY (MiniHotel is non-US)
+  // DD/MM/YYYY, optionally with a time (createDateTime ships "dd/mm/yyyy hh:mm:ss").
+  // MiniHotel is non-US — this must catch the slash form before Date.parse below,
+  // which would read "01/04/2026 …" as January 4th and corrupt booking dates.
+  m = /^(\d{1,2})[/.](\d{1,2})[/.](\d{4})(?:[T\s].*)?$/.exec(t);
   if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
   const d = Date.parse(t);
   return Number.isFinite(d) ? new Date(d).toISOString().slice(0, 10) : null;
@@ -1581,8 +1584,15 @@ export function parseReservations(payload: string): MiniReservation[] {
       /* not JSON after all — fall through to XML */
     }
   }
-  if (/<Booking\b/i.test(t)) {
-    const bookings = parseBookingsXml(t);
+  // Live responses arrive entity-encoded (&lt;Booking …&gt; inside an .asmx
+  // <string> wrapper — see decodeEntities). The <Booking> detection and the
+  // group-aware parser must see REAL tags: testing the raw text silently
+  // routed every live pull to the generic fallback, which cannot read a group
+  // booking's per-room totals (its booking-level AmountAfterTaxes is empty),
+  // dropped the real reservation ids, and lost createDateTime.
+  const x = decodeEntities(t);
+  if (/<Booking\b/i.test(x)) {
+    const bookings = parseBookingsXml(x);
     if (bookings.length) return bookings;
   }
   return parseReservationsXml(t);

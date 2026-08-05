@@ -416,6 +416,24 @@ function init(db: Database.Database) {
   // NULL on rows synced before this column existed — they re-sync to fill it.
   ensureColumn(db, "reservation", "created_on", "TEXT");
 
+  // One-time heal: while live pulls were parsed through the generic fallback
+  // (the entity-encoded response never matched the <Booking> test), every
+  // reservation landed under a content-derived synthetic id
+  // (`<checkIn>_<checkOut>_<room>_<gross>[#n]`) — invisible to the id-based
+  // re-sync heal and the cancellation sweep, and group bookings were dropped
+  // outright. Now that parsing decodes entities and real MiniHotel ids come
+  // through, those rows would double-count next to their re-imported real-id
+  // twins: drop them and clear the freshness marker so the next money read
+  // triggers a full re-pull under real ids.
+  const synPurged = db.prepare("SELECT value FROM meta WHERE key = 'synthetic_res_purged'").get();
+  if (!synPurged) {
+    db.exec(`
+      DELETE FROM reservation WHERE id GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*';
+      DELETE FROM meta WHERE key = 'reservations_synced_at';
+    `);
+    db.prepare("INSERT INTO meta (key, value) VALUES ('synthetic_res_purged', 'v1')").run();
+  }
+
   // One-time backfill: give every apartment the default utilities/cleaning the
   // operator asked for, so the costs are filled in and visible (not just applied
   // implicitly in the profit math). Runs once, guarded by a meta flag.

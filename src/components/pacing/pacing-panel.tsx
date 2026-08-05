@@ -57,6 +57,27 @@ interface BookingCurve {
   points: CurvePoint[];
 }
 
+interface ApartmentRevenueRow {
+  key: string;
+  apartment: string;
+  roomType: string | null;
+  reservations: number;
+  nights: number;
+  gross: number;
+  vat: number;
+  net: number;
+  noCreatedOn: number;
+}
+
+interface ApartmentRevenueReport {
+  from: string | null;
+  to: string | null;
+  rows: ApartmentRevenueRow[];
+  totals: { reservations: number; nights: number; gross: number; vat: number; net: number };
+  excluded: { cancelled: number; cancelledNet: number; test: number; testNet: number };
+  currency: string;
+}
+
 interface PacingReport {
   from: string;
   to: string;
@@ -302,6 +323,7 @@ export function PacingPanel() {
   });
   const [remember, setRemember] = useState(false);
   const [report, setReport] = useState<PacingReport | null>(null);
+  const [byApt, setByApt] = useState<ApartmentRevenueReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -337,6 +359,12 @@ export function PacingPanel() {
       if (!res.ok) throw new Error(`load failed: ${res.status}`);
       const r = (await res.json()) as PacingReport;
       setReport(r);
+      // Per-apartment reconciliation list for the same stay-date window —
+      // best-effort, the charts render without it.
+      fetch(`/api/reservations/by-apartment?from=${r.from}&to=${r.to}`, { cache: "no-store" })
+        .then((ar) => (ar.ok ? ar.json() : null))
+        .then((a) => setByApt(a && !a.error ? (a as ApartmentRevenueReport) : null))
+        .catch(() => setByApt(null));
       // Reflect the server-resolved defaults back into the selects.
       setControls((cur) => ({
         ...cur,
@@ -890,6 +918,96 @@ export function PacingPanel() {
                 colorOf={curveColor}
                 fmt={(v) => money(v)}
               />
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* --------------------------------------------- revenue by apartment */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle>Revenue by Apartment</CardTitle>
+          <p className="mt-1 max-w-2xl text-[11px] text-muted-foreground">
+            NET reservation revenue accrued per night over the selected stay window
+            {byApt?.from ? ` (${byApt.from} → ${byApt.to})` : ""} — the reconciliation list for
+            tying this tab back to MiniHotel. Cancelled and test-apartment revenue is listed
+            below the table instead of disappearing silently.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {!byApt || byApt.rows.length === 0 ? (
+            <div className="grid h-24 place-items-center rounded-lg border border-dashed border-border">
+              <p className="text-[11px] text-muted-foreground">
+                No reservation revenue in this window yet — sync MiniHotel reservations first.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+                      <th className="py-1.5 pr-3 font-medium">Apartment</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">Reservations</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">Nights</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">Gross</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">VAT</th>
+                      <th className="py-1.5 pr-3 text-right font-medium">Net</th>
+                      <th className="py-1.5 text-right font-medium">% of Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {byApt.rows.map((r) => (
+                      <tr key={r.key} className="border-b border-border/50">
+                        <td className="py-1.5 pr-3">
+                          {r.apartment}
+                          {r.roomType && r.apartment !== r.roomType && (
+                            <span className="ml-1.5 text-[10px] text-muted-foreground">{r.roomType}</span>
+                          )}
+                          {r.noCreatedOn > 0 && (
+                            <span
+                              className="ml-1.5 text-[10px] text-[hsl(var(--warning))]"
+                              title={`${r.noCreatedOn} reservation(s) missing the real booking date — their curve position falls back to sync time`}
+                            >
+                              {r.noCreatedOn} w/o booked-on
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{r.reservations}</td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{r.nights.toLocaleString()}</td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums">{money(r.gross)}</td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums text-muted-foreground">{money(r.vat)}</td>
+                        <td className="py-1.5 pr-3 text-right font-medium tabular-nums">{money(r.net)}</td>
+                        <td className="py-1.5 text-right tabular-nums text-muted-foreground">
+                          {byApt.totals.net > 0 ? `${((r.net / byApt.totals.net) * 100).toFixed(1)}%` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="text-xs font-medium">
+                      <td className="py-2 pr-3">Total · {byApt.rows.length} apartments</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{byApt.totals.reservations}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{byApt.totals.nights.toLocaleString()}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(byApt.totals.gross)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(byApt.totals.vat)}</td>
+                      <td className="py-2 pr-3 text-right tabular-nums">{money(byApt.totals.net)}</td>
+                      <td className="py-2" />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              {(byApt.excluded.cancelled > 0 || byApt.excluded.test > 0) && (
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  Excluded from the numbers above:{" "}
+                  {byApt.excluded.cancelled > 0 &&
+                    `${byApt.excluded.cancelled} cancelled/no-show (${money(byApt.excluded.cancelledNet)} net)`}
+                  {byApt.excluded.cancelled > 0 && byApt.excluded.test > 0 && " · "}
+                  {byApt.excluded.test > 0 &&
+                    `${byApt.excluded.test} in test apartments (${money(byApt.excluded.testNet)} net)`}
+                  .
+                </p>
+              )}
             </>
           )}
         </CardContent>
