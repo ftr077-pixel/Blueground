@@ -456,6 +456,19 @@ export function PacingPanel() {
     return () => ctrl.abort();
   }, [aptFrom, aptTo, aptRefresh]);
 
+  // Quick ranges for the by-apartment card — one click instead of two date picks.
+  const aptPresets = useMemo(() => {
+    const t = new Date().toISOString().slice(0, 10);
+    const ym = t.slice(0, 7);
+    const lastYm = addMonths(ym, -1);
+    return [
+      { label: "This month", from: `${ym}-01`, to: monthEnd(ym) },
+      { label: "Last month", from: `${lastYm}-01`, to: monthEnd(lastYm) },
+      { label: "Next 30 days", from: t, to: isoAddDays(t, 29) },
+      { label: "Previous 30 days", from: isoAddDays(t, -30), to: isoAddDays(t, -1) },
+    ];
+  }, []);
+
   // Retire an old/test unit from every statistic: adds its room code to the
   // excluded set (Settings → MiniHotel — same list, reviewable and undoable
   // there). Reservations stay stored; they just stop counting anywhere.
@@ -1070,37 +1083,63 @@ export function PacingPanel() {
                 listed below the table instead of disappearing silently.
               </p>
             </div>
-            <div className="flex shrink-0 items-end gap-2">
-              <Field label="From">
-                <input
-                  type="date"
-                  className={selectCls}
-                  value={aptFrom}
-                  onChange={(e) =>
-                    e.target.value && setAptRange({ from: e.target.value, to: aptTo })
-                  }
-                />
-              </Field>
-              <Field label="To">
-                <input
-                  type="date"
-                  className={selectCls}
-                  value={aptTo}
-                  onChange={(e) =>
-                    e.target.value && setAptRange({ from: aptFrom, to: e.target.value })
-                  }
-                />
-              </Field>
-              {aptRange && (
+            <div className="flex shrink-0 flex-col items-end gap-1.5">
+              <div className="flex items-end gap-2">
+                <Field label="From">
+                  <input
+                    type="date"
+                    className={selectCls}
+                    value={aptFrom}
+                    onChange={(e) =>
+                      e.target.value && setAptRange({ from: e.target.value, to: aptTo })
+                    }
+                  />
+                </Field>
+                <Field label="To">
+                  <input
+                    type="date"
+                    className={selectCls}
+                    value={aptTo}
+                    onChange={(e) =>
+                      e.target.value && setAptRange({ from: aptFrom, to: e.target.value })
+                    }
+                  />
+                </Field>
+              </div>
+              <div className="flex flex-wrap justify-end gap-1">
+                {aptPresets.map((p) => {
+                  const active = aptFrom === p.from && aptTo === p.to;
+                  return (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => setAptRange({ from: p.from, to: p.to })}
+                      className={
+                        "rounded-full border px-2 py-0.5 text-[10px] transition-colors " +
+                        (active
+                          ? "border-primary/40 bg-primary/15 font-medium text-primary"
+                          : "border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground")
+                      }
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
                 <button
                   type="button"
                   onClick={() => setAptRange(null)}
-                  className="rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted/50"
-                  title="Follow the chart window again"
+                  disabled={!aptRange}
+                  className={
+                    "rounded-full border px-2 py-0.5 text-[10px] transition-colors " +
+                    (!aptRange
+                      ? "border-primary/40 bg-primary/15 font-medium text-primary"
+                      : "border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground")
+                  }
+                  title="Follow the chart window"
                 >
                   Match charts
                 </button>
-              )}
+              </div>
             </div>
           </div>
         </CardHeader>
