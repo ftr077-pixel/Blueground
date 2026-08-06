@@ -1855,6 +1855,20 @@ const RES_DEEP_LOOKBACK_DAYS = 365; // arrivals up to 12 months back
 // (see RESERVATION_DAYS), so a second forward window covers that tail.
 const RES_DEEP_HORIZON_DAYS = 365; // arrivals up to 12 months ahead
 
+/**
+ * Bump whenever a parser change makes stored reservation money different for
+ * the same MiniHotel payload. Stored rows are only as correct as the parser
+ * that wrote them, and the freshness window (6h) means a fix can sit unapplied
+ * on rows already on file — the group-total fix landed and the tab still showed
+ * the old ₪0 until someone re-synced by hand. ensureFreshReservations treats a
+ * version mismatch as "stale now", so the next money read re-reads the book.
+ *
+ *   1 — original
+ *   2 — group bookings: a zero per-room total means "priced on the booking",
+ *       so the booking-level total is distributed instead of dropped
+ */
+const RESERVATION_PARSER_VERSION = "2";
+
 export async function syncReservationsFromMiniHotel(opts: {
   from?: string;
   days?: number;
@@ -1974,6 +1988,10 @@ export async function syncReservationsFromMiniHotel(opts: {
       db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_synced_at', ?)")
         .run(new Date().toISOString());
       db.prepare("DELETE FROM meta WHERE key = 'reservations_sync_error'").run();
+      // Every row on file was just (re)written by THIS parser — record which one,
+      // so a later parser fix knows the stored money predates it.
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('reservations_parser_version', ?)")
+        .run(RESERVATION_PARSER_VERSION);
     } else {
       recordReservationSyncError(`partial sync — some windows failed: ${windowErrors.join("; ")}`);
     }
@@ -2107,11 +2125,21 @@ let resSyncLastAttempt = 0;
 export function ensureFreshReservations(): void {
   const maxAgeHours = Number(process.env.RESERVATIONS_MAX_AGE_HOURS ?? 6);
   if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0) return;
-  const row = getDb()
+  const db = getDb();
+  // Stored money is only as correct as the parser that wrote it. When the
+  // parser has moved on, rows on file are stale no matter how recently they
+  // synced — re-read the book instead of serving numbers a known fix would
+  // change. (Without this, the group-total fix left ₪0 rows on screen until
+  // someone re-synced by hand.)
+  const parserRow = db
+    .prepare("SELECT value FROM meta WHERE key = 'reservations_parser_version'")
+    .get() as { value: string } | undefined;
+  const parserStale = (parserRow?.value ?? "1") !== RESERVATION_PARSER_VERSION;
+  const row = db
     .prepare("SELECT value FROM meta WHERE key = 'reservations_synced_at'")
     .get() as { value: string } | undefined;
   const last = row ? Date.parse(row.value) : NaN;
-  if (Number.isFinite(last) && Date.now() - last < maxAgeHours * 3_600_000) return;
+  if (!parserStale && Number.isFinite(last) && Date.now() - last < maxAgeHours * 3_600_000) return;
   if (resSyncInFlight || Date.now() - resSyncLastAttempt < 10 * 60_000) return;
   resSyncLastAttempt = Date.now();
   resSyncInFlight = syncReservationsFromMiniHotel({})
