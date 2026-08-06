@@ -1248,7 +1248,16 @@ export function PacingPanel() {
                                           }
                                         >
                                           <td className="py-1 pr-2 font-mono text-[10px]">
-                                            {d.id}
+                                            <a
+                                              href={`/api/reservations/raw?id=${encodeURIComponent(d.id)}`}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="text-primary hover:underline"
+                                              title="Show MiniHotel's own XML for this booking (ground truth) next to what the parser read from it"
+                                            >
+                                              {d.id}
+                                            </a>
                                             {d.groupId && (
                                               <span className="ml-1 rounded bg-muted px-1 no-underline">group</span>
                                             )}
@@ -1294,6 +1303,9 @@ export function PacingPanel() {
                                       the table above sums that column. A currency other than ILS, VAT basis
                                       “assumed-none” on Israeli guests, or a gross that looks like a nightly/monthly
                                       rate instead of the stay total are the usual suspects when a figure is wrong.
+                                      <strong className="font-medium"> Click a reservation id</strong> to see
+                                      MiniHotel’s own XML for it — the ground truth behind the stored numbers,
+                                      including its current status (so a wrongly-cancelled booking shows up too).
                                     </p>
                                     {r.key !== "unassigned" && (
                                       <button
