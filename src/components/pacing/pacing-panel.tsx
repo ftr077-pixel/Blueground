@@ -67,6 +67,7 @@ interface ApartmentRevenueRow {
   vat: number;
   net: number;
   noCreatedOn: number;
+  zeroRevenue: number;
 }
 
 interface ApartmentRevenueReport {
@@ -1180,6 +1181,14 @@ export function PacingPanel() {
                             {r.apartment}
                             {r.roomType && r.apartment !== r.roomType && (
                               <span className="ml-1.5 text-[10px] text-muted-foreground">{r.roomType}</span>
+                            )}
+                            {r.zeroRevenue > 0 && (
+                              <span
+                                className="ml-1.5 rounded bg-[hsl(var(--danger))]/10 px-1 text-[10px] font-medium text-[hsl(var(--danger))]"
+                                title={`${r.zeroRevenue} counted stay(s) carry no revenue at all — usually a parse/feed problem, not a free stay. Open the row to see them.`}
+                              >
+                                {r.zeroRevenue} at ₪0
+                              </span>
                             )}
                             {r.noCreatedOn > 0 && (
                               <span

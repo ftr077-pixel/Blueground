@@ -158,16 +158,24 @@ export function parseReservations(xml: string): ParsedReservation[] {
       // ---- multi-room (group): one reservation per room ----------------------
       const nightsOf = (s: (typeof stays)[number]): number =>
         Math.max(0, daysBetween(s.arrival ?? arrival, s.departure ?? departure) ?? 0);
-      const known = stays.reduce((s, r) => s + (r.total ?? 0), 0);
-      const missingNights = stays.filter((r) => r.total == null).reduce((s, r) => s + nightsOf(r), 0);
+      // A room total of 0 means "no price on this room" (the money sits on the
+      // booking), not "this room is free" — counting those zeros as real prices
+      // left every room at 0 and dropped the booking's whole total. Only a
+      // POSITIVE per-room total is a real price. (Mirrors parseBookingsXml.)
+      const priced = (t: number | null): t is number => t != null && t > 0;
+      const known = stays.reduce((s, r) => s + (priced(r.total) ? r.total : 0), 0);
+      const unpricedNights = stays
+        .filter((r) => !priced(r.total))
+        .reduce((s, r) => s + nightsOf(r), 0);
       const leftover = globalTotal != null ? Math.max(0, globalTotal - known) : null;
       const memberSeen = new Set<string>();
       for (let i = 0; i < stays.length; i++) {
         const r = stays[i];
-        let roomTotal = r.total;
-        if (roomTotal == null && leftover != null && missingNights > 0) {
-          roomTotal = (leftover * nightsOf(r)) / missingNights;
+        let roomTotal = priced(r.total) ? r.total : null;
+        if (roomTotal == null && leftover != null && leftover > 0 && unpricedNights > 0) {
+          roomTotal = (leftover * nightsOf(r)) / unpricedNights;
         }
+        if (roomTotal == null) roomTotal = r.total;
         let member = r.serial || String(i + 1);
         while (memberSeen.has(member)) member += `-${i + 1}`;
         memberSeen.add(member);
