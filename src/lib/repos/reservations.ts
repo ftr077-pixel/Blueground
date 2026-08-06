@@ -616,6 +616,10 @@ export interface ApartmentRevenueRow {
   /** Counted rows still missing the real booking-creation date (their curve
    *  position falls back to sync time — a data-quality hint, not money). */
   noCreatedOn: number;
+  /** Counted stays that carry NO revenue at all. A live multi-night booking at
+   *  zero is almost always a parse/feed problem, not a free stay — surfaced so
+   *  missing money can't hide as a quietly-zero row. */
+  zeroRevenue: number;
 }
 
 export interface ApartmentRevenueReport {
@@ -703,6 +707,7 @@ export function revenueByApartment(from?: string | null, to?: string | null): Ap
         vat: 0,
         net: 0,
         noCreatedOn: 0,
+        zeroRevenue: 0,
       };
       acc.set(key, row);
     }
@@ -712,6 +717,7 @@ export function revenueByApartment(from?: string | null, to?: string | null): Ap
     row.gross += (r.gross ?? r.revenue) * share;
     row.vat += (r.vat ?? 0) * share;
     if (!r.created_on) row.noCreatedOn++;
+    if (r.revenue <= 0) row.zeroRevenue++;
     totals.reservations++;
     totals.nights += nightsIn;
     totals.net += net;

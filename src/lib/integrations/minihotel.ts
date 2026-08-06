@@ -1476,22 +1476,34 @@ function parseBookingsXml(xml: string): MiniReservation[] {
         const n = Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 86400000);
         return n > 0 ? n : 0;
       };
-      // Rooms without their own <Total> split what's left of the booking total
+      // Rooms without their own price split what's left of the booking total
       // (usually all of it — priced feeds put ALL money per room, unpriced ones
       // only on the booking) in proportion to their nights.
-      const known = stays.reduce((s, r) => s + (r.total ?? 0), 0);
-      const missing = stays.filter((r) => r.total == null);
-      const missingNights = missing.reduce((s, r) => s + nightsOf(r), 0);
+      //
+      // A room <Total AmountAfterTaxes="0"> means "no price on this room" (the
+      // money sits on the booking), NOT "this room is free". Counting those
+      // zeros as real prices made `known` = 0 while leaving NO room eligible for
+      // the leftover, so the booking's entire total was dropped and every room
+      // stored at 0 — long group stays showed ₪0 and their revenue vanished
+      // from every chart. Treat only a POSITIVE total as a real per-room price.
+      const priced = (t: number | null): t is number => t != null && t > 0;
+      const known = stays.reduce((s, r) => s + (priced(r.total) ? r.total : 0), 0);
+      const unpricedNights = stays
+        .filter((r) => !priced(r.total))
+        .reduce((s, r) => s + nightsOf(r), 0);
       const leftover = globalGross != null ? Math.max(0, globalGross - known) : null;
       const memberSeen = new Set<string>();
       for (let i = 0; i < stays.length; i++) {
         const r = stays[i];
         const a = r.arrival ?? checkIn;
         const b = r.departure ?? checkOut;
-        let gross = r.total;
-        if (gross == null && leftover != null && missingNights > 0) {
-          gross = (leftover * nightsOf(r)) / missingNights;
+        let gross = priced(r.total) ? r.total : null;
+        if (gross == null && leftover != null && leftover > 0 && unpricedNights > 0) {
+          gross = (leftover * nightsOf(r)) / unpricedNights;
         }
+        // Nothing to share out: keep whatever the room carried (a genuine 0
+        // stays 0; a missing total still drops the row, as before).
+        if (gross == null) gross = r.total;
         if (!a || !b || gross == null) continue; // no dates / no money — same drop rule as before
         let member = r.serial || r.roomNumber || String(i + 1);
         while (memberSeen.has(member)) member += `-${i + 1}`;
@@ -1515,10 +1527,12 @@ function parseBookingsXml(xml: string): MiniReservation[] {
 
     // ---- single room: the original whole-booking row -------------------------
     // Total precedence: booking-level total, else the room's own, else the first
-    // <Total> anywhere (non-standard shapes).
+    // <Total> anywhere (non-standard shapes). A zero booking-level total is
+    // "no price here", so a priced room still wins over it (same reasoning as
+    // the group path above).
     let gross = globalGross;
     let totalAttrs = globalTotal;
-    if (gross == null && stays[0]?.total != null) {
+    if ((gross == null || gross <= 0) && stays[0]?.total != null && stays[0].total > 0) {
       gross = stays[0].total;
       totalAttrs = stays[0].totalAttrs;
     }
@@ -1982,6 +1996,64 @@ export async function syncReservationsFromMiniHotel(opts: {
     sweepError,
     deepError,
     horizonError,
+  };
+}
+
+/**
+ * Raw-payload inspector: pull the arrival window around a stored reservation
+ * and return MiniHotel's own `<Booking>` block for it, decoded, next to what
+ * our parser makes of it. When a stored figure looks wrong, this is the ground
+ * truth — it shows exactly which totals the PMS sent and where they sit.
+ */
+export async function fetchRawBooking(
+  id: string,
+  opts: { from?: string; to?: string } = {},
+): Promise<{
+  id: string;
+  from: string;
+  to: string;
+  found: boolean;
+  raw: string | null;
+  parsed: MiniReservation[];
+  message?: string;
+}> {
+  const conn = getMiniHotelConnection();
+  const base = id.includes(":") ? id.slice(0, id.indexOf(":")) : id;
+  // Default the window from the stored row's check-in (the pull filters by
+  // arrival), so one narrow request finds the booking.
+  let from = opts.from;
+  let to = opts.to;
+  if (!from || !to) {
+    const row = getDb()
+      .prepare(
+        "SELECT check_in FROM reservation WHERE id = ? OR substr(id, 1, length(?) + 1) = ? || ':' LIMIT 1",
+      )
+      .get(base, base, base) as { check_in: string } | undefined;
+    const anchor = row?.check_in ?? todayLocal();
+    from = from ?? plusDays(anchor, -1);
+    to = to ?? plusDays(anchor, 1);
+  }
+  if (!conn.username || !conn.password || !conn.hotelId) {
+    return { id, from, to, found: false, raw: null, parsed: [], message: "MiniHotel connection isn't configured." };
+  }
+  const xml = decodeEntities(await fetchReservations(conn, from, to));
+  const re = /<Booking\b([^>]*)>([\s\S]*?)<\/Booking>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const bookingId =
+      attr(m[1], "Minihotel_reservation_id") || attr(m[1], "Portal_reservation_id") || "";
+    if (bookingId !== base) continue;
+    const raw = m[0];
+    return { id, from, to, found: true, raw, parsed: parseReservations(raw) };
+  }
+  return {
+    id,
+    from,
+    to,
+    found: false,
+    raw: null,
+    parsed: [],
+    message: `No <Booking> with id ${base} in arrivals ${from}→${to} — widen the window with ?from=&to=.`,
   };
 }
 
